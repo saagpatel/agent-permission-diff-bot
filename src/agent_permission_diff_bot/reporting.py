@@ -41,6 +41,8 @@ def render_markdown(report: PermissionDiffReport) -> str:
         f"- Base: `{report.base}`",
         f"- Head: `{report.head}`",
         f"- Findings: `{len(report.findings)}`",
+        f"- Gate findings: `{len(report.gate_findings)}`",
+        f"- Acknowledged findings: `{len(report.acknowledged_findings)}`",
         f"- Permission changes: `{len(report.changes)}`",
     ]
     if report.gate is not None:
@@ -60,9 +62,13 @@ def render_markdown(report: PermissionDiffReport) -> str:
     if report.findings:
         lines.extend(["## Findings", ""])
         for finding in report.findings:
+            acknowledgement_label = " (acknowledged)" if finding.acknowledged else ""
             lines.extend(
                 [
-                    f"### {finding.severity.label().upper()} {finding.rule_id}: {finding.title}",
+                    (
+                        f"### {finding.severity.label().upper()} {finding.rule_id}: "
+                        f"{finding.title}{acknowledgement_label}"
+                    ),
                     "",
                     finding.summary,
                     "",
@@ -70,6 +76,11 @@ def render_markdown(report: PermissionDiffReport) -> str:
                     "",
                 ]
             )
+            if finding.acknowledgement is not None:
+                lines.append(f"Acknowledgement: {finding.acknowledgement.reason}")
+                if finding.acknowledgement.expires is not None:
+                    lines.append(f"Expires: `{finding.acknowledgement.expires}`")
+                lines.append("")
             if finding.evidence:
                 lines.append("Evidence:")
                 lines.extend(f"- {item}" for item in finding.evidence[:8])
@@ -118,6 +129,7 @@ def render_sarif(report: PermissionDiffReport) -> dict[str, object]:
                 "properties": {
                     "confidence": finding.confidence,
                     "reviewerDecision": finding.reviewer_decision,
+                    "acknowledged": finding.acknowledged,
                 },
             }
         )
