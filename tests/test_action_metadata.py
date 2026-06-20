@@ -30,3 +30,4 @@ def test_action_supports_sticky_pull_request_comments() -> None:
     assert "COMMENT: ${{ inputs.comment }}" in text
     assert "repos/${GITHUB_REPOSITORY}/issues/${EVENT_PR_NUMBER}/comments" in text
     assert "comment_status=0" in text
+    assert "pull-requests: write permissions" in text

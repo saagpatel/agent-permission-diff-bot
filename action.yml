@@ -39,7 +39,7 @@ inputs:
     required: false
     default: "true"
   comment:
-    description: "Create or update a sticky pull request comment with the Markdown report. Requires issues: write."
+    description: "Create or update a sticky pull request comment with the Markdown report. Requires issues: write and may require pull-requests: write."
     required: false
     default: "false"
   upload-sarif:
@@ -193,7 +193,7 @@ runs:
               fi
 
               if [ "${comment_status}" -ne 0 ]; then
-                echo "::warning title=Agent Permission Diff::PR comment update failed. Check GITHUB_TOKEN issues: write permission."
+                echo "::warning title=Agent Permission Diff::PR comment update failed. Check GITHUB_TOKEN issues: write and pull-requests: write permissions."
               fi
             fi
           fi
