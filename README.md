@@ -73,19 +73,20 @@ steps:
 ```
 
 To also create or update a sticky pull request comment, opt in with `comment: "true"`
-and grant `issues: write` to the scanning job:
+and grant `issues: write` and `pull-requests: write` to the scanning job:
 
 ```yaml
 permissions:
   contents: read
   issues: write # only needed when comment is true
+  pull-requests: write # needed by some PR comment runs
 
 steps:
   - uses: actions/checkout@v6
     with:
       fetch-depth: 0
 
-  - uses: saagpatel/agent-permission-diff-bot@v0.2.0
+  - uses: saagpatel/agent-permission-diff-bot@v0.2.1
     with:
       mode: observe
       comment: "true"
