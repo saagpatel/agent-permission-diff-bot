@@ -70,6 +70,12 @@ outputs:
   findings-count:
     description: "Number of findings from the JSON report."
     value: ${{ steps.scan.outputs.findings-count }}
+  gate-status:
+    description: "Gate decision status: observe, pass, warn, or fail."
+    value: ${{ steps.scan.outputs.gate-status }}
+  gate-threshold-met:
+    description: "Whether the maximum finding severity met the fail-on threshold."
+    value: ${{ steps.scan.outputs.gate-threshold-met }}
 
 runs:
   using: composite
@@ -145,11 +151,16 @@ runs:
         payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
         print(f"max-severity={payload.get('max_severity') or ''}")
         print(f"findings-count={len(payload.get('findings', []))}")
+        gate = payload.get("gate") or {}
+        print(f"gate-status={gate.get('status') or ''}")
+        print(f"gate-threshold-met={str(gate.get('threshold_met', '')).lower()}")
         PY
         else
           {
             echo "max-severity="
             echo "findings-count="
+            echo "gate-status="
+            echo "gate-threshold-met="
           } >> "${GITHUB_OUTPUT}"
         fi
 

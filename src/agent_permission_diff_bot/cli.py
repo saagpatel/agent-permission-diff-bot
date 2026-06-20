@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 
 from agent_permission_diff_bot.engine import build_report
+from agent_permission_diff_bot.gating import evaluate_gate
 from agent_permission_diff_bot.model import Severity
 from agent_permission_diff_bot.reporting import (
     append_step_summary,
@@ -44,6 +45,8 @@ def _run_diff(args: argparse.Namespace) -> int:
         head_label, head_files = read_dir_snapshot(Path(args.head_dir).resolve())
 
     report = build_report(base_label, base_files, head_label, head_files)
+    threshold = Severity.parse(args.fail_on)
+    report.gate = evaluate_gate(report, args.mode, threshold)
     if args.json:
         write_json(report, Path(args.json))
     if args.markdown:
@@ -58,11 +61,7 @@ def _run_diff(args: argparse.Namespace) -> int:
     if not args.json and not args.markdown and not args.sarif and not args.step_summary:
         print(render_markdown(report))
 
-    threshold = Severity.parse(args.fail_on)
-    should_gate = args.mode in {"warn", "enforce"} and report.max_severity is not None
-    if should_gate and report.max_severity >= threshold:
-        return 2
-    return 0
+    return report.gate.exit_code
 
 
 def _build_parser() -> argparse.ArgumentParser:

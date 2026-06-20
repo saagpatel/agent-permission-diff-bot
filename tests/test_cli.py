@@ -104,3 +104,73 @@ def test_warn_mode_exits_two_at_threshold(tmp_path: Path) -> None:
     )
 
     assert code == 2
+
+
+def test_observe_mode_records_gate_without_failing(tmp_path: Path) -> None:
+    base = tmp_path / "base"
+    head = tmp_path / "head"
+    base.mkdir()
+    head.mkdir()
+    (head / ".mcp.json").write_text(
+        '{"mcpServers":{"x":{"headers":{"Authorization":"${TOKEN}"},"tools":["*"]}}}',
+        encoding="utf-8",
+    )
+    output = tmp_path / "report.json"
+
+    code = main(
+        [
+            "diff",
+            "--base-dir",
+            str(base),
+            "--head-dir",
+            str(head),
+            "--json",
+            str(output),
+            "--mode",
+            "observe",
+            "--fail-on",
+            "high",
+        ]
+    )
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert code == 0
+    assert payload["gate"]["mode"] == "observe"
+    assert payload["gate"]["status"] == "observe"
+    assert payload["gate"]["threshold_met"] is True
+    assert payload["gate"]["exit_code"] == 0
+
+
+def test_enforce_mode_records_fail_gate_at_threshold(tmp_path: Path) -> None:
+    base = tmp_path / "base"
+    head = tmp_path / "head"
+    base.mkdir()
+    head.mkdir()
+    (head / ".mcp.json").write_text(
+        '{"mcpServers":{"x":{"headers":{"Authorization":"${TOKEN}"},"tools":["*"]}}}',
+        encoding="utf-8",
+    )
+    output = tmp_path / "report.json"
+
+    code = main(
+        [
+            "diff",
+            "--base-dir",
+            str(base),
+            "--head-dir",
+            str(head),
+            "--json",
+            str(output),
+            "--mode",
+            "enforce",
+            "--fail-on",
+            "high",
+        ]
+    )
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert code == 2
+    assert payload["gate"]["mode"] == "enforce"
+    assert payload["gate"]["status"] == "fail"
+    assert payload["gate"]["threshold_met"] is True
+    assert payload["gate"]["exit_code"] == 2
