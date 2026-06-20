@@ -10,6 +10,7 @@ def test_action_metadata_shape() -> None:
 
     assert action["runs"]["using"] == "composite"
     assert action["inputs"]["mode"]["default"] == "observe"
+    assert action["inputs"]["policy"]["default"] == ""
     assert action["inputs"]["comment"]["default"] == "false"
     assert action["inputs"]["upload-sarif"]["default"] == "false"
     assert "json-file" in action["outputs"]

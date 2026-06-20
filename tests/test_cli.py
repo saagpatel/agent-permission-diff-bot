@@ -174,3 +174,111 @@ def test_enforce_mode_records_fail_gate_at_threshold(tmp_path: Path) -> None:
     assert payload["gate"]["status"] == "fail"
     assert payload["gate"]["threshold_met"] is True
     assert payload["gate"]["exit_code"] == 2
+
+
+def test_policy_acknowledgement_keeps_finding_visible_but_unblocks_gate(
+    tmp_path: Path,
+) -> None:
+    base = tmp_path / "base"
+    head = tmp_path / "head"
+    base.mkdir()
+    head.mkdir()
+    (head / ".mcp.json").write_text(
+        '{"mcpServers":{"x":{"headers":{"Authorization":"${TOKEN}"},"tools":["*"]}}}',
+        encoding="utf-8",
+    )
+    policy = tmp_path / ".agent-permission-diff.yml"
+    policy.write_text(
+        """
+acknowledgements:
+  - rule_id: APD004
+    paths:
+      - .mcp.json
+    reason: Broad tool access is intentionally limited to a local read-only test server.
+    expires: "2999-12-31"
+  - rule_id: APD101
+    paths:
+      - .mcp.json
+    reason: Credential use is intentionally limited to a local read-only test server.
+    expires: "2999-12-31"
+""",
+        encoding="utf-8",
+    )
+    output = tmp_path / "report.json"
+
+    code = main(
+        [
+            "diff",
+            "--base-dir",
+            str(base),
+            "--head-dir",
+            str(head),
+            "--json",
+            str(output),
+            "--mode",
+            "enforce",
+            "--fail-on",
+            "high",
+            "--policy",
+            str(policy),
+        ]
+    )
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    finding = next(item for item in payload["findings"] if item["rule_id"] == "APD004")
+    assert code == 0
+    assert finding["acknowledged"] is True
+    assert finding["acknowledgement"]["reason"].startswith("Broad tool access")
+    assert payload["acknowledged_findings_count"] == 2
+    assert payload["gate_findings_count"] == 0
+    assert payload["gate"]["status"] == "pass"
+    assert payload["gate"]["reason"] == "All findings were acknowledged by policy."
+
+
+def test_expired_policy_acknowledgement_does_not_unblock_gate(tmp_path: Path) -> None:
+    base = tmp_path / "base"
+    head = tmp_path / "head"
+    base.mkdir()
+    head.mkdir()
+    (head / ".mcp.json").write_text(
+        '{"mcpServers":{"x":{"headers":{"Authorization":"${TOKEN}"},"tools":["*"]}}}',
+        encoding="utf-8",
+    )
+    policy = tmp_path / ".agent-permission-diff.yml"
+    policy.write_text(
+        """
+acknowledgements:
+  - rule_id: APD004
+    paths:
+      - .mcp.json
+    reason: This acknowledgement is intentionally expired for test coverage.
+    expires: "2000-01-01"
+""",
+        encoding="utf-8",
+    )
+    output = tmp_path / "report.json"
+
+    code = main(
+        [
+            "diff",
+            "--base-dir",
+            str(base),
+            "--head-dir",
+            str(head),
+            "--json",
+            str(output),
+            "--mode",
+            "enforce",
+            "--fail-on",
+            "high",
+            "--policy",
+            str(policy),
+        ]
+    )
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    finding = next(item for item in payload["findings"] if item["rule_id"] == "APD004")
+    assert code == 2
+    assert finding["acknowledged"] is False
+    assert payload["acknowledged_findings_count"] == 0
+    assert payload["gate_findings_count"] >= 1

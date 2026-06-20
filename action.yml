@@ -22,6 +22,10 @@ inputs:
     description: "Minimum severity that exits 2 in warn/enforce mode."
     required: false
     default: critical
+  policy:
+    description: "Optional YAML policy file containing acknowledgement entries."
+    required: false
+    default: ""
   json:
     description: "JSON report output path. Empty disables JSON output."
     required: false
@@ -98,6 +102,7 @@ runs:
         HEAD_REF_INPUT: ${{ inputs.head-ref }}
         MODE: ${{ inputs.mode }}
         FAIL_ON: ${{ inputs.fail-on }}
+        POLICY_PATH: ${{ inputs.policy }}
         JSON_PATH: ${{ inputs.json }}
         SARIF_PATH: ${{ inputs.sarif }}
         MARKDOWN_PATH: ${{ inputs.markdown }}
@@ -121,6 +126,7 @@ runs:
 
         args=(diff --repo . --base-ref "${base_ref}" --head-ref "${head_ref}")
         args+=(--mode "${MODE}" --fail-on "${FAIL_ON}")
+        [ -n "${POLICY_PATH}" ] && args+=(--policy "${POLICY_PATH}")
         [ -n "${JSON_PATH}" ] && args+=(--json "${JSON_PATH}")
         [ -n "${SARIF_PATH}" ] && args+=(--sarif "${SARIF_PATH}")
         [ -n "${MARKDOWN_PATH}" ] && args+=(--markdown "${MARKDOWN_PATH}")

@@ -8,10 +8,19 @@ def evaluate_gate(
     mode: GateMode,
     fail_on: Severity,
 ) -> GateDecision:
-    max_severity = report.max_severity
+    max_severity = report.max_gate_severity
     threshold_met = max_severity is not None and max_severity >= fail_on
 
     if max_severity is None:
+        if report.findings and report.acknowledged_findings:
+            return GateDecision(
+                mode=mode,
+                fail_on=fail_on,
+                threshold_met=False,
+                status="pass",
+                exit_code=0,
+                reason="All findings were acknowledged by policy.",
+            )
         return GateDecision(
             mode=mode,
             fail_on=fail_on,
