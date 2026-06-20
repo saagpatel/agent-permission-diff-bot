@@ -55,6 +55,22 @@ JSON and Markdown reports include the evaluated gate decision: mode, `fail_on`,
 whether the threshold was met, status, exit code, and reason. The composite Action also
 exposes `gate-status` and `gate-threshold-met` outputs for workflow wiring.
 
+Acknowledgement policy:
+
+```yaml
+acknowledgements:
+  - rule_id: APD001
+    paths:
+      - .github/workflows/agent-runner.yml
+    reason: Self-hosted runner is protected by repository-only triggers and runner groups.
+    expires: "2026-12-31"
+```
+
+Pass the file with `--policy .agent-permission-diff.yml` or the Action `policy` input.
+Acknowledged findings stay visible in JSON, Markdown, SARIF, and PR comments, but are
+excluded from gate decisions. Each acknowledgement must match the finding rule and all
+finding paths; expired acknowledgements are ignored.
+
 ## GitHub Action
 
 The composite action expects the repository to be checked out with enough history to
@@ -90,7 +106,7 @@ steps:
     with:
       fetch-depth: 0
 
-  - uses: saagpatel/agent-permission-diff-bot@v0.3.0
+  - uses: saagpatel/agent-permission-diff-bot@v0.4.0
     with:
       mode: observe
       comment: "true"

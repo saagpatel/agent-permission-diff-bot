@@ -7,6 +7,7 @@ from pathlib import Path
 from agent_permission_diff_bot.engine import build_report
 from agent_permission_diff_bot.gating import evaluate_gate
 from agent_permission_diff_bot.model import Severity
+from agent_permission_diff_bot.policy import PolicyError, apply_policy_file
 from agent_permission_diff_bot.reporting import (
     append_step_summary,
     render_markdown,
@@ -45,6 +46,11 @@ def _run_diff(args: argparse.Namespace) -> int:
         head_label, head_files = read_dir_snapshot(Path(args.head_dir).resolve())
 
     report = build_report(base_label, base_files, head_label, head_files)
+    if args.policy:
+        try:
+            apply_policy_file(report, Path(args.policy))
+        except PolicyError as exc:
+            raise SystemExit(str(exc)) from exc
     threshold = Severity.parse(args.fail_on)
     report.gate = evaluate_gate(report, args.mode, threshold)
     if args.json:
@@ -89,6 +95,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Append step-summary Markdown to this path instead of $GITHUB_STEP_SUMMARY.",
     )
     diff.add_argument("--mode", choices=("observe", "warn", "enforce"), default="observe")
+    diff.add_argument(
+        "--policy",
+        help=(
+            "Optional YAML policy file with acknowledgement entries that keep findings "
+            "visible but exclude matched findings from gate decisions."
+        ),
+    )
     diff.add_argument(
         "--fail-on",
         choices=("critical", "high", "medium", "low"),
