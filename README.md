@@ -45,11 +45,15 @@ agent-permission-diff diff \
 
 Gate modes:
 
-- `observe`: always exits 0.
-- `warn`: exits 2 only when findings meet `--fail-on`.
-- `enforce`: same gate behavior as `warn`, intended for stricter policy files later.
+- `observe`: records whether the threshold was met but always exits 0.
+- `warn`: exits 2 when findings meet `--fail-on`; intended for soft rollout checks.
+- `enforce`: exits 2 when findings meet `--fail-on`; intended for required checks.
 
 Default gate threshold is `critical`.
+
+JSON and Markdown reports include the evaluated gate decision: mode, `fail_on`,
+whether the threshold was met, status, exit code, and reason. The composite Action also
+exposes `gate-status` and `gate-threshold-met` outputs for workflow wiring.
 
 ## GitHub Action
 
@@ -86,7 +90,7 @@ steps:
     with:
       fetch-depth: 0
 
-  - uses: saagpatel/agent-permission-diff-bot@v0.2.1
+  - uses: saagpatel/agent-permission-diff-bot@v0.3.0
     with:
       mode: observe
       comment: "true"
