@@ -1,0 +1,106 @@
+name: Acknowledgement Dogfood
+
+on:
+  pull_request:
+    paths:
+      - action.yml
+      - .github/workflows/acknowledgement-dogfood.yml
+      - src/agent_permission_diff_bot/**
+      - tests/**
+      - pyproject.toml
+      - uv.lock
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  acknowledgement-policy:
+    name: Enforce mode with acknowledged findings
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Build synthetic permission diff
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dogfood/repo
+          cd dogfood/repo
+
+          git init
+          git config user.email "agent-permission-diff@example.invalid"
+          git config user.name "Agent Permission Diff Dogfood"
+          git commit --allow-empty -m "base"
+          git tag base
+
+          cat > .mcp.json <<'JSON'
+          {
+            "mcpServers": {
+              "local-test": {
+                "headers": {
+                  "Authorization": "${DOGFOOD_TOKEN}"
+                },
+                "tools": ["*"]
+              }
+            }
+          }
+          JSON
+
+          cat > .agent-permission-diff.yml <<'YAML'
+          acknowledgements:
+            - rule_id: APD004
+              paths:
+                - .mcp.json
+              reason: Synthetic dogfood server intentionally exposes broad tools.
+              expires: "2999-12-31"
+            - rule_id: APD101
+              paths:
+                - .mcp.json
+              reason: Synthetic dogfood credential reference is intentionally inert.
+              expires: "2999-12-31"
+          YAML
+
+          git add .mcp.json .agent-permission-diff.yml
+          git commit -m "head"
+          git tag head
+
+      - name: Run local action with acknowledgement policy
+        id: acknowledged
+        uses: ./
+        with:
+          working-directory: dogfood/repo
+          base-ref: base
+          head-ref: head
+          mode: enforce
+          fail-on: high
+          policy: .agent-permission-diff.yml
+          json: agent-permission-diff.json
+          markdown: agent-permission-diff.md
+          sarif: ""
+          step-summary: "true"
+          comment: "false"
+          upload-sarif: "false"
+
+      - name: Assert acknowledged gate behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${{ steps.acknowledged.outputs.exit-code }}" = "0"
+          test "${{ steps.acknowledged.outputs.gate-status }}" = "pass"
+          test "${{ steps.acknowledged.outputs.gate-threshold-met }}" = "false"
+          python - <<'PY'
+          import json
+          from pathlib import Path
+
+          payload = json.loads(
+              Path("dogfood/repo/agent-permission-diff.json").read_text(encoding="utf-8")
+          )
+          assert payload["max_severity"] == "high"
+          assert payload["max_gate_severity"] is None
+          assert payload["acknowledged_findings_count"] == 2
+          assert payload["gate_findings_count"] == 0
+          assert payload["gate"]["status"] == "pass"
+          assert all(finding["acknowledged"] for finding in payload["findings"])
+          PY
