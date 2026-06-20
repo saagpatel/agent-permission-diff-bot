@@ -42,8 +42,20 @@ def render_markdown(report: PermissionDiffReport) -> str:
         f"- Head: `{report.head}`",
         f"- Findings: `{len(report.findings)}`",
         f"- Permission changes: `{len(report.changes)}`",
-        "",
     ]
+    if report.gate is not None:
+        gate = report.gate
+        lines.extend(
+            [
+                f"- Gate: `{gate.status}` in `{gate.mode}` mode",
+                f"- Fail on: `{gate.fail_on.label()}`",
+                f"- Exit code: `{gate.exit_code}`",
+            ]
+        )
+    lines.append("")
+
+    if report.gate is not None:
+        lines.extend(["## Gate Decision", "", report.gate.reason, ""])
 
     if report.findings:
         lines.extend(["## Findings", ""])

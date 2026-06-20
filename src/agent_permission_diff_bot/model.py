@@ -5,6 +5,8 @@ from enum import IntEnum
 from typing import Any, Literal
 
 DiffKind = Literal["added", "removed", "unchanged"]
+GateMode = Literal["observe", "warn", "enforce"]
+GateStatus = Literal["observe", "pass", "warn", "fail"]
 
 
 class Severity(IntEnum):
@@ -95,12 +97,33 @@ class Finding:
         }
 
 
+@dataclass(frozen=True)
+class GateDecision:
+    mode: GateMode
+    fail_on: Severity
+    threshold_met: bool
+    status: GateStatus
+    exit_code: int
+    reason: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "mode": self.mode,
+            "fail_on": self.fail_on.label(),
+            "threshold_met": self.threshold_met,
+            "status": self.status,
+            "exit_code": self.exit_code,
+            "reason": self.reason,
+        }
+
+
 @dataclass
 class PermissionDiffReport:
     base: str
     head: str
     changes: list[PermissionChange]
     findings: list[Finding]
+    gate: GateDecision | None = None
 
     @property
     def max_severity(self) -> Severity | None:
@@ -109,10 +132,13 @@ class PermissionDiffReport:
         return max(finding.severity for finding in self.findings)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "base": self.base,
             "head": self.head,
             "max_severity": self.max_severity.label() if self.max_severity else None,
             "changes": [change.to_dict() for change in self.changes],
             "findings": [finding.to_dict() for finding in self.findings],
         }
+        if self.gate is not None:
+            payload["gate"] = self.gate.to_dict()
+        return payload

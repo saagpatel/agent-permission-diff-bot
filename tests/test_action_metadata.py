@@ -13,6 +13,8 @@ def test_action_metadata_shape() -> None:
     assert action["inputs"]["comment"]["default"] == "false"
     assert action["inputs"]["upload-sarif"]["default"] == "false"
     assert "json-file" in action["outputs"]
+    assert "gate-status" in action["outputs"]
+    assert "gate-threshold-met" in action["outputs"]
 
 
 def test_action_preserves_scan_exit_code_after_outputs() -> None:
