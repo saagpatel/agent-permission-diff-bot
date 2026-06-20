@@ -1,0 +1,150 @@
+name: Agent Permission Diff
+description: "Detect and explain agent-facing permission changes in pull requests."
+author: saagpatel
+branding:
+  icon: shield
+  color: blue
+
+inputs:
+  base-ref:
+    description: "Base Git ref or SHA. Defaults to the pull request base SHA when available."
+    required: false
+    default: ""
+  head-ref:
+    description: "Head Git ref or SHA. Defaults to the pull request head SHA or current SHA."
+    required: false
+    default: ""
+  mode:
+    description: "Gate mode: observe, warn, or enforce."
+    required: false
+    default: observe
+  fail-on:
+    description: "Minimum severity that exits 2 in warn/enforce mode."
+    required: false
+    default: critical
+  json:
+    description: "JSON report output path. Empty disables JSON output."
+    required: false
+    default: agent-permission-diff.json
+  sarif:
+    description: "SARIF 2.1.0 output path. Empty disables SARIF output."
+    required: false
+    default: agent-permission-diff.sarif
+  markdown:
+    description: "Markdown report output path. Empty disables Markdown artifact output."
+    required: false
+    default: ""
+  step-summary:
+    description: "Append the Markdown report to the GitHub Actions step summary."
+    required: false
+    default: "true"
+  upload-sarif:
+    description: "Upload SARIF to GitHub code scanning. Requires security-events: write."
+    required: false
+    default: "false"
+  working-directory:
+    description: "Repository working directory to scan."
+    required: false
+    default: "."
+
+outputs:
+  json-file:
+    description: "Path to the JSON report."
+    value: ${{ steps.scan.outputs.json-file }}
+  sarif-file:
+    description: "Path to the SARIF report."
+    value: ${{ steps.scan.outputs.sarif-file }}
+  markdown-file:
+    description: "Path to the Markdown report."
+    value: ${{ steps.scan.outputs.markdown-file }}
+  exit-code:
+    description: "agent-permission-diff exit code."
+    value: ${{ steps.scan.outputs.exit-code }}
+  max-severity:
+    description: "Maximum finding severity from the JSON report."
+    value: ${{ steps.scan.outputs.max-severity }}
+  findings-count:
+    description: "Number of findings from the JSON report."
+    value: ${{ steps.scan.outputs.findings-count }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v6
+      with:
+        python-version: "3.x"
+
+    - name: Install Agent Permission Diff
+      shell: bash
+      run: python -m pip install "$GITHUB_ACTION_PATH"
+
+    - name: Scan agent-facing permission diff
+      id: scan
+      shell: bash
+      working-directory: ${{ inputs.working-directory }}
+      env:
+        BASE_REF_INPUT: ${{ inputs.base-ref }}
+        HEAD_REF_INPUT: ${{ inputs.head-ref }}
+        MODE: ${{ inputs.mode }}
+        FAIL_ON: ${{ inputs.fail-on }}
+        JSON_PATH: ${{ inputs.json }}
+        SARIF_PATH: ${{ inputs.sarif }}
+        MARKDOWN_PATH: ${{ inputs.markdown }}
+        STEP_SUMMARY: ${{ inputs.step-summary }}
+        EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        CURRENT_SHA: ${{ github.sha }}
+      run: |
+        set -uo pipefail
+
+        base_ref="${BASE_REF_INPUT:-${EVENT_BASE_SHA}}"
+        head_ref="${HEAD_REF_INPUT:-${EVENT_HEAD_SHA:-${CURRENT_SHA}}}"
+
+        if [ -z "${base_ref}" ] || [ -z "${head_ref}" ]; then
+          echo "::error title=Agent Permission Diff::base-ref and head-ref could not be inferred."
+          exit 1
+        fi
+
+        args=(diff --repo . --base-ref "${base_ref}" --head-ref "${head_ref}")
+        args+=(--mode "${MODE}" --fail-on "${FAIL_ON}")
+        [ -n "${JSON_PATH}" ] && args+=(--json "${JSON_PATH}")
+        [ -n "${SARIF_PATH}" ] && args+=(--sarif "${SARIF_PATH}")
+        [ -n "${MARKDOWN_PATH}" ] && args+=(--markdown "${MARKDOWN_PATH}")
+        [ "${STEP_SUMMARY}" = "true" ] && args+=(--step-summary)
+
+        printf '+ agent-permission-diff'; printf ' %q' "${args[@]}"; printf '\n'
+        agent-permission-diff "${args[@]}"
+        code=$?
+
+        {
+          echo "exit-code=${code}"
+          echo "json-file=${JSON_PATH}"
+          echo "sarif-file=${SARIF_PATH}"
+          echo "markdown-file=${MARKDOWN_PATH}"
+        } >> "${GITHUB_OUTPUT}"
+
+        if [ -n "${JSON_PATH}" ] && [ -f "${JSON_PATH}" ]; then
+          python - "$JSON_PATH" >> "${GITHUB_OUTPUT}" <<'PY'
+        import json
+        import sys
+        from pathlib import Path
+
+        payload = json.loads(Path(sys.argv[1]).read_text(encoding="utf-8"))
+        print(f"max-severity={payload.get('max_severity') or ''}")
+        print(f"findings-count={len(payload.get('findings', []))}")
+        PY
+        else
+          {
+            echo "max-severity="
+            echo "findings-count="
+          } >> "${GITHUB_OUTPUT}"
+        fi
+
+        exit "${code}"
+
+    - name: Upload SARIF to code scanning
+      if: ${{ always() && inputs.upload-sarif == 'true' && inputs.sarif != '' }}
+      uses: github/codeql-action/upload-sarif@v4
+      with:
+        sarif_file: ${{ inputs.working-directory }}/${{ steps.scan.outputs.sarif-file }}
