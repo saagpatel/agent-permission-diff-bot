@@ -4,8 +4,8 @@ Agent Permission Diff Bot detects and explains changes to agent-facing permissio
 pull requests. It is a semantic correlator, not just a config linter: the useful signal is
 when a PR changes what an agent can read, write, deploy, reach, or trust.
 
-The first dogfood target is local CLI usage against Git refs or two checked-out trees.
-GitHub Action packaging is the next wrapper layer.
+The first dogfood target is local CLI usage against Git refs or two checked-out trees,
+with a composite GitHub Action for pull request scanning.
 
 ## Current Surfaces
 
@@ -72,5 +72,25 @@ steps:
       upload-sarif: "false"
 ```
 
-For a same-repository dogfood workflow, point `uses:` at this repository once it has a
-remote, for example `saagpatel/agent-permission-diff-bot@v0`.
+To also create or update a sticky pull request comment, opt in with `comment: "true"`
+and grant `issues: write` to the scanning job:
+
+```yaml
+permissions:
+  contents: read
+  issues: write # only needed when comment is true
+
+steps:
+  - uses: actions/checkout@v6
+    with:
+      fetch-depth: 0
+
+  - uses: saagpatel/agent-permission-diff-bot@v0.2.0
+    with:
+      mode: observe
+      comment: "true"
+      upload-sarif: "false"
+```
+
+The action preserves the scanner exit code if PR commenting fails, and emits a workflow
+warning instead of masking the permission-diff result.
