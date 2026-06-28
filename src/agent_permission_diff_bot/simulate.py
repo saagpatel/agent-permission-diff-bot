@@ -21,6 +21,7 @@ InputKind = Literal[
     "subagent",
     "hook_policy",
     "scenario",
+    "probe",
 ]
 
 CAPABILITIES: tuple[CapabilityName, ...] = (
@@ -93,6 +94,17 @@ ScenarioName = Literal[
     "claude-subagent-inherited-bypass",
     "hook-policy-bypass-gap",
 ]
+
+SUPPORTED_PROBES: dict[str, dict[str, str]] = {
+    "github-actions-readonly": {
+        "name": "github-actions-readonly",
+        "title": "GitHub Actions Read-Only Metadata",
+        "description": (
+            "Consumes a supplied GitHub Actions metadata snapshot and records check/run "
+            "status as live-probe evidence without calling GitHub."
+        ),
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -285,6 +297,7 @@ class SimulationReport:
     inputs: list[SimulationInput]
     capabilities: dict[CapabilityName, CapabilityAssessment]
     deterministic_evidence: list[str]
+    live_probe_evidence: list[str]
     live_probe_needed: list[str]
 
     def to_dict(self) -> dict[str, Any]:
@@ -295,6 +308,7 @@ class SimulationReport:
             "inputs": [item.to_dict() for item in self.inputs],
             "capabilities": {name: self.capabilities[name].to_dict() for name in CAPABILITIES},
             "deterministic_evidence": self.deterministic_evidence,
+            "live_probe_evidence": self.live_probe_evidence,
             "live_probe_needed": self.live_probe_needed,
         }
 
@@ -304,6 +318,7 @@ class SimulationBuilder:
         self.inputs: list[SimulationInput] = []
         self.capabilities = {name: CapabilityAssessment(capability=name) for name in CAPABILITIES}
         self.deterministic_evidence: list[str] = []
+        self.live_probe_evidence: list[str] = []
         self.live_probe_needed: list[str] = []
 
     def add_input(
@@ -330,6 +345,10 @@ class SimulationBuilder:
         if evidence and evidence not in self.deterministic_evidence:
             self.deterministic_evidence.append(evidence)
 
+    def add_live_probe_evidence(self, evidence: str) -> None:
+        if evidence and evidence not in self.live_probe_evidence:
+            self.live_probe_evidence.append(evidence)
+
     def add_gap(self, gap: str) -> None:
         if gap and gap not in self.live_probe_needed:
             self.live_probe_needed.append(gap)
@@ -345,6 +364,7 @@ class SimulationBuilder:
             inputs=self.inputs,
             capabilities=self.capabilities,
             deterministic_evidence=self.deterministic_evidence,
+            live_probe_evidence=self.live_probe_evidence,
             live_probe_needed=self.live_probe_needed,
         )
 
@@ -358,6 +378,8 @@ def build_simulation(
     subagent_text: str | None = None,
     hook_policy_text: str | None = None,
     scenarios: tuple[str, ...] = (),
+    probes: tuple[str, ...] = (),
+    github_actions_probe_json_text: str | None = None,
 ) -> SimulationReport:
     builder = SimulationBuilder()
     for scenario in scenarios:
@@ -374,6 +396,12 @@ def build_simulation(
         _analyze_subagent(builder, subagent_text)
     if hook_policy_text:
         _analyze_hook_policy(builder, hook_policy_text)
+    for probe in probes:
+        _analyze_probe(
+            builder,
+            probe,
+            github_actions_probe_json_text=github_actions_probe_json_text,
+        )
     if not builder.inputs:
         builder.add_gap("No simulation inputs were supplied.")
     if not any(assessment.level != "no" for assessment in builder.capabilities.values()):
@@ -383,6 +411,10 @@ def build_simulation(
 
 def list_simulation_scenarios() -> list[dict[str, str]]:
     return [fixture.to_dict() for fixture in SCENARIO_FIXTURES.values()]
+
+
+def list_simulation_probes() -> list[dict[str, str]]:
+    return list(SUPPORTED_PROBES.values())
 
 
 def write_simulation_json(report: SimulationReport, path: Path) -> None:
@@ -421,6 +453,12 @@ def render_simulation_markdown(report: SimulationReport) -> str:
     lines.extend(["", "## Deterministic Evidence", ""])
     if report.deterministic_evidence:
         lines.extend(f"- {item}" for item in report.deterministic_evidence)
+    else:
+        lines.append("- None.")
+
+    lines.extend(["", "## Live Probe Evidence", ""])
+    if report.live_probe_evidence:
+        lines.extend(f"- {item}" for item in report.live_probe_evidence)
     else:
         lines.append("- None.")
 
@@ -465,6 +503,69 @@ def _analyze_scenario(builder: SimulationBuilder, name: str) -> None:
         _analyze_subagent(builder, fixture.subagent_text)
     if fixture.hook_policy_text:
         _analyze_hook_policy(builder, fixture.hook_policy_text)
+
+
+def _analyze_probe(
+    builder: SimulationBuilder,
+    name: str,
+    *,
+    github_actions_probe_json_text: str | None,
+) -> None:
+    if name not in SUPPORTED_PROBES:
+        builder.add_input(
+            "probe",
+            name,
+            status="unknown",
+            notes=("Probe was not recognized; no live lookup was attempted.",),
+        )
+        builder.add_gap(f"Unknown probe `{name}` was requested; no live lookup was attempted.")
+        return
+
+    if name == "github-actions-readonly":
+        _analyze_github_actions_readonly_probe(builder, github_actions_probe_json_text)
+
+
+def _analyze_github_actions_readonly_probe(
+    builder: SimulationBuilder,
+    text: str | None,
+) -> None:
+    if not text:
+        builder.add_input(
+            "probe",
+            "github-actions-readonly",
+            status="missing_context",
+            notes=("Requires supplied GitHub Actions metadata JSON.",),
+        )
+        builder.add_gap(
+            "Probe `github-actions-readonly` requires a supplied GitHub Actions metadata "
+            "snapshot via --github-actions-probe-json; no GitHub API call was made."
+        )
+        return
+
+    try:
+        payload = json.loads(text)
+    except json.JSONDecodeError:
+        builder.add_input("probe", "github-actions-readonly", status="parse_error")
+        builder.add_gap("GitHub Actions read-only probe JSON could not be parsed.")
+        return
+
+    builder.add_input("probe", "github-actions-readonly", status="parsed")
+    context = _github_probe_context(payload)
+    builder.add_live_probe_evidence(
+        f"GitHub Actions read-only metadata snapshot supplied{context}."
+    )
+    check_runs = _github_check_runs(payload)
+    workflow_runs = _github_workflow_runs(payload)
+    if not check_runs and not workflow_runs:
+        builder.add_gap(
+            "GitHub Actions metadata snapshot did not include check_runs or workflow_runs."
+        )
+        return
+
+    for run in check_runs[:8]:
+        builder.add_live_probe_evidence(_format_github_run("check", run))
+    for run in workflow_runs[:8]:
+        builder.add_live_probe_evidence(_format_github_run("workflow", run))
 
 
 def _analyze_command(builder: SimulationBuilder, command: str) -> None:
@@ -739,6 +840,43 @@ def _category_values(value: object) -> set[str]:
 def _json_contains_rule(value: object, rule_ids: tuple[str, ...]) -> bool:
     text = json.dumps(value, sort_keys=True)
     return any(rule_id in text for rule_id in rule_ids)
+
+
+def _github_probe_context(payload: object) -> str:
+    if not isinstance(payload, dict):
+        return ""
+    parts = []
+    repo = payload.get("repository") or payload.get("repository_full_name")
+    sha = payload.get("head_sha") or payload.get("sha")
+    pull_number = payload.get("pull_number") or payload.get("pr_number")
+    if repo:
+        parts.append(f"repository `{repo}`")
+    if sha:
+        parts.append(f"sha `{sha}`")
+    if pull_number:
+        parts.append(f"PR `#{pull_number}`")
+    return f" for {', '.join(str(part) for part in parts)}" if parts else ""
+
+
+def _github_check_runs(payload: object) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    runs = payload.get("check_runs")
+    return [item for item in runs if isinstance(item, dict)] if isinstance(runs, list) else []
+
+
+def _github_workflow_runs(payload: object) -> list[dict[str, Any]]:
+    if not isinstance(payload, dict):
+        return []
+    runs = payload.get("workflow_runs")
+    return [item for item in runs if isinstance(item, dict)] if isinstance(runs, list) else []
+
+
+def _format_github_run(kind: str, run: dict[str, Any]) -> str:
+    name = run.get("name") or run.get("display_title") or run.get("workflow_name") or "unnamed"
+    status = run.get("status") or "unknown"
+    conclusion = run.get("conclusion") or "unknown"
+    return f"GitHub Actions {kind} `{name}` reported status `{status}` conclusion `{conclusion}`."
 
 
 def _command_has_unresolved_destination(command: str) -> bool:
