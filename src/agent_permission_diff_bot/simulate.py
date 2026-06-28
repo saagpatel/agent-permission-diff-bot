@@ -1044,16 +1044,26 @@ def _github_api_get_json(
         with urllib.request.urlopen(request, timeout=options.timeout_seconds) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        raise GitHubProbeError(
-            "GitHub Actions live probe read failed with GitHub HTTP "
-            f"{exc.code}; no mutation was attempted."
-        ) from exc
+        raise GitHubProbeError(_github_http_error_message(exc)) from exc
     except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
         raise GitHubProbeError(
             "GitHub Actions live probe read failed before usable metadata was returned; "
             "no mutation was attempted."
         ) from exc
     return payload if isinstance(payload, dict) else {}
+
+
+def _github_http_error_message(exc: urllib.error.HTTPError) -> str:
+    rate_limited = exc.code in {403, 429} and exc.headers.get("x-ratelimit-remaining") == "0"
+    if rate_limited:
+        return (
+            "GitHub Actions live probe read was rate-limited by GitHub HTTP "
+            f"{exc.code}; no mutation was attempted."
+        )
+    return (
+        "GitHub Actions live probe read failed with GitHub HTTP "
+        f"{exc.code}; no mutation was attempted."
+    )
 
 
 def _github_api_headers(token: str | None) -> dict[str, str]:
