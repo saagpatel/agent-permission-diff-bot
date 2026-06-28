@@ -53,6 +53,55 @@ jobs:
     assert any("OIDC provider trust policy" in gap for gap in report.live_probe_needed)
 
 
+def test_simulates_pull_request_target_untrusted_head_checkout_risk() -> None:
+    report = build_simulation(
+        workflow_text="""
+name: Dangerous PR Target
+on:
+  pull_request_target:
+permissions:
+  contents: write
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name }}
+          ref: ${{ github.event.pull_request.head.sha }}
+      - run: npm install && npm test
+"""
+    )
+
+    assert report.capabilities["escalate"].level == "possible"
+    assert report.capabilities["bypass"].level == "possible"
+    assert report.capabilities["write"].level == "yes"
+    assert any("untrusted pull request head" in item for item in report.deterministic_evidence)
+    assert any("privileged token scope" in gap for gap in report.live_probe_needed)
+
+
+def test_simulates_pull_request_target_without_head_checkout_as_lower_confidence() -> None:
+    report = build_simulation(
+        workflow_text="""
+name: Label PR
+on:
+  pull_request_target:
+permissions:
+  contents: read
+  pull-requests: write
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/labeler@v5
+"""
+    )
+
+    assert report.capabilities["escalate"].level == "possible"
+    assert all("untrusted pull request head" not in item for item in report.deterministic_evidence)
+    assert not any("privileged token scope" in gap for gap in report.live_probe_needed)
+
+
 def test_simulates_mcp_config_and_supplied_mcpaudit_json() -> None:
     report = build_simulation(
         mcp_config_text="""

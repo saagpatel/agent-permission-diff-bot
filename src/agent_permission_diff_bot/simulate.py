@@ -786,6 +786,7 @@ def _analyze_command(builder: SimulationBuilder, command: str) -> None:
 
 def _analyze_workflow(builder: SimulationBuilder, text: str) -> None:
     builder.add_input("workflow", "snapshot")
+    workflow_data = _load_yaml_mapping(text)
     atoms = extract_atoms(".github/workflows/simulated.yml", text)
     if not atoms:
         builder.add_gap("Workflow text could not be parsed into permission atoms.")
@@ -817,6 +818,7 @@ def _analyze_workflow(builder: SimulationBuilder, text: str) -> None:
             "Workflow uses pull_request_target; token/secrets exposure depends on job "
             "checkout and conditions.",
         )
+        _analyze_pull_request_target_workflow_risk(builder, workflow_data, text)
 
 
 def _analyze_mcp_config(builder: SimulationBuilder, text: str) -> None:
@@ -849,6 +851,117 @@ def _analyze_mcp_config(builder: SimulationBuilder, text: str) -> None:
                     "Broad MCP tool allowlist requires live tools/list or MCPAudit JSON "
                     "to know exact tools."
                 )
+
+
+def _analyze_pull_request_target_workflow_risk(
+    builder: SimulationBuilder,
+    workflow_data: dict[str, Any] | None,
+    text: str,
+) -> None:
+    if workflow_data is None:
+        builder.add_gap(
+            "pull_request_target workflow could not be parsed for checkout/execution risk."
+        )
+        return
+    jobs = workflow_data.get("jobs")
+    if not isinstance(jobs, dict):
+        return
+    found_untrusted_checkout = False
+    found_execution_after_untrusted_checkout = False
+    for job_name, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        steps = job.get("steps")
+        if not isinstance(steps, list):
+            continue
+        job_saw_untrusted_checkout = False
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            if _step_checks_out_pull_request_head(step):
+                found_untrusted_checkout = True
+                job_saw_untrusted_checkout = True
+                builder.add_evidence(
+                    "pull_request_target workflow checks out the pull request head "
+                    f"in job `{job_name}`."
+                )
+            elif job_saw_untrusted_checkout and _step_executes_code(step):
+                found_execution_after_untrusted_checkout = True
+                builder.add_evidence(
+                    "pull_request_target workflow executes code after pull request head "
+                    f"checkout in job `{job_name}`."
+                )
+    if found_untrusted_checkout:
+        builder.add_capability(
+            "escalate",
+            "possible",
+            "high",
+            "pull_request_target workflow checks out untrusted pull request head code.",
+        )
+        builder.add_capability(
+            "bypass",
+            "possible",
+            "medium",
+            "pull_request_target checkout of pull request head can bypass normal fork "
+            "permission separation.",
+        )
+        builder.add_gap(
+            "Review pull_request_target checkout of untrusted head code for token, secret, "
+            "and write-permission exposure."
+        )
+    if found_execution_after_untrusted_checkout:
+        builder.add_capability(
+            "write",
+            "possible",
+            "medium",
+            "pull_request_target workflow executes commands after untrusted head checkout.",
+        )
+        builder.add_gap(
+            "Review commands after untrusted pull request head checkout for script, install, "
+            "test, build, and artifact side effects."
+        )
+    if "pull_request_target" in text and "github.event.pull_request.head" in text:
+        builder.add_gap(
+            "pull_request_target workflow references pull request head context; static review "
+            "should confirm it does not execute untrusted code with privileged token scope."
+        )
+
+
+def _step_checks_out_pull_request_head(step: dict[str, Any]) -> bool:
+    uses = str(step.get("uses") or "")
+    if "actions/checkout" not in uses.lower():
+        return False
+    with_value = step.get("with")
+    if not isinstance(with_value, dict):
+        return False
+    ref = str(with_value.get("ref") or "")
+    repository = str(with_value.get("repository") or "")
+    return _references_pull_request_head(ref) or _references_pull_request_head(repository)
+
+
+def _references_pull_request_head(value: str) -> bool:
+    lowered = value.lower()
+    return (
+        "github.event.pull_request.head.sha" in lowered
+        or "github.event.pull_request.head.ref" in lowered
+        or "github.event.pull_request.head.repo" in lowered
+        or "github.head_ref" in lowered
+    )
+
+
+def _step_executes_code(step: dict[str, Any]) -> bool:
+    if step.get("run"):
+        return True
+    uses = str(step.get("uses") or "").lower()
+    return bool(uses and "actions/checkout" not in uses)
+
+
+def _load_yaml_mapping(text: str) -> dict[str, Any] | None:
+    try:
+        parsed = yaml.safe_load(text) or {}
+    except yaml.YAMLError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
 
 
 def _analyze_mcpaudit_json(builder: SimulationBuilder, text: str) -> None:

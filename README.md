@@ -83,6 +83,10 @@ run destructive probes. The JSON and Markdown outputs summarize `read`, `write`,
 `deploy`, `bypass`, and `escalate` capabilities, confidence, deterministic evidence,
 live-probe-needed gaps, and the active safety boundary.
 
+For supplied GitHub Actions workflow snapshots, `simulate` also flags
+`pull_request_target` workflows that check out or execute pull request head code, since
+that can collapse fork isolation into privileged token or secret exposure.
+
 List built-in static scenarios:
 
 ```bash
