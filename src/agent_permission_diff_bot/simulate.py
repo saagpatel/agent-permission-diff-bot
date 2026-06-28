@@ -131,8 +131,23 @@ class GitHubActionsLiveProbeOptions:
         return f"env:{self.token_env}" if self.token_env else "unauthenticated"
 
 
+@dataclass(frozen=True)
+class GitHubPullResolution:
+    head_sha: str
+    head_repository: str | None = None
+    base_repository: str | None = None
+
+    @property
+    def is_cross_repository(self) -> bool:
+        return bool(
+            self.head_repository
+            and self.base_repository
+            and self.head_repository != self.base_repository
+        )
+
+
 GitHubActionsProbeFetcher = Callable[[GitHubActionsLiveProbeOptions], dict[str, Any]]
-GitHubPullResolver = Callable[[GitHubActionsLiveProbeOptions], str]
+GitHubPullResolver = Callable[[GitHubActionsLiveProbeOptions], GitHubPullResolution]
 
 
 class GitHubProbeError(RuntimeError):
@@ -674,22 +689,50 @@ def _resolve_github_pull_options(
         return options
     resolve = pull_resolver or resolve_github_pull_head_sha
     try:
-        head_sha = resolve(options)
+        resolution = resolve(options)
     except GitHubProbeError as exc:
         builder.add_gap(str(exc))
         return options
     builder.add_live_probe_evidence(
-        f"GitHub pull request `#{options.pull_number}` resolved to head SHA `{head_sha}` "
+        f"GitHub pull request `#{options.pull_number}` resolved to head SHA "
+        f"`{resolution.head_sha}` "
         "via api.github.com."
     )
+    _record_github_pull_trust_evidence(builder, options, resolution)
     return GitHubActionsLiveProbeOptions(
         repository=options.repository,
-        ref=head_sha,
+        ref=resolution.head_sha,
         pull_number=options.pull_number,
         token_env=options.token_env,
         timeout_seconds=options.timeout_seconds,
         allowed_hosts=options.allowed_hosts,
     )
+
+
+def _record_github_pull_trust_evidence(
+    builder: SimulationBuilder,
+    options: GitHubActionsLiveProbeOptions,
+    resolution: GitHubPullResolution,
+) -> None:
+    if resolution.base_repository:
+        builder.add_live_probe_evidence(
+            f"GitHub pull request `#{options.pull_number}` base repository "
+            f"`{resolution.base_repository}`."
+        )
+    if resolution.head_repository:
+        builder.add_live_probe_evidence(
+            f"GitHub pull request `#{options.pull_number}` head repository "
+            f"`{resolution.head_repository}`."
+        )
+    if resolution.is_cross_repository:
+        builder.add_live_probe_evidence(
+            f"GitHub pull request `#{options.pull_number}` is cross-repository; "
+            "fork/base trust differs from same-repository branches."
+        )
+        builder.add_gap(
+            "Cross-repository pull request trust requires workflow trigger, fork approval, "
+            "secret exposure, and pull_request_target review."
+        )
 
 
 def _record_github_actions_probe_payload(
@@ -1059,7 +1102,7 @@ def _github_pull_resolver_validation_errors(
     return errors
 
 
-def resolve_github_pull_head_sha(options: GitHubActionsLiveProbeOptions) -> str:
+def resolve_github_pull_head_sha(options: GitHubActionsLiveProbeOptions) -> GitHubPullResolution:
     validation_errors = _github_pull_resolver_validation_errors(options)
     if validation_errors:
         raise GitHubProbeError(validation_errors[0])
@@ -1071,6 +1114,7 @@ def resolve_github_pull_head_sha(options: GitHubActionsLiveProbeOptions) -> str:
     pull_url = f"https://{GITHUB_API_HOST}/repos/{owner_repo}/pulls/{options.pull_number}"
     payload = _github_api_get_json(pull_url, options, token)
     head = payload.get("head")
+    base = payload.get("base")
     if not isinstance(head, dict):
         raise GitHubProbeError(
             "GitHub pull request head resolution did not return head metadata; "
@@ -1082,7 +1126,21 @@ def resolve_github_pull_head_sha(options: GitHubActionsLiveProbeOptions) -> str:
             "GitHub pull request head resolution did not return a head SHA; "
             "no mutation was attempted."
         )
-    return sha
+    return GitHubPullResolution(
+        head_sha=sha,
+        head_repository=_github_pull_repo_full_name(head),
+        base_repository=_github_pull_repo_full_name(base),
+    )
+
+
+def _github_pull_repo_full_name(value: object) -> str | None:
+    if not isinstance(value, dict):
+        return None
+    repo = value.get("repo")
+    if not isinstance(repo, dict):
+        return None
+    full_name = repo.get("full_name")
+    return full_name if isinstance(full_name, str) and full_name else None
 
 
 def fetch_github_actions_readonly_metadata(

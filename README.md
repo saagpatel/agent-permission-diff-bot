@@ -139,7 +139,9 @@ environment variable name such as `env:GITHUB_TOKEN` without including the token
 It does not dispatch workflows, read repository secrets, mutate checks, create comments,
 deploy, or contact arbitrary hosts. If `--github-pull-number` is supplied without
 `--github-ref`, the simulator first performs one additional GET request to resolve the PR
-head SHA and records that resolution as live probe evidence.
+head SHA and records that resolution as live probe evidence. When GitHub returns head and
+base repository metadata, the simulator also records whether the PR is cross-repository
+and flags fork/base trust review as a live-probe-needed gap.
 
 Gate modes:
 
