@@ -14,6 +14,7 @@ from agent_permission_diff_bot.simulate import (
     list_simulation_probes,
     list_simulation_scenarios,
     render_simulation_markdown,
+    resolve_github_pull_head_sha,
 )
 
 
@@ -417,16 +418,49 @@ def test_cli_github_actions_live_degrades_safely_without_context(capsys) -> None
     assert "--github-ref" in output
 
 
-def test_github_pull_number_does_not_auto_resolve_ref() -> None:
+def test_github_pull_number_resolves_ref_with_injected_resolver() -> None:
+    resolver_calls: list[GitHubActionsLiveProbeOptions] = []
+    fetcher_calls: list[GitHubActionsLiveProbeOptions] = []
+
+    def fake_resolver(options: GitHubActionsLiveProbeOptions) -> str:
+        resolver_calls.append(options)
+        return "resolved-sha"
+
+    def fake_fetcher(options: GitHubActionsLiveProbeOptions) -> dict[str, object]:
+        fetcher_calls.append(options)
+        return {"check_runs": [{"name": "Package (3.12)", "conclusion": "success"}]}
+
     report = build_simulation(
         probes=("github-actions-readonly",),
         github_actions_live_options=GitHubActionsLiveProbeOptions(
             repository="saagpatel/agent-permission-diff-bot",
             pull_number=14,
         ),
+        github_actions_probe_fetcher=fake_fetcher,
+        github_pull_resolver=fake_resolver,
+    )
+
+    assert len(resolver_calls) == 1
+    assert fetcher_calls[0].ref == "resolved-sha"
+    assert any("resolved to head SHA `resolved-sha`" in item for item in report.live_probe_evidence)
+    assert any("Package (3.12)" in item for item in report.live_probe_evidence)
+
+
+def test_github_pull_number_resolution_failure_degrades_to_gap() -> None:
+    def fake_resolver(_: GitHubActionsLiveProbeOptions) -> str:
+        raise GitHubProbeError("pull resolution failed safely")
+
+    report = build_simulation(
+        probes=("github-actions-readonly",),
+        github_actions_live_options=GitHubActionsLiveProbeOptions(
+            repository="saagpatel/agent-permission-diff-bot",
+            pull_number=14,
+        ),
+        github_pull_resolver=fake_resolver,
     )
 
     assert report.live_probe_evidence == []
+    assert "pull resolution failed safely" in report.live_probe_needed
     assert any("--github-ref" in gap for gap in report.live_probe_needed)
 
 
@@ -456,6 +490,32 @@ def test_fetch_github_actions_metadata_uses_get_only_allowlisted_requests(monkey
     assert all(call[1] == 2.5 for call in calls)
     assert payload["check_runs"][0]["name"] == "Package (3.11)"
     assert payload["workflow_runs"][0]["name"] == "CI"
+
+
+def test_resolve_github_pull_head_sha_uses_get_only_allowlisted_request(monkeypatch) -> None:
+    calls = []
+
+    def fake_urlopen(request, timeout):
+        calls.append((request, timeout))
+        return _FakeHTTPResponse({"head": {"sha": "resolved-sha"}})
+
+    monkeypatch.setattr("agent_permission_diff_bot.simulate.urllib.request.urlopen", fake_urlopen)
+
+    sha = resolve_github_pull_head_sha(
+        GitHubActionsLiveProbeOptions(
+            repository="saagpatel/agent-permission-diff-bot",
+            pull_number=15,
+            timeout_seconds=3.0,
+        )
+    )
+
+    assert sha == "resolved-sha"
+    assert len(calls) == 1
+    assert calls[0][0].get_method() == "GET"
+    assert calls[0][0].full_url == (
+        "https://api.github.com/repos/saagpatel/agent-permission-diff-bot/pulls/15"
+    )
+    assert calls[0][1] == 3.0
 
 
 def test_fetch_github_actions_metadata_reports_rate_limit_without_mutation(monkeypatch) -> None:
