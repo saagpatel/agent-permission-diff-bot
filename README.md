@@ -62,6 +62,26 @@ agent-permission-diff diff \
   --sarif report.sarif
 ```
 
+Run a static no-credential, no-network permission simulation before executing a command or
+workflow:
+
+```bash
+agent-permission-diff simulate \
+  --command 'gh pr create --repo saagpatel/example' \
+  --workflow .github/workflows/deploy.yml \
+  --mcp-config .mcp.json \
+  --json simulation.json \
+  --markdown simulation.md
+```
+
+`simulate` accepts supplied static evidence only: a proposed command string, a GitHub
+Actions workflow snapshot, MCP config JSON, MCPAudit JSON, Claude subagent frontmatter,
+and a Codex/Claude hook-policy snapshot. It does not read credentials, launch MCP servers,
+contact network endpoints, dispatch workflows, deploy, or run destructive probes. The JSON
+and Markdown outputs summarize `read`, `write`, `send`, `deploy`, `bypass`, and `escalate`
+capabilities, confidence, deterministic evidence, live-probe-needed gaps, and the active
+safety boundary.
+
 Gate modes:
 
 - `observe`: records whether the threshold was met but always exits 0.

@@ -15,6 +15,12 @@ from agent_permission_diff_bot.reporting import (
     write_markdown,
     write_sarif,
 )
+from agent_permission_diff_bot.simulate import (
+    build_simulation,
+    render_simulation_markdown,
+    write_simulation_json,
+    write_simulation_markdown,
+)
 from agent_permission_diff_bot.sources import (
     changed_git_paths,
     read_dir_snapshot,
@@ -27,6 +33,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "diff":
         return _run_diff(args)
+    if args.command == "simulate":
+        return _run_simulate(args)
     parser.print_help()
     return 1
 
@@ -70,6 +78,32 @@ def _run_diff(args: argparse.Namespace) -> int:
     return report.gate.exit_code
 
 
+def _run_simulate(args: argparse.Namespace) -> int:
+    report = build_simulation(
+        command=args.command_string,
+        workflow_text=_read_optional_text(args.workflow),
+        mcp_config_text=_read_optional_text(args.mcp_config),
+        mcpaudit_json_text=_read_optional_text(args.mcpaudit_json),
+        subagent_text=_read_optional_text(args.subagent),
+        hook_policy_text=_read_optional_text(args.hook_policy),
+    )
+    if args.json:
+        write_simulation_json(report, Path(args.json))
+    if args.markdown:
+        write_simulation_markdown(report, Path(args.markdown))
+    if not args.json and not args.markdown:
+        print(render_simulation_markdown(report))
+    return 0
+
+
+def _read_optional_text(path: str | None) -> str | None:
+    if not path:
+        return None
+    if path == "-":
+        return sys.stdin.read()
+    return Path(path).read_text(encoding="utf-8")
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="agent-permission-diff",
@@ -108,6 +142,38 @@ def _build_parser() -> argparse.ArgumentParser:
         default="critical",
         help="Minimum severity that exits 2 in warn/enforce mode.",
     )
+
+    simulate = subparsers.add_parser(
+        "simulate",
+        help="statically simulate what a proposed agent permission surface can do",
+    )
+    simulate.add_argument(
+        "--command",
+        dest="command_string",
+        help="Proposed shell command string to classify.",
+    )
+    simulate.add_argument(
+        "--workflow",
+        help="Path to a GitHub Actions workflow snapshot or diff-like YAML snippet.",
+    )
+    simulate.add_argument(
+        "--mcp-config",
+        help="Path to an MCP config snippet. Use --mcpaudit-json for MCPAudit output.",
+    )
+    simulate.add_argument(
+        "--mcpaudit-json",
+        help="Path to MCPAudit JSON output to ingest as supplied static evidence.",
+    )
+    simulate.add_argument(
+        "--subagent",
+        help="Path to Claude subagent frontmatter or a subagent markdown file.",
+    )
+    simulate.add_argument(
+        "--hook-policy",
+        help="Path to a Codex/Claude hook-policy snapshot such as hooks.json or policy JSON.",
+    )
+    simulate.add_argument("--json", help="Write JSON simulation output")
+    simulate.add_argument("--markdown", help="Write Markdown simulation output")
     return parser
 
 
