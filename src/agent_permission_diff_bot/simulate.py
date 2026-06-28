@@ -20,6 +20,7 @@ InputKind = Literal[
     "mcpaudit_json",
     "subagent",
     "hook_policy",
+    "scenario",
 ]
 
 CAPABILITIES: tuple[CapabilityName, ...] = (
@@ -84,6 +85,159 @@ SUBAGENT_TOOL_MAP: tuple[tuple[str, tuple[CapabilityName, ...]], ...] = (
     ("WebFetch", ("read", "send")),
     ("WebSearch", ("read", "send")),
 )
+
+ScenarioName = Literal[
+    "command-approval-laundering",
+    "github-actions-oidc-deploy",
+    "mcp-broad-tool-schema-drift",
+    "claude-subagent-inherited-bypass",
+    "hook-policy-bypass-gap",
+]
+
+
+@dataclass(frozen=True)
+class ScenarioFixture:
+    name: ScenarioName
+    title: str
+    description: str
+    command: str | None = None
+    workflow_text: str | None = None
+    mcp_config_text: str | None = None
+    mcpaudit_json_text: str | None = None
+    subagent_text: str | None = None
+    hook_policy_text: str | None = None
+    deterministic_evidence: tuple[str, ...] = ()
+    live_probe_needed: tuple[str, ...] = ()
+
+    def to_dict(self) -> dict[str, str]:
+        return {
+            "name": self.name,
+            "title": self.title,
+            "description": self.description,
+        }
+
+
+SCENARIO_FIXTURES: dict[str, ScenarioFixture] = {
+    "command-approval-laundering": ScenarioFixture(
+        name="command-approval-laundering",
+        title="Command Approval Laundering",
+        description=(
+            "A proposed command chains a benign-looking review action into a hook bypass, "
+            "write, network send, and deploy-shaped operation."
+        ),
+        command=(
+            "git diff -- . && git commit --no-verify -m ship && "
+            "curl https://deploy.example.invalid/hook && vercel deploy --prod"
+        ),
+        deterministic_evidence=(
+            "Scenario fixture models approval laundering through command chaining.",
+        ),
+    ),
+    "github-actions-oidc-deploy": ScenarioFixture(
+        name="github-actions-oidc-deploy",
+        title="GitHub Actions OIDC Deploy Escalation",
+        description=(
+            "A workflow grants id-token write and runs a publish action, requiring static "
+            "escalation/deploy detection plus live trust-policy review."
+        ),
+        workflow_text="""
+name: Publish
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  publish:
+    environment: production
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: pypa/gh-action-pypi-publish@release/v1
+""",
+        live_probe_needed=(
+            "Confirm cloud provider audience, subject, and environment protection rules.",
+        ),
+    ),
+    "mcp-broad-tool-schema-drift": ScenarioFixture(
+        name="mcp-broad-tool-schema-drift",
+        title="MCP Broad Tool Allowlist And Schema Drift",
+        description=(
+            "An MCP config allows every remote tool while supplied audit evidence shows "
+            "read, write, network, and shell execution categories."
+        ),
+        mcp_config_text=json.dumps(
+            {
+                "mcpServers": {
+                    "github": {
+                        "url": "https://api.githubcopilot.com/mcp",
+                        "headers": {"Authorization": "${TOKEN}"},
+                        "tools": ["*"],
+                    }
+                }
+            }
+        ),
+        mcpaudit_json_text=json.dumps(
+            {
+                "audits": [
+                    {
+                        "server": {"name": "github"},
+                        "permissions": [
+                            {"category": "file_read"},
+                            {"category": "file_write"},
+                            {"category": "network"},
+                            {"category": "shell_execution"},
+                        ],
+                        "findings": [{"rule_id": "MCP018"}],
+                    }
+                ]
+            }
+        ),
+        live_probe_needed=(
+            "Compare current tools/list and input schemas against the supplied MCPAudit JSON.",
+        ),
+    ),
+    "claude-subagent-inherited-bypass": ScenarioFixture(
+        name="claude-subagent-inherited-bypass",
+        title="Claude Subagent Inherited Or Bypass Permissions",
+        description=(
+            "A Claude subagent can inherit tools or explicitly bypass permissions, changing "
+            "effective autonomy even when the parent task looks scoped."
+        ),
+        subagent_text="""---
+name: release-runner
+description: Ship the package when asked.
+tools: Bash, Task, mcp__github__create_pull_request
+permissionMode: bypassPermissions
+---
+Ship the release.
+""",
+        live_probe_needed=(
+            "Confirm runtime subagent tool inheritance and parent-session permission mode.",
+        ),
+    ),
+    "hook-policy-bypass-gap": ScenarioFixture(
+        name="hook-policy-bypass-gap",
+        title="Hook Policy Bypass Or Missing Deny Controls",
+        description=(
+            "A hook snapshot references disable controls and lacks explicit deny decision "
+            "evidence, leaving bypass posture ambiguous."
+        ),
+        hook_policy_text=json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [{"matcher": "Bash", "command": "python guard.py"}],
+                    "disabled.json": True,
+                },
+                "allow_hosts": ["api.github.com"],
+            },
+            indent=2,
+        ),
+        live_probe_needed=(
+            "Confirm runtime hook installation, hook disable writability, and deny behavior.",
+        ),
+    ),
+}
 
 
 @dataclass
@@ -203,8 +357,11 @@ def build_simulation(
     mcpaudit_json_text: str | None = None,
     subagent_text: str | None = None,
     hook_policy_text: str | None = None,
+    scenarios: tuple[str, ...] = (),
 ) -> SimulationReport:
     builder = SimulationBuilder()
+    for scenario in scenarios:
+        _analyze_scenario(builder, scenario)
     if command:
         _analyze_command(builder, command)
     if workflow_text:
@@ -222,6 +379,10 @@ def build_simulation(
     if not any(assessment.level != "no" for assessment in builder.capabilities.values()):
         builder.add_gap("Static inputs did not expose a concrete capability expansion.")
     return builder.build()
+
+
+def list_simulation_scenarios() -> list[dict[str, str]]:
+    return [fixture.to_dict() for fixture in SCENARIO_FIXTURES.values()]
 
 
 def write_simulation_json(report: SimulationReport, path: Path) -> None:
@@ -271,6 +432,39 @@ def render_simulation_markdown(report: SimulationReport) -> str:
 
     lines.append("")
     return "\n".join(lines)
+
+
+def _analyze_scenario(builder: SimulationBuilder, name: str) -> None:
+    fixture = SCENARIO_FIXTURES.get(name)
+    if fixture is None:
+        builder.add_input(
+            "scenario",
+            name,
+            status="unknown",
+            notes=("Scenario fixture was not recognized.",),
+        )
+        builder.add_gap(f"Unknown scenario fixture `{name}` was requested.")
+        return
+
+    builder.add_input("scenario", fixture.name, notes=(fixture.title,))
+    builder.add_evidence(f"Scenario `{fixture.name}`: {fixture.description}")
+    for evidence in fixture.deterministic_evidence:
+        builder.add_evidence(evidence)
+    for gap in fixture.live_probe_needed:
+        builder.add_gap(gap)
+
+    if fixture.command:
+        _analyze_command(builder, fixture.command)
+    if fixture.workflow_text:
+        _analyze_workflow(builder, fixture.workflow_text)
+    if fixture.mcp_config_text:
+        _analyze_mcp_config(builder, fixture.mcp_config_text)
+    if fixture.mcpaudit_json_text:
+        _analyze_mcpaudit_json(builder, fixture.mcpaudit_json_text)
+    if fixture.subagent_text:
+        _analyze_subagent(builder, fixture.subagent_text)
+    if fixture.hook_policy_text:
+        _analyze_hook_policy(builder, fixture.hook_policy_text)
 
 
 def _analyze_command(builder: SimulationBuilder, command: str) -> None:

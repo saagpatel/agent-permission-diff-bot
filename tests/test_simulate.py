@@ -4,7 +4,11 @@ import json
 from pathlib import Path
 
 from agent_permission_diff_bot.cli import main
-from agent_permission_diff_bot.simulate import build_simulation, render_simulation_markdown
+from agent_permission_diff_bot.simulate import (
+    build_simulation,
+    list_simulation_scenarios,
+    render_simulation_markdown,
+)
 
 
 def test_simulates_command_send_write_deploy_and_bypass() -> None:
@@ -135,3 +139,85 @@ def test_render_markdown_lists_live_probe_gaps() -> None:
 
     assert "## Live Probe Needed" in markdown
     assert "MCPAudit connected or supplied tool-schema evidence" in markdown
+
+
+def test_lists_builtin_simulation_scenarios() -> None:
+    names = {item["name"] for item in list_simulation_scenarios()}
+
+    assert names == {
+        "command-approval-laundering",
+        "github-actions-oidc-deploy",
+        "mcp-broad-tool-schema-drift",
+        "claude-subagent-inherited-bypass",
+        "hook-policy-bypass-gap",
+    }
+
+
+def test_scenario_command_approval_laundering() -> None:
+    report = build_simulation(scenarios=("command-approval-laundering",))
+
+    assert report.capabilities["write"].level == "yes"
+    assert report.capabilities["send"].level == "yes"
+    assert report.capabilities["deploy"].level == "yes"
+    assert report.capabilities["bypass"].level == "yes"
+    assert any(item.kind == "scenario" for item in report.inputs)
+    assert any("approval laundering" in item for item in report.deterministic_evidence)
+
+
+def test_scenario_github_actions_oidc_deploy() -> None:
+    report = build_simulation(scenarios=("github-actions-oidc-deploy",))
+
+    assert report.capabilities["deploy"].level == "yes"
+    assert report.capabilities["send"].level == "possible"
+    assert report.capabilities["escalate"].level == "yes"
+    assert any("environment protection" in gap for gap in report.live_probe_needed)
+
+
+def test_scenario_mcp_broad_tool_schema_drift() -> None:
+    report = build_simulation(scenarios=("mcp-broad-tool-schema-drift",))
+
+    assert report.capabilities["read"].level == "yes"
+    assert report.capabilities["write"].level == "yes"
+    assert report.capabilities["send"].level == "yes"
+    assert report.capabilities["escalate"].level == "yes"
+    assert report.capabilities["bypass"].level == "possible"
+    assert any("input schemas" in gap for gap in report.live_probe_needed)
+
+
+def test_scenario_claude_subagent_inherited_bypass() -> None:
+    report = build_simulation(scenarios=("claude-subagent-inherited-bypass",))
+
+    assert report.capabilities["write"].level == "possible"
+    assert report.capabilities["send"].level == "possible"
+    assert report.capabilities["bypass"].level == "yes"
+    assert report.capabilities["escalate"].level == "possible"
+    assert any("tool inheritance" in gap for gap in report.live_probe_needed)
+
+
+def test_scenario_hook_policy_bypass_gap() -> None:
+    report = build_simulation(scenarios=("hook-policy-bypass-gap",))
+
+    assert report.capabilities["bypass"].level == "possible"
+    assert any(
+        "Hook snapshot includes PreToolUse" in item for item in report.deterministic_evidence
+    )
+    assert any("hook disable writability" in gap for gap in report.live_probe_needed)
+
+
+def test_unknown_scenario_is_reported_as_static_gap() -> None:
+    report = build_simulation(scenarios=("not-a-real-scenario",))
+
+    assert report.inputs[0].kind == "scenario"
+    assert report.inputs[0].status == "unknown"
+    assert (
+        "Unknown scenario fixture `not-a-real-scenario` was requested." in report.live_probe_needed
+    )
+
+
+def test_cli_simulate_lists_scenarios(capsys) -> None:
+    code = main(["simulate", "--list-scenarios"])
+
+    payload = json.loads(capsys.readouterr().out)
+    names = {item["name"] for item in payload}
+    assert code == 0
+    assert "mcp-broad-tool-schema-drift" in names

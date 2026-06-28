@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -17,6 +18,7 @@ from agent_permission_diff_bot.reporting import (
 )
 from agent_permission_diff_bot.simulate import (
     build_simulation,
+    list_simulation_scenarios,
     render_simulation_markdown,
     write_simulation_json,
     write_simulation_markdown,
@@ -79,7 +81,11 @@ def _run_diff(args: argparse.Namespace) -> int:
 
 
 def _run_simulate(args: argparse.Namespace) -> int:
+    if args.list_scenarios:
+        print(json.dumps(list_simulation_scenarios(), indent=2, sort_keys=True))
+        return 0
     report = build_simulation(
+        scenarios=tuple(args.scenario or ()),
         command=args.command_string,
         workflow_text=_read_optional_text(args.workflow),
         mcp_config_text=_read_optional_text(args.mcp_config),
@@ -171,6 +177,17 @@ def _build_parser() -> argparse.ArgumentParser:
     simulate.add_argument(
         "--hook-policy",
         help="Path to a Codex/Claude hook-policy snapshot such as hooks.json or policy JSON.",
+    )
+    simulate.add_argument(
+        "--scenario",
+        action="append",
+        choices=tuple(item["name"] for item in list_simulation_scenarios()),
+        help="Run a built-in static scenario fixture. May be supplied more than once.",
+    )
+    simulate.add_argument(
+        "--list-scenarios",
+        action="store_true",
+        help="List built-in static scenario fixtures as JSON and exit.",
     )
     simulate.add_argument("--json", help="Write JSON simulation output")
     simulate.add_argument("--markdown", help="Write Markdown simulation output")
