@@ -137,7 +137,8 @@ only sends GET requests to `api.github.com`, requires `--github-repository` and
 `--github-ref`, caps request timeouts at 30 seconds, and reports the token source as an
 environment variable name such as `env:GITHUB_TOKEN` without including the token value.
 It does not dispatch workflows, read repository secrets, mutate checks, create comments,
-deploy, or contact arbitrary hosts.
+deploy, or contact arbitrary hosts. `--github-pull-number` is reported as evidence
+context only; it does not resolve or replace `--github-ref`.
 
 Gate modes:
 

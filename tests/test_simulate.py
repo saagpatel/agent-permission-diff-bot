@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import io
 import json
+import urllib.error
 from pathlib import Path
 
 from agent_permission_diff_bot.cli import main
 from agent_permission_diff_bot.simulate import (
     GitHubActionsLiveProbeOptions,
+    GitHubProbeError,
     build_simulation,
+    fetch_github_actions_readonly_metadata,
     list_simulation_probes,
     list_simulation_scenarios,
     render_simulation_markdown,
@@ -411,3 +415,113 @@ def test_cli_github_actions_live_degrades_safely_without_context(capsys) -> None
     assert "live_requested" in output
     assert "--github-repository" in output
     assert "--github-ref" in output
+
+
+def test_github_pull_number_does_not_auto_resolve_ref() -> None:
+    report = build_simulation(
+        probes=("github-actions-readonly",),
+        github_actions_live_options=GitHubActionsLiveProbeOptions(
+            repository="saagpatel/agent-permission-diff-bot",
+            pull_number=14,
+        ),
+    )
+
+    assert report.live_probe_evidence == []
+    assert any("--github-ref" in gap for gap in report.live_probe_needed)
+
+
+def test_fetch_github_actions_metadata_uses_get_only_allowlisted_requests(monkeypatch) -> None:
+    calls = []
+    responses = [
+        _FakeHTTPResponse({"check_runs": [{"name": "Package (3.11)", "conclusion": "success"}]}),
+        _FakeHTTPResponse({"workflow_runs": [{"name": "CI", "conclusion": "success"}]}),
+    ]
+
+    def fake_urlopen(request, timeout):
+        calls.append((request, timeout))
+        return responses.pop(0)
+
+    monkeypatch.setattr("agent_permission_diff_bot.simulate.urllib.request.urlopen", fake_urlopen)
+
+    payload = fetch_github_actions_readonly_metadata(
+        GitHubActionsLiveProbeOptions(
+            repository="saagpatel/agent-permission-diff-bot",
+            ref="abc123",
+            timeout_seconds=2.5,
+        )
+    )
+
+    assert [call[0].get_method() for call in calls] == ["GET", "GET"]
+    assert all(call[0].full_url.startswith("https://api.github.com/") for call in calls)
+    assert all(call[1] == 2.5 for call in calls)
+    assert payload["check_runs"][0]["name"] == "Package (3.11)"
+    assert payload["workflow_runs"][0]["name"] == "CI"
+
+
+def test_fetch_github_actions_metadata_reports_rate_limit_without_mutation(monkeypatch) -> None:
+    def fake_urlopen(_request, timeout=None):
+        assert timeout == 10.0
+        raise urllib.error.HTTPError(
+            url="https://api.github.com/repos/owner/repo/commits/ref/check-runs",
+            code=403,
+            msg="rate limited",
+            hdrs={"x-ratelimit-remaining": "0"},
+            fp=io.BytesIO(b""),
+        )
+
+    monkeypatch.setattr("agent_permission_diff_bot.simulate.urllib.request.urlopen", fake_urlopen)
+
+    try:
+        fetch_github_actions_readonly_metadata(
+            GitHubActionsLiveProbeOptions(repository="owner/repo", ref="abc123")
+        )
+    except GitHubProbeError as exc:
+        assert "rate-limited" in str(exc)
+        assert "no mutation was attempted" in str(exc)
+    else:
+        raise AssertionError("expected GitHubProbeError")
+
+
+def test_fetch_github_actions_metadata_reports_malformed_json_without_mutation(monkeypatch) -> None:
+    def fake_urlopen(_request, timeout=None):
+        assert timeout == 10.0
+        return _FakeRawHTTPResponse(b"not-json")
+
+    monkeypatch.setattr("agent_permission_diff_bot.simulate.urllib.request.urlopen", fake_urlopen)
+
+    try:
+        fetch_github_actions_readonly_metadata(
+            GitHubActionsLiveProbeOptions(repository="owner/repo", ref="abc123")
+        )
+    except GitHubProbeError as exc:
+        assert "no mutation was attempted" in str(exc)
+    else:
+        raise AssertionError("expected GitHubProbeError")
+
+
+class _FakeHTTPResponse:
+    def __init__(self, payload: dict[str, object]) -> None:
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return json.dumps(self.payload).encode("utf-8")
+
+
+class _FakeRawHTTPResponse:
+    def __init__(self, payload: bytes) -> None:
+        self.payload = payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, _exc_type, _exc, _traceback) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self.payload
