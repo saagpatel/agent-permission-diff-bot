@@ -70,17 +70,32 @@ agent-permission-diff simulate \
   --command 'gh pr create --repo saagpatel/example' \
   --workflow .github/workflows/deploy.yml \
   --mcp-config .mcp.json \
+  --scenario github-actions-oidc-deploy \
   --json simulation.json \
   --markdown simulation.md
 ```
 
 `simulate` accepts supplied static evidence only: a proposed command string, a GitHub
 Actions workflow snapshot, MCP config JSON, MCPAudit JSON, Claude subagent frontmatter,
-and a Codex/Claude hook-policy snapshot. It does not read credentials, launch MCP servers,
-contact network endpoints, dispatch workflows, deploy, or run destructive probes. The JSON
-and Markdown outputs summarize `read`, `write`, `send`, `deploy`, `bypass`, and `escalate`
-capabilities, confidence, deterministic evidence, live-probe-needed gaps, and the active
-safety boundary.
+Codex/Claude hook-policy snapshot, and built-in static scenario fixtures. It does not read
+credentials, launch MCP servers, contact network endpoints, dispatch workflows, deploy, or
+run destructive probes. The JSON and Markdown outputs summarize `read`, `write`, `send`,
+`deploy`, `bypass`, and `escalate` capabilities, confidence, deterministic evidence,
+live-probe-needed gaps, and the active safety boundary.
+
+List built-in static scenarios:
+
+```bash
+agent-permission-diff simulate --list-scenarios
+```
+
+Current scenario fixtures:
+
+- `command-approval-laundering`
+- `github-actions-oidc-deploy`
+- `mcp-broad-tool-schema-drift`
+- `claude-subagent-inherited-bypass`
+- `hook-policy-bypass-gap`
 
 Gate modes:
 
