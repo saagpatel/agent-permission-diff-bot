@@ -107,7 +107,7 @@ Default gate threshold is `critical`.
 
 JSON and Markdown reports include the evaluated gate decision: mode, `fail_on`,
 whether the threshold was met, status, exit code, and reason. The composite Action also
-exposes `gate-status` and `gate-threshold-meta outputs for workflow wiring.
+exposes `gate-status` and `gate-threshold-met` outputs for workflow wiring.
 
 Acknowledgement policy:
 
@@ -185,7 +185,7 @@ warning instead of masking the permission-diff result.
 | `step-summary` | No | `"true"` | Append the Markdown report to the GitHub Actions step summary. |
 | `comment` | No | `"false"` | Create or update a sticky pull request comment with the Markdown report. Requires `issues: write` and may require `pull-requests: write`. |
 | `upload-sarif` | No | `"false"` | Upload SARIF to GitHub code scanning. Requires `security-events: write`. |
-| `working-directory` | No | `"."` | Repository working directory to scan. |
+| `working-directory` | No | `"."` | Repository working-directory to scan. |
 
 ## Action Outputs
 
