@@ -102,6 +102,32 @@ jobs:
     assert not any("privileged token scope" in gap for gap in report.live_probe_needed)
 
 
+def test_simulates_pull_request_target_non_fork_guard_reduces_untrusted_head_gap() -> None:
+    report = build_simulation(
+        workflow_text="""
+name: Guarded PR Target
+on:
+  pull_request_target:
+permissions:
+  contents: write
+jobs:
+  test:
+    if: ${{ github.event.pull_request.head.repo.fork == false }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - run: npm test
+"""
+    )
+
+    assert report.capabilities["escalate"].level == "possible"
+    assert any("non-fork condition" in item for item in report.deterministic_evidence)
+    assert any("non-fork guard" in gap for gap in report.live_probe_needed)
+    assert not any("privileged token scope" in gap for gap in report.live_probe_needed)
+
+
 def test_simulates_mcp_config_and_supplied_mcpaudit_json() -> None:
     report = build_simulation(
         mcp_config_text="""

@@ -85,7 +85,9 @@ live-probe-needed gaps, and the active safety boundary.
 
 For supplied GitHub Actions workflow snapshots, `simulate` also flags
 `pull_request_target` workflows that check out or execute pull request head code, since
-that can collapse fork isolation into privileged token or secret exposure.
+that can collapse fork isolation into privileged token or secret exposure. Obvious
+non-fork guards such as `github.event.pull_request.head.repo.fork == false` are recorded
+as mitigating evidence while still requiring guard review.
 
 List built-in static scenarios:
 
