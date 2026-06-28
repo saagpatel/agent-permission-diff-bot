@@ -132,6 +132,7 @@ class GitHubActionsLiveProbeOptions:
 
 
 GitHubActionsProbeFetcher = Callable[[GitHubActionsLiveProbeOptions], dict[str, Any]]
+GitHubPullResolver = Callable[[GitHubActionsLiveProbeOptions], str]
 
 
 class GitHubProbeError(RuntimeError):
@@ -413,6 +414,7 @@ def build_simulation(
     github_actions_probe_json_text: str | None = None,
     github_actions_live_options: GitHubActionsLiveProbeOptions | None = None,
     github_actions_probe_fetcher: GitHubActionsProbeFetcher | None = None,
+    github_pull_resolver: GitHubPullResolver | None = None,
 ) -> SimulationReport:
     builder = SimulationBuilder()
     for scenario in scenarios:
@@ -436,6 +438,7 @@ def build_simulation(
             github_actions_probe_json_text=github_actions_probe_json_text,
             github_actions_live_options=github_actions_live_options,
             github_actions_probe_fetcher=github_actions_probe_fetcher,
+            github_pull_resolver=github_pull_resolver,
         )
     if not builder.inputs:
         builder.add_gap("No simulation inputs were supplied.")
@@ -547,6 +550,7 @@ def _analyze_probe(
     github_actions_probe_json_text: str | None,
     github_actions_live_options: GitHubActionsLiveProbeOptions | None,
     github_actions_probe_fetcher: GitHubActionsProbeFetcher | None,
+    github_pull_resolver: GitHubPullResolver | None,
 ) -> None:
     if name not in SUPPORTED_PROBES:
         builder.add_input(
@@ -564,6 +568,7 @@ def _analyze_probe(
             github_actions_probe_json_text,
             live_options=github_actions_live_options,
             fetcher=github_actions_probe_fetcher,
+            pull_resolver=github_pull_resolver,
         )
 
 
@@ -573,9 +578,10 @@ def _analyze_github_actions_readonly_probe(
     *,
     live_options: GitHubActionsLiveProbeOptions | None,
     fetcher: GitHubActionsProbeFetcher | None,
+    pull_resolver: GitHubPullResolver | None,
 ) -> None:
     if live_options is not None:
-        _analyze_github_actions_live_probe(builder, live_options, fetcher)
+        _analyze_github_actions_live_probe(builder, live_options, fetcher, pull_resolver)
         return
     if not text:
         builder.add_input(
@@ -620,6 +626,7 @@ def _analyze_github_actions_live_probe(
     builder: SimulationBuilder,
     options: GitHubActionsLiveProbeOptions,
     fetcher: GitHubActionsProbeFetcher | None,
+    pull_resolver: GitHubPullResolver | None,
 ) -> None:
     builder.add_input(
         "probe",
@@ -630,7 +637,11 @@ def _analyze_github_actions_live_probe(
             f"token_source={options.token_source()}",
         ),
     )
-    validation_errors = _github_live_probe_validation_errors(options)
+    resolved_options = options
+    if not options.ref and options.pull_number is not None:
+        resolved_options = _resolve_github_pull_options(builder, options, pull_resolver)
+
+    validation_errors = _github_live_probe_validation_errors(resolved_options)
     if validation_errors:
         for error in validation_errors:
             builder.add_gap(error)
@@ -638,17 +649,47 @@ def _analyze_github_actions_live_probe(
 
     fetch = fetcher or fetch_github_actions_readonly_metadata
     try:
-        payload = fetch(options)
+        payload = fetch(resolved_options)
     except GitHubProbeError as exc:
         builder.add_gap(str(exc))
         return
 
     builder.add_live_probe_evidence(
         "GitHub Actions read-only metadata fetched from api.github.com "
-        f"for repository `{options.repository}` ref `{options.ref}` "
-        f"using token source `{options.token_source()}`."
+        f"for repository `{resolved_options.repository}` ref `{resolved_options.ref}` "
+        f"using token source `{resolved_options.token_source()}`."
     )
     _record_github_actions_probe_payload(builder, payload)
+
+
+def _resolve_github_pull_options(
+    builder: SimulationBuilder,
+    options: GitHubActionsLiveProbeOptions,
+    pull_resolver: GitHubPullResolver | None,
+) -> GitHubActionsLiveProbeOptions:
+    resolver_errors = _github_pull_resolver_validation_errors(options)
+    if resolver_errors:
+        for error in resolver_errors:
+            builder.add_gap(error)
+        return options
+    resolve = pull_resolver or resolve_github_pull_head_sha
+    try:
+        head_sha = resolve(options)
+    except GitHubProbeError as exc:
+        builder.add_gap(str(exc))
+        return options
+    builder.add_live_probe_evidence(
+        f"GitHub pull request `#{options.pull_number}` resolved to head SHA `{head_sha}` "
+        "via api.github.com."
+    )
+    return GitHubActionsLiveProbeOptions(
+        repository=options.repository,
+        ref=head_sha,
+        pull_number=options.pull_number,
+        token_env=options.token_env,
+        timeout_seconds=options.timeout_seconds,
+        allowed_hosts=options.allowed_hosts,
+    )
 
 
 def _record_github_actions_probe_payload(
@@ -984,6 +1025,64 @@ def _github_live_probe_validation_errors(
     ):
         errors.append("GitHub Actions live probe token env name is not a valid environment key.")
     return errors
+
+
+def _github_pull_resolver_validation_errors(
+    options: GitHubActionsLiveProbeOptions,
+) -> list[str]:
+    errors: list[str] = []
+    if GITHUB_API_HOST not in options.allowed_hosts:
+        errors.append(
+            "GitHub pull request head resolution is blocked because api.github.com is not "
+            "allowlisted."
+        )
+    if not options.repository:
+        errors.append(
+            "GitHub pull request head resolution requires --github-repository owner/repo."
+        )
+    elif not GITHUB_REPOSITORY_RE.fullmatch(options.repository):
+        errors.append("GitHub pull request head resolution repository must be in owner/repo form.")
+    if options.pull_number is None:
+        errors.append("GitHub pull request head resolution requires --github-pull-number.")
+    elif options.pull_number <= 0:
+        errors.append("GitHub pull request number must be greater than 0.")
+    if options.timeout_seconds <= 0 or options.timeout_seconds > MAX_GITHUB_TIMEOUT_SECONDS:
+        errors.append(
+            "GitHub pull request head resolution timeout must be greater than 0 and no more "
+            f"than {MAX_GITHUB_TIMEOUT_SECONDS:g} seconds."
+        )
+    if options.token_env is not None and not re.fullmatch(
+        r"[A-Za-z_][A-Za-z0-9_]*",
+        options.token_env,
+    ):
+        errors.append("GitHub pull request head resolution token env name is invalid.")
+    return errors
+
+
+def resolve_github_pull_head_sha(options: GitHubActionsLiveProbeOptions) -> str:
+    validation_errors = _github_pull_resolver_validation_errors(options)
+    if validation_errors:
+        raise GitHubProbeError(validation_errors[0])
+    assert options.repository is not None
+    assert options.pull_number is not None
+
+    token = _read_github_probe_token(options)
+    owner_repo = urllib.parse.quote(options.repository, safe="/")
+    pull_url = f"https://{GITHUB_API_HOST}/repos/{owner_repo}/pulls/{options.pull_number}"
+    payload = _github_api_get_json(pull_url, options, token)
+    head = payload.get("head")
+    if not isinstance(head, dict):
+        raise GitHubProbeError(
+            "GitHub pull request head resolution did not return head metadata; "
+            "no mutation was attempted."
+        )
+    sha = head.get("sha")
+    if not isinstance(sha, str) or not sha:
+        raise GitHubProbeError(
+            "GitHub pull request head resolution did not return a head SHA; "
+            "no mutation was attempted."
+        )
+    return sha
 
 
 def fetch_github_actions_readonly_metadata(

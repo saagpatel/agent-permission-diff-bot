@@ -250,7 +250,10 @@ def _build_parser() -> argparse.ArgumentParser:
     simulate.add_argument(
         "--github-pull-number",
         type=int,
-        help="Optional pull request number to include in live probe evidence context.",
+        help=(
+            "Optional pull request number. When --github-ref is omitted, live mode resolves "
+            "the PR head SHA with an extra GET request to api.github.com."
+        ),
     )
     simulate.add_argument(
         "--github-token-env",
