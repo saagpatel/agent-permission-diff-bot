@@ -1,8 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shlex
+import urllib.error
+import urllib.parse
+import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -101,10 +106,36 @@ SUPPORTED_PROBES: dict[str, dict[str, str]] = {
         "title": "GitHub Actions Read-Only Metadata",
         "description": (
             "Consumes a supplied GitHub Actions metadata snapshot and records check/run "
-            "status as live-probe evidence without calling GitHub."
+            "status as live-probe evidence. Optional live fetching requires an explicit "
+            "repo/ref, api.github.com allowlist, and opt-in flag."
         ),
     },
 }
+
+GITHUB_API_HOST = "api.github.com"
+GITHUB_REPOSITORY_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
+DEFAULT_GITHUB_TIMEOUT_SECONDS = 10.0
+MAX_GITHUB_TIMEOUT_SECONDS = 30.0
+
+
+@dataclass(frozen=True)
+class GitHubActionsLiveProbeOptions:
+    repository: str | None = None
+    ref: str | None = None
+    pull_number: int | None = None
+    token_env: str | None = None
+    timeout_seconds: float = DEFAULT_GITHUB_TIMEOUT_SECONDS
+    allowed_hosts: tuple[str, ...] = (GITHUB_API_HOST,)
+
+    def token_source(self) -> str:
+        return f"env:{self.token_env}" if self.token_env else "unauthenticated"
+
+
+GitHubActionsProbeFetcher = Callable[[GitHubActionsLiveProbeOptions], dict[str, Any]]
+
+
+class GitHubProbeError(RuntimeError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -380,6 +411,8 @@ def build_simulation(
     scenarios: tuple[str, ...] = (),
     probes: tuple[str, ...] = (),
     github_actions_probe_json_text: str | None = None,
+    github_actions_live_options: GitHubActionsLiveProbeOptions | None = None,
+    github_actions_probe_fetcher: GitHubActionsProbeFetcher | None = None,
 ) -> SimulationReport:
     builder = SimulationBuilder()
     for scenario in scenarios:
@@ -401,6 +434,8 @@ def build_simulation(
             builder,
             probe,
             github_actions_probe_json_text=github_actions_probe_json_text,
+            github_actions_live_options=github_actions_live_options,
+            github_actions_probe_fetcher=github_actions_probe_fetcher,
         )
     if not builder.inputs:
         builder.add_gap("No simulation inputs were supplied.")
@@ -510,6 +545,8 @@ def _analyze_probe(
     name: str,
     *,
     github_actions_probe_json_text: str | None,
+    github_actions_live_options: GitHubActionsLiveProbeOptions | None,
+    github_actions_probe_fetcher: GitHubActionsProbeFetcher | None,
 ) -> None:
     if name not in SUPPORTED_PROBES:
         builder.add_input(
@@ -522,13 +559,24 @@ def _analyze_probe(
         return
 
     if name == "github-actions-readonly":
-        _analyze_github_actions_readonly_probe(builder, github_actions_probe_json_text)
+        _analyze_github_actions_readonly_probe(
+            builder,
+            github_actions_probe_json_text,
+            live_options=github_actions_live_options,
+            fetcher=github_actions_probe_fetcher,
+        )
 
 
 def _analyze_github_actions_readonly_probe(
     builder: SimulationBuilder,
     text: str | None,
+    *,
+    live_options: GitHubActionsLiveProbeOptions | None,
+    fetcher: GitHubActionsProbeFetcher | None,
 ) -> None:
+    if live_options is not None:
+        _analyze_github_actions_live_probe(builder, live_options, fetcher)
+        return
     if not text:
         builder.add_input(
             "probe",
@@ -562,6 +610,59 @@ def _analyze_github_actions_readonly_probe(
         )
         return
 
+    for run in check_runs[:8]:
+        builder.add_live_probe_evidence(_format_github_run("check", run))
+    for run in workflow_runs[:8]:
+        builder.add_live_probe_evidence(_format_github_run("workflow", run))
+
+
+def _analyze_github_actions_live_probe(
+    builder: SimulationBuilder,
+    options: GitHubActionsLiveProbeOptions,
+    fetcher: GitHubActionsProbeFetcher | None,
+) -> None:
+    builder.add_input(
+        "probe",
+        "github-actions-readonly",
+        status="live_requested",
+        notes=(
+            f"host={GITHUB_API_HOST}",
+            f"token_source={options.token_source()}",
+        ),
+    )
+    validation_errors = _github_live_probe_validation_errors(options)
+    if validation_errors:
+        for error in validation_errors:
+            builder.add_gap(error)
+        return
+
+    fetch = fetcher or fetch_github_actions_readonly_metadata
+    try:
+        payload = fetch(options)
+    except GitHubProbeError as exc:
+        builder.add_gap(str(exc))
+        return
+
+    builder.add_live_probe_evidence(
+        "GitHub Actions read-only metadata fetched from api.github.com "
+        f"for repository `{options.repository}` ref `{options.ref}` "
+        f"using token source `{options.token_source()}`."
+    )
+    _record_github_actions_probe_payload(builder, payload)
+
+
+def _record_github_actions_probe_payload(
+    builder: SimulationBuilder,
+    payload: object,
+) -> None:
+    context = _github_probe_context(payload)
+    if context:
+        builder.add_live_probe_evidence(f"GitHub Actions metadata context{context}.")
+    check_runs = _github_check_runs(payload)
+    workflow_runs = _github_workflow_runs(payload)
+    if not check_runs and not workflow_runs:
+        builder.add_gap("GitHub Actions metadata did not include check_runs or workflow_runs.")
+        return
     for run in check_runs[:8]:
         builder.add_live_probe_evidence(_format_github_run("check", run))
     for run in workflow_runs[:8]:
@@ -856,6 +957,114 @@ def _github_probe_context(payload: object) -> str:
     if pull_number:
         parts.append(f"PR `#{pull_number}`")
     return f" for {', '.join(str(part) for part in parts)}" if parts else ""
+
+
+def _github_live_probe_validation_errors(
+    options: GitHubActionsLiveProbeOptions,
+) -> list[str]:
+    errors: list[str] = []
+    if GITHUB_API_HOST not in options.allowed_hosts:
+        errors.append(
+            "GitHub Actions live probe is blocked because api.github.com is not allowlisted."
+        )
+    if not options.repository:
+        errors.append("GitHub Actions live probe requires --github-repository owner/repo.")
+    elif not GITHUB_REPOSITORY_RE.fullmatch(options.repository):
+        errors.append("GitHub Actions live probe repository must be in owner/repo form.")
+    if not options.ref:
+        errors.append("GitHub Actions live probe requires --github-ref branch, tag, or SHA.")
+    if options.timeout_seconds <= 0 or options.timeout_seconds > MAX_GITHUB_TIMEOUT_SECONDS:
+        errors.append(
+            "GitHub Actions live probe timeout must be greater than 0 and no more than "
+            f"{MAX_GITHUB_TIMEOUT_SECONDS:g} seconds."
+        )
+    if options.token_env is not None and not re.fullmatch(
+        r"[A-Za-z_][A-Za-z0-9_]*",
+        options.token_env,
+    ):
+        errors.append("GitHub Actions live probe token env name is not a valid environment key.")
+    return errors
+
+
+def fetch_github_actions_readonly_metadata(
+    options: GitHubActionsLiveProbeOptions,
+) -> dict[str, Any]:
+    validation_errors = _github_live_probe_validation_errors(options)
+    if validation_errors:
+        raise GitHubProbeError(validation_errors[0])
+    assert options.repository is not None
+    assert options.ref is not None
+
+    token = _read_github_probe_token(options)
+    owner_repo = urllib.parse.quote(options.repository, safe="/")
+    encoded_ref = urllib.parse.quote(options.ref, safe="")
+    check_runs_url = (
+        f"https://{GITHUB_API_HOST}/repos/{owner_repo}/commits/{encoded_ref}/check-runs"
+    )
+    workflow_runs_url = (
+        f"https://{GITHUB_API_HOST}/repos/{owner_repo}/actions/runs?"
+        f"head_sha={encoded_ref}&per_page=8"
+    )
+    check_payload = _github_api_get_json(check_runs_url, options, token)
+    workflow_payload = _github_api_get_json(workflow_runs_url, options, token)
+    return {
+        "repository": options.repository,
+        "head_sha": options.ref,
+        "pull_number": options.pull_number,
+        "check_runs": _github_check_runs(check_payload),
+        "workflow_runs": _github_workflow_runs(workflow_payload),
+    }
+
+
+def _read_github_probe_token(options: GitHubActionsLiveProbeOptions) -> str | None:
+    if not options.token_env:
+        return None
+    token = os.environ.get(options.token_env)
+    if not token:
+        raise GitHubProbeError(
+            f"GitHub Actions live probe token source `{options.token_source()}` was not set."
+        )
+    return token
+
+
+def _github_api_get_json(
+    url: str,
+    options: GitHubActionsLiveProbeOptions,
+    token: str | None,
+) -> dict[str, Any]:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https" or parsed.hostname not in options.allowed_hosts:
+        raise GitHubProbeError("GitHub Actions live probe blocked a non-allowlisted URL.")
+    request = urllib.request.Request(
+        url,
+        headers=_github_api_headers(token),
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=options.timeout_seconds) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        raise GitHubProbeError(
+            "GitHub Actions live probe read failed with GitHub HTTP "
+            f"{exc.code}; no mutation was attempted."
+        ) from exc
+    except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise GitHubProbeError(
+            "GitHub Actions live probe read failed before usable metadata was returned; "
+            "no mutation was attempted."
+        ) from exc
+    return payload if isinstance(payload, dict) else {}
+
+
+def _github_api_headers(token: str | None) -> dict[str, str]:
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "agent-permission-diff-bot",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    return headers
 
 
 def _github_check_runs(payload: object) -> list[dict[str, Any]]:

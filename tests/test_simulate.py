@@ -5,6 +5,7 @@ from pathlib import Path
 
 from agent_permission_diff_bot.cli import main
 from agent_permission_diff_bot.simulate import (
+    GitHubActionsLiveProbeOptions,
     build_simulation,
     list_simulation_probes,
     list_simulation_scenarios,
@@ -335,3 +336,78 @@ def test_cli_simulate_accepts_github_actions_probe_snapshot(tmp_path: Path) -> N
     assert code == 0
     assert payload["deterministic_evidence"] == []
     assert any("Package (3.11)" in item for item in payload["live_probe_evidence"])
+
+
+def test_github_actions_live_probe_requires_explicit_context() -> None:
+    report = build_simulation(
+        probes=("github-actions-readonly",),
+        github_actions_live_options=GitHubActionsLiveProbeOptions(),
+    )
+
+    assert report.inputs[0].status == "live_requested"
+    assert report.live_probe_evidence == []
+    assert any("--github-repository" in gap for gap in report.live_probe_needed)
+    assert any("--github-ref" in gap for gap in report.live_probe_needed)
+
+
+def test_github_actions_live_probe_uses_injected_fetcher_without_token_leak() -> None:
+    calls: list[GitHubActionsLiveProbeOptions] = []
+
+    def fake_fetcher(options: GitHubActionsLiveProbeOptions) -> dict[str, object]:
+        calls.append(options)
+        return {
+            "repository": options.repository,
+            "head_sha": options.ref,
+            "pull_number": options.pull_number,
+            "check_runs": [{"name": "Package (3.13)", "conclusion": "success"}],
+        }
+
+    report = build_simulation(
+        command="git status",
+        probes=("github-actions-readonly",),
+        github_actions_live_options=GitHubActionsLiveProbeOptions(
+            repository="saagpatel/agent-permission-diff-bot",
+            ref="abc123",
+            pull_number=13,
+            token_env="SECRET_GITHUB_TOKEN",
+        ),
+        github_actions_probe_fetcher=fake_fetcher,
+    )
+
+    assert len(calls) == 1
+    assert calls[0].repository == "saagpatel/agent-permission-diff-bot"
+    assert any("Command has read-shaped verb" in item for item in report.deterministic_evidence)
+    assert any("api.github.com" in item for item in report.live_probe_evidence)
+    assert any("env:SECRET_GITHUB_TOKEN" in item for item in report.live_probe_evidence)
+    serialized = json.dumps(report.to_dict())
+    assert "Package (3.13)" in serialized
+    assert "SECRET_GITHUB_TOKEN" in serialized
+    assert "ghp_" not in serialized
+
+
+def test_github_actions_live_probe_blocks_unallowlisted_host() -> None:
+    def fake_fetcher(_: GitHubActionsLiveProbeOptions) -> dict[str, object]:
+        raise AssertionError("fetcher should not be called when validation fails")
+
+    report = build_simulation(
+        probes=("github-actions-readonly",),
+        github_actions_live_options=GitHubActionsLiveProbeOptions(
+            repository="saagpatel/agent-permission-diff-bot",
+            ref="abc123",
+            allowed_hosts=("example.com",),
+        ),
+        github_actions_probe_fetcher=fake_fetcher,
+    )
+
+    assert report.live_probe_evidence == []
+    assert any("api.github.com is not allowlisted" in gap for gap in report.live_probe_needed)
+
+
+def test_cli_github_actions_live_degrades_safely_without_context(capsys) -> None:
+    code = main(["simulate", "--probe", "github-actions-readonly", "--github-actions-live"])
+
+    output = capsys.readouterr().out
+    assert code == 0
+    assert "live_requested" in output
+    assert "--github-repository" in output
+    assert "--github-ref" in output
