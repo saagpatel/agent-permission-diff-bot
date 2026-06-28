@@ -17,6 +17,7 @@ from agent_permission_diff_bot.reporting import (
     write_sarif,
 )
 from agent_permission_diff_bot.simulate import (
+    GitHubActionsLiveProbeOptions,
     build_simulation,
     list_simulation_probes,
     list_simulation_scenarios,
@@ -98,6 +99,7 @@ def _run_simulate(args: argparse.Namespace) -> int:
         subagent_text=_read_optional_text(args.subagent),
         hook_policy_text=_read_optional_text(args.hook_policy),
         github_actions_probe_json_text=_read_optional_text(args.github_actions_probe_json),
+        github_actions_live_options=_github_actions_live_options(args),
     )
     if args.json:
         write_simulation_json(report, Path(args.json))
@@ -114,6 +116,20 @@ def _read_optional_text(path: str | None) -> str | None:
     if path == "-":
         return sys.stdin.read()
     return Path(path).read_text(encoding="utf-8")
+
+
+def _github_actions_live_options(
+    args: argparse.Namespace,
+) -> GitHubActionsLiveProbeOptions | None:
+    if not args.github_actions_live:
+        return None
+    return GitHubActionsLiveProbeOptions(
+        repository=args.github_repository,
+        ref=args.github_ref,
+        pull_number=args.github_pull_number,
+        token_env=args.github_token_env,
+        timeout_seconds=args.github_timeout,
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -214,6 +230,40 @@ def _build_parser() -> argparse.ArgumentParser:
             "Path to a supplied GitHub Actions metadata JSON snapshot for "
             "--probe github-actions-readonly. No GitHub API calls are made."
         ),
+    )
+    simulate.add_argument(
+        "--github-actions-live",
+        action="store_true",
+        help=(
+            "Allow --probe github-actions-readonly to make explicit GET-only requests to "
+            "api.github.com. Off by default."
+        ),
+    )
+    simulate.add_argument(
+        "--github-repository",
+        help="Repository for --github-actions-live in owner/repo form.",
+    )
+    simulate.add_argument(
+        "--github-ref",
+        help="Branch, tag, or SHA for --github-actions-live metadata reads.",
+    )
+    simulate.add_argument(
+        "--github-pull-number",
+        type=int,
+        help="Optional pull request number to include in live probe evidence context.",
+    )
+    simulate.add_argument(
+        "--github-token-env",
+        help=(
+            "Optional environment variable name containing a GitHub token. The simulator "
+            "reports only the env var name, never the token value."
+        ),
+    )
+    simulate.add_argument(
+        "--github-timeout",
+        type=float,
+        default=10.0,
+        help="Timeout in seconds for explicit GitHub read-only probe requests. Max: 30.",
     )
     simulate.add_argument("--json", help="Write JSON simulation output")
     simulate.add_argument("--markdown", help="Write Markdown simulation output")

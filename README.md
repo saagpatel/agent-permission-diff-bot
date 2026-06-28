@@ -119,6 +119,26 @@ If `--probe github-actions-readonly` is supplied without
 `--github-actions-probe-json`, the simulator records a live-probe-needed gap instead of
 performing a lookup.
 
+An explicit credential-aware read-only mode can fetch GitHub Actions metadata from
+`api.github.com` when all live context is supplied:
+
+```bash
+agent-permission-diff simulate \
+  --probe github-actions-readonly \
+  --github-actions-live \
+  --github-repository saagpatel/agent-permission-diff-bot \
+  --github-ref HEAD_SHA_OR_BRANCH \
+  --github-token-env GITHUB_TOKEN \
+  --json simulation.json
+```
+
+Live GitHub probing is off unless `--github-actions-live` is present. The live adapter
+only sends GET requests to `api.github.com`, requires `--github-repository` and
+`--github-ref`, caps request timeouts at 30 seconds, and reports the token source as an
+environment variable name such as `env:GITHUB_TOKEN` without including the token value.
+It does not dispatch workflows, read repository secrets, mutate checks, create comments,
+deploy, or contact arbitrary hosts.
+
 Gate modes:
 
 - `observe`: records whether the threshold was met but always exits 0.
