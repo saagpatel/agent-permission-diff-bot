@@ -868,29 +868,50 @@ def _analyze_pull_request_target_workflow_risk(
         return
     found_untrusted_checkout = False
     found_execution_after_untrusted_checkout = False
+    found_unguarded_untrusted_checkout = False
+    found_guarded_untrusted_checkout = False
     for job_name, job in jobs.items():
         if not isinstance(job, dict):
             continue
+        job_if = str(job.get("if") or "")
         steps = job.get("steps")
         if not isinstance(steps, list):
             continue
         job_saw_untrusted_checkout = False
+        job_saw_unguarded_untrusted_checkout = False
         for step in steps:
             if not isinstance(step, dict):
                 continue
+            step_if = str(step.get("if") or "")
+            guarded = _has_non_fork_guard(job_if) or _has_non_fork_guard(step_if)
             if _step_checks_out_pull_request_head(step):
                 found_untrusted_checkout = True
                 job_saw_untrusted_checkout = True
+                if guarded:
+                    found_guarded_untrusted_checkout = True
+                else:
+                    found_unguarded_untrusted_checkout = True
+                    job_saw_unguarded_untrusted_checkout = True
                 builder.add_evidence(
                     "pull_request_target workflow checks out the pull request head "
                     f"in job `{job_name}`."
                 )
+                if guarded:
+                    builder.add_evidence(
+                        "pull_request_target pull request head checkout is guarded by "
+                        f"a non-fork condition in job `{job_name}`."
+                    )
             elif job_saw_untrusted_checkout and _step_executes_code(step):
                 found_execution_after_untrusted_checkout = True
                 builder.add_evidence(
                     "pull_request_target workflow executes code after pull request head "
                     f"checkout in job `{job_name}`."
                 )
+                if job_saw_unguarded_untrusted_checkout and not guarded:
+                    builder.add_evidence(
+                        "pull_request_target post-checkout execution appears unguarded "
+                        f"in job `{job_name}`."
+                    )
     if found_untrusted_checkout:
         builder.add_capability(
             "escalate",
@@ -905,10 +926,16 @@ def _analyze_pull_request_target_workflow_risk(
             "pull_request_target checkout of pull request head can bypass normal fork "
             "permission separation.",
         )
-        builder.add_gap(
-            "Review pull_request_target checkout of untrusted head code for token, secret, "
-            "and write-permission exposure."
-        )
+        if found_unguarded_untrusted_checkout:
+            builder.add_gap(
+                "Review pull_request_target checkout of untrusted head code for token, secret, "
+                "and write-permission exposure."
+            )
+        elif found_guarded_untrusted_checkout:
+            builder.add_gap(
+                "Confirm pull_request_target non-fork guard cannot be bypassed before trusting "
+                "pull request head checkout."
+            )
     if found_execution_after_untrusted_checkout:
         builder.add_capability(
             "write",
@@ -916,11 +943,16 @@ def _analyze_pull_request_target_workflow_risk(
             "medium",
             "pull_request_target workflow executes commands after untrusted head checkout.",
         )
-        builder.add_gap(
-            "Review commands after untrusted pull request head checkout for script, install, "
-            "test, build, and artifact side effects."
-        )
-    if "pull_request_target" in text and "github.event.pull_request.head" in text:
+        if found_unguarded_untrusted_checkout:
+            builder.add_gap(
+                "Review commands after untrusted pull request head checkout for script, install, "
+                "test, build, and artifact side effects."
+            )
+    if (
+        "pull_request_target" in text
+        and "github.event.pull_request.head" in text
+        and found_unguarded_untrusted_checkout
+    ):
         builder.add_gap(
             "pull_request_target workflow references pull request head context; static review "
             "should confirm it does not execute untrusted code with privileged token scope."
@@ -946,6 +978,15 @@ def _references_pull_request_head(value: str) -> bool:
         or "github.event.pull_request.head.ref" in lowered
         or "github.event.pull_request.head.repo" in lowered
         or "github.head_ref" in lowered
+    )
+
+
+def _has_non_fork_guard(value: str) -> bool:
+    normalized = re.sub(r"\s+", "", value.lower())
+    return (
+        "github.event.pull_request.head.repo.fork==false" in normalized
+        or "github.event.pull_request.head.repo.fork!=true" in normalized
+        or "!github.event.pull_request.head.repo.fork" in normalized
     )
 
 
