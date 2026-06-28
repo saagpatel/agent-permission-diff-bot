@@ -9,6 +9,7 @@ from agent_permission_diff_bot.cli import main
 from agent_permission_diff_bot.simulate import (
     GitHubActionsLiveProbeOptions,
     GitHubProbeError,
+    GitHubPullResolution,
     build_simulation,
     fetch_github_actions_readonly_metadata,
     list_simulation_probes,
@@ -422,9 +423,13 @@ def test_github_pull_number_resolves_ref_with_injected_resolver() -> None:
     resolver_calls: list[GitHubActionsLiveProbeOptions] = []
     fetcher_calls: list[GitHubActionsLiveProbeOptions] = []
 
-    def fake_resolver(options: GitHubActionsLiveProbeOptions) -> str:
+    def fake_resolver(options: GitHubActionsLiveProbeOptions) -> GitHubPullResolution:
         resolver_calls.append(options)
-        return "resolved-sha"
+        return GitHubPullResolution(
+            head_sha="resolved-sha",
+            head_repository="saagpatel/agent-permission-diff-bot",
+            base_repository="saagpatel/agent-permission-diff-bot",
+        )
 
     def fake_fetcher(options: GitHubActionsLiveProbeOptions) -> dict[str, object]:
         fetcher_calls.append(options)
@@ -446,8 +451,36 @@ def test_github_pull_number_resolves_ref_with_injected_resolver() -> None:
     assert any("Package (3.12)" in item for item in report.live_probe_evidence)
 
 
+def test_github_pull_number_records_cross_repository_trust_gap() -> None:
+    def fake_resolver(_: GitHubActionsLiveProbeOptions) -> GitHubPullResolution:
+        return GitHubPullResolution(
+            head_sha="fork-sha",
+            head_repository="contributor/agent-permission-diff-bot",
+            base_repository="saagpatel/agent-permission-diff-bot",
+        )
+
+    def fake_fetcher(options: GitHubActionsLiveProbeOptions) -> dict[str, object]:
+        assert options.ref == "fork-sha"
+        return {"check_runs": [{"name": "Package (3.13)", "conclusion": "success"}]}
+
+    report = build_simulation(
+        probes=("github-actions-readonly",),
+        github_actions_live_options=GitHubActionsLiveProbeOptions(
+            repository="saagpatel/agent-permission-diff-bot",
+            pull_number=14,
+        ),
+        github_actions_probe_fetcher=fake_fetcher,
+        github_pull_resolver=fake_resolver,
+    )
+
+    assert any("head repository `contributor/" in item for item in report.live_probe_evidence)
+    assert any("base repository `saagpatel/" in item for item in report.live_probe_evidence)
+    assert any("cross-repository" in item for item in report.live_probe_evidence)
+    assert any("pull_request_target" in gap for gap in report.live_probe_needed)
+
+
 def test_github_pull_number_resolution_failure_degrades_to_gap() -> None:
-    def fake_resolver(_: GitHubActionsLiveProbeOptions) -> str:
+    def fake_resolver(_: GitHubActionsLiveProbeOptions) -> GitHubPullResolution:
         raise GitHubProbeError("pull resolution failed safely")
 
     report = build_simulation(
@@ -497,11 +530,19 @@ def test_resolve_github_pull_head_sha_uses_get_only_allowlisted_request(monkeypa
 
     def fake_urlopen(request, timeout):
         calls.append((request, timeout))
-        return _FakeHTTPResponse({"head": {"sha": "resolved-sha"}})
+        return _FakeHTTPResponse(
+            {
+                "head": {
+                    "sha": "resolved-sha",
+                    "repo": {"full_name": "contributor/agent-permission-diff-bot"},
+                },
+                "base": {"repo": {"full_name": "saagpatel/agent-permission-diff-bot"}},
+            }
+        )
 
     monkeypatch.setattr("agent_permission_diff_bot.simulate.urllib.request.urlopen", fake_urlopen)
 
-    sha = resolve_github_pull_head_sha(
+    resolution = resolve_github_pull_head_sha(
         GitHubActionsLiveProbeOptions(
             repository="saagpatel/agent-permission-diff-bot",
             pull_number=15,
@@ -509,7 +550,9 @@ def test_resolve_github_pull_head_sha_uses_get_only_allowlisted_request(monkeypa
         )
     )
 
-    assert sha == "resolved-sha"
+    assert resolution.head_sha == "resolved-sha"
+    assert resolution.head_repository == "contributor/agent-permission-diff-bot"
+    assert resolution.base_repository == "saagpatel/agent-permission-diff-bot"
     assert len(calls) == 1
     assert calls[0][0].get_method() == "GET"
     assert calls[0][0].full_url == (
