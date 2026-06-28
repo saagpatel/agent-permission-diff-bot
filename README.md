@@ -97,6 +97,28 @@ Current scenario fixtures:
 - `claude-subagent-inherited-bypass`
 - `hook-policy-bypass-gap`
 
+List live-read-only probe adapters:
+
+```bash
+agent-permission-diff simulate --list-probes
+```
+
+Probe adapters are off by default and must be explicitly requested. The first adapter is
+`github-actions-readonly`, which consumes a supplied GitHub Actions metadata JSON snapshot
+and separates the result into `live_probe_evidence`. It does not call GitHub, read
+credentials, dispatch workflows, mutate checks, or deploy:
+
+```bash
+agent-permission-diff simulate \
+  --probe github-actions-readonly \
+  --github-actions-probe-json checks.json \
+  --json simulation.json
+```
+
+If `--probe github-actions-readonly` is supplied without
+`--github-actions-probe-json`, the simulator records a live-probe-needed gap instead of
+performing a lookup.
+
 Gate modes:
 
 - `observe`: records whether the threshold was met but always exits 0.

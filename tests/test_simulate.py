@@ -6,6 +6,7 @@ from pathlib import Path
 from agent_permission_diff_bot.cli import main
 from agent_permission_diff_bot.simulate import (
     build_simulation,
+    list_simulation_probes,
     list_simulation_scenarios,
     render_simulation_markdown,
 )
@@ -221,3 +222,116 @@ def test_cli_simulate_lists_scenarios(capsys) -> None:
     names = {item["name"] for item in payload}
     assert code == 0
     assert "mcp-broad-tool-schema-drift" in names
+
+
+def test_probes_are_off_by_default() -> None:
+    report = build_simulation(command="git status")
+
+    assert report.live_probe_evidence == []
+    assert all(item.kind != "probe" for item in report.inputs)
+
+
+def test_lists_supported_live_readonly_probes() -> None:
+    names = {item["name"] for item in list_simulation_probes()}
+
+    assert names == {"github-actions-readonly"}
+
+
+def test_unknown_probe_is_reported_without_lookup() -> None:
+    report = build_simulation(probes=("not-a-real-probe",))
+
+    assert report.inputs[0].kind == "probe"
+    assert report.inputs[0].status == "unknown"
+    assert report.live_probe_evidence == []
+    assert any("no live lookup was attempted" in gap for gap in report.live_probe_needed)
+
+
+def test_github_actions_probe_requires_supplied_snapshot() -> None:
+    report = build_simulation(probes=("github-actions-readonly",))
+
+    assert report.inputs[0].kind == "probe"
+    assert report.inputs[0].status == "missing_context"
+    assert report.live_probe_evidence == []
+    assert any("--github-actions-probe-json" in gap for gap in report.live_probe_needed)
+
+
+def test_github_actions_probe_records_separate_live_evidence() -> None:
+    report = build_simulation(
+        command="git status",
+        probes=("github-actions-readonly",),
+        github_actions_probe_json_text=json.dumps(
+            {
+                "repository": "saagpatel/agent-permission-diff-bot",
+                "pull_number": 12,
+                "head_sha": "abc123",
+                "check_runs": [
+                    {
+                        "name": "Package (3.13)",
+                        "status": "completed",
+                        "conclusion": "success",
+                    }
+                ],
+                "workflow_runs": [
+                    {
+                        "name": "CI",
+                        "status": "completed",
+                        "conclusion": "success",
+                    }
+                ],
+            }
+        ),
+    )
+
+    assert any("Command has read-shaped verb" in item for item in report.deterministic_evidence)
+    assert any("Package (3.13)" in item for item in report.live_probe_evidence)
+    assert any("GitHub Actions workflow `CI`" in item for item in report.live_probe_evidence)
+    assert all("Package (3.13)" not in item for item in report.deterministic_evidence)
+
+
+def test_render_markdown_lists_live_probe_evidence() -> None:
+    report = build_simulation(
+        probes=("github-actions-readonly",),
+        github_actions_probe_json_text=json.dumps(
+            {"check_runs": [{"name": "Agent-facing permission diff", "conclusion": "success"}]}
+        ),
+    )
+
+    markdown = render_simulation_markdown(report)
+
+    assert "## Live Probe Evidence" in markdown
+    assert "Agent-facing permission diff" in markdown
+
+
+def test_cli_simulate_lists_probes(capsys) -> None:
+    code = main(["simulate", "--list-probes"])
+
+    payload = json.loads(capsys.readouterr().out)
+    names = {item["name"] for item in payload}
+    assert code == 0
+    assert "github-actions-readonly" in names
+
+
+def test_cli_simulate_accepts_github_actions_probe_snapshot(tmp_path: Path) -> None:
+    snapshot = tmp_path / "checks.json"
+    output = tmp_path / "simulation.json"
+    snapshot.write_text(
+        json.dumps({"check_runs": [{"name": "Package (3.11)", "conclusion": "success"}]}),
+        encoding="utf-8",
+    )
+
+    code = main(
+        [
+            "simulate",
+            "--probe",
+            "github-actions-readonly",
+            "--github-actions-probe-json",
+            str(snapshot),
+            "--json",
+            str(output),
+        ]
+    )
+
+    payload = json.loads(output.read_text(encoding="utf-8"))
+    assert code == 0
+    assert payload["deterministic_evidence"] == []
+    assert any("Package (3.11)" in item for item in payload["live_probe_evidence"])

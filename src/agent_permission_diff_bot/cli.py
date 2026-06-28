@@ -18,6 +18,7 @@ from agent_permission_diff_bot.reporting import (
 )
 from agent_permission_diff_bot.simulate import (
     build_simulation,
+    list_simulation_probes,
     list_simulation_scenarios,
     render_simulation_markdown,
     write_simulation_json,
@@ -84,14 +85,19 @@ def _run_simulate(args: argparse.Namespace) -> int:
     if args.list_scenarios:
         print(json.dumps(list_simulation_scenarios(), indent=2, sort_keys=True))
         return 0
+    if args.list_probes:
+        print(json.dumps(list_simulation_probes(), indent=2, sort_keys=True))
+        return 0
     report = build_simulation(
         scenarios=tuple(args.scenario or ()),
+        probes=tuple(args.probe or ()),
         command=args.command_string,
         workflow_text=_read_optional_text(args.workflow),
         mcp_config_text=_read_optional_text(args.mcp_config),
         mcpaudit_json_text=_read_optional_text(args.mcpaudit_json),
         subagent_text=_read_optional_text(args.subagent),
         hook_policy_text=_read_optional_text(args.hook_policy),
+        github_actions_probe_json_text=_read_optional_text(args.github_actions_probe_json),
     )
     if args.json:
         write_simulation_json(report, Path(args.json))
@@ -188,6 +194,26 @@ def _build_parser() -> argparse.ArgumentParser:
         "--list-scenarios",
         action="store_true",
         help="List built-in static scenario fixtures as JSON and exit.",
+    )
+    simulate.add_argument(
+        "--probe",
+        action="append",
+        help=(
+            "Run an explicitly supplied live-read-only probe adapter. "
+            "Currently supported: github-actions-readonly."
+        ),
+    )
+    simulate.add_argument(
+        "--list-probes",
+        action="store_true",
+        help="List supported live-read-only probe adapters as JSON and exit.",
+    )
+    simulate.add_argument(
+        "--github-actions-probe-json",
+        help=(
+            "Path to a supplied GitHub Actions metadata JSON snapshot for "
+            "--probe github-actions-readonly. No GitHub API calls are made."
+        ),
     )
     simulate.add_argument("--json", help="Write JSON simulation output")
     simulate.add_argument("--markdown", help="Write Markdown simulation output")
