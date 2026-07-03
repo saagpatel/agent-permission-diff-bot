@@ -634,6 +634,79 @@ def simulation_json_schema(kind: str) -> dict[str, Any]:
     return schemas[kind]
 
 
+def validate_simulation_json(payload: Any, schema_kind: str) -> dict[str, Any]:
+    schema = simulation_json_schema(schema_kind)
+    errors = _validate_json_value(payload, schema, "$")
+    return {
+        "schema": schema_kind,
+        "schema_id": schema["$id"],
+        "valid": not errors,
+        "errors": errors,
+    }
+
+
+def _validate_json_value(value: Any, schema: dict[str, Any], path: str) -> list[str]:
+    errors: list[str] = []
+    if "const" in schema and value != schema["const"]:
+        errors.append(f"{path}: expected constant {schema['const']!r}")
+    if "enum" in schema and value not in schema["enum"]:
+        errors.append(f"{path}: expected one of {schema['enum']!r}")
+    schema_type = schema.get("type")
+    if schema_type and not _matches_json_type(value, schema_type):
+        errors.append(f"{path}: expected {schema_type}")
+        return errors
+    if schema_type == "integer" and "minimum" in schema and value < schema["minimum"]:
+        errors.append(f"{path}: expected value >= {schema['minimum']}")
+    if schema_type == "array":
+        item_schema = schema.get("items")
+        if isinstance(item_schema, dict):
+            for index, item in enumerate(value):
+                errors.extend(_validate_json_value(item, item_schema, f"{path}[{index}]"))
+    if schema_type == "object":
+        errors.extend(_validate_json_object(value, schema, path))
+    return errors
+
+
+def _validate_json_object(value: dict[str, Any], schema: dict[str, Any], path: str) -> list[str]:
+    errors: list[str] = []
+    properties = schema.get("properties", {})
+    for key in schema.get("required", []):
+        if key not in value:
+            errors.append(f"{path}: missing required property `{key}`")
+    property_names = schema.get("propertyNames", {})
+    if "enum" in property_names:
+        allowed_names = set(property_names["enum"])
+        for key in value:
+            if key not in allowed_names:
+                errors.append(f"{path}: unexpected property name `{key}`")
+    additional = schema.get("additionalProperties", True)
+    for key, item in value.items():
+        item_path = f"{path}.{key}"
+        if key in properties:
+            errors.extend(_validate_json_value(item, properties[key], item_path))
+        elif isinstance(additional, dict):
+            errors.extend(_validate_json_value(item, additional, item_path))
+        elif additional is False:
+            errors.append(f"{path}: unexpected property `{key}`")
+    return errors
+
+
+def _matches_json_type(value: Any, schema_type: str) -> bool:
+    if schema_type == "array":
+        return isinstance(value, list)
+    if schema_type == "boolean":
+        return isinstance(value, bool)
+    if schema_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if schema_type == "number":
+        return isinstance(value, int | float) and not isinstance(value, bool)
+    if schema_type == "object":
+        return isinstance(value, dict)
+    if schema_type == "string":
+        return isinstance(value, str)
+    return True
+
+
 def _schema_base(schema_id: str, title: str) -> dict[str, Any]:
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

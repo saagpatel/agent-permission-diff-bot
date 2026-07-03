@@ -24,6 +24,7 @@ from agent_permission_diff_bot.simulate import (
     list_simulation_scenarios,
     render_simulation_markdown,
     simulation_json_schema,
+    validate_simulation_json,
     write_simulation_json,
     write_simulation_json_summary,
     write_simulation_markdown,
@@ -98,6 +99,11 @@ def _run_simulate(args: argparse.Namespace) -> int:
     if args.json_schema:
         print(json.dumps(simulation_json_schema(args.json_schema), indent=2, sort_keys=True))
         return 0
+    if args.validate_json:
+        payload = json.loads(_read_optional_text(args.validate_json) or "null")
+        result = validate_simulation_json(payload, args.schema)
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0 if result["valid"] else 2
     report = build_simulation(
         scenarios=tuple(args.scenario or ()),
         probes=tuple(args.probe or ()),
@@ -250,6 +256,19 @@ def _build_parser() -> argparse.ArgumentParser:
             "Print a JSON Schema for a simulator output shape and exit. "
             "No simulation inputs or probes are executed."
         ),
+    )
+    simulate.add_argument(
+        "--validate-json",
+        help=(
+            "Validate an existing simulator JSON artifact against --schema and exit. "
+            "Use '-' to read from stdin."
+        ),
+    )
+    simulate.add_argument(
+        "--schema",
+        choices=("summary", "full", "contract"),
+        default="summary",
+        help="Simulator JSON schema to use with --validate-json. Default: summary.",
     )
     simulate.add_argument(
         "--github-actions-probe-json",
