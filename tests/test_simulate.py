@@ -9,10 +9,12 @@ from pathlib import Path
 from agent_permission_diff_bot.cli import main
 from agent_permission_diff_bot.simulate import (
     CAPABILITIES,
+    RISK_FACETS,
     GitHubActionsLiveProbeOptions,
     GitHubProbeError,
     GitHubPullResolution,
     build_simulation,
+    explain_simulation_schema,
     fetch_github_actions_readonly_metadata,
     list_simulation_probes,
     list_simulation_scenarios,
@@ -684,6 +686,44 @@ def test_simulation_output_docs_summary_example_matches_renderer() -> None:
     )
 
     assert documented_summary == generated_summary
+
+
+def test_explain_simulation_schema_contract() -> None:
+    contract = explain_simulation_schema()
+
+    assert contract["schema_version"] == "agent-permission-simulation.contract.v1"
+    assert contract["report_schema_version"] == "agent-permission-simulation.v1"
+    assert contract["summary_schema_version"] == "agent-permission-simulation.v1.summary.v1"
+    assert contract["default_mode"] == "static/no-credential/no-network"
+    assert contract["live_probe_default"] == "disabled"
+    assert {item["name"] for item in contract["capabilities"]} == set(CAPABILITIES)
+    assert {item["name"] for item in contract["risk_facets"]} == set(RISK_FACETS)
+    assert {item["name"] for item in contract["scenarios"]} == {
+        "command-approval-laundering",
+        "github-actions-oidc-deploy",
+        "mcp-broad-tool-schema-drift",
+        "claude-subagent-inherited-bypass",
+        "hook-policy-bypass-gap",
+    }
+    assert {item["name"] for item in contract["probes"]} == {"github-actions-readonly"}
+
+
+def test_cli_simulate_explain_schema_exits_without_reading_inputs(capsys) -> None:
+    code = main(
+        [
+            "simulate",
+            "--explain-schema",
+            "--workflow",
+            "missing-workflow.yml",
+            "--probe",
+            "unknown-probe",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["schema_version"] == "agent-permission-simulation.contract.v1"
+    assert payload["live_probe_default"] == "disabled"
 
 
 def test_cli_simulate_writes_json_summary(tmp_path: Path) -> None:

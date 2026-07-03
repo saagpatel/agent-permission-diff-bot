@@ -19,6 +19,7 @@ from agent_permission_diff_bot.reporting import (
 from agent_permission_diff_bot.simulate import (
     GitHubActionsLiveProbeOptions,
     build_simulation,
+    explain_simulation_schema,
     list_simulation_probes,
     list_simulation_scenarios,
     render_simulation_markdown,
@@ -89,6 +90,9 @@ def _run_simulate(args: argparse.Namespace) -> int:
         return 0
     if args.list_probes:
         print(json.dumps(list_simulation_probes(), indent=2, sort_keys=True))
+        return 0
+    if args.explain_schema:
+        print(json.dumps(explain_simulation_schema(), indent=2, sort_keys=True))
         return 0
     report = build_simulation(
         scenarios=tuple(args.scenario or ()),
@@ -226,6 +230,14 @@ def _build_parser() -> argparse.ArgumentParser:
         "--list-probes",
         action="store_true",
         help="List supported live-read-only probe adapters as JSON and exit.",
+    )
+    simulate.add_argument(
+        "--explain-schema",
+        action="store_true",
+        help=(
+            "Print machine-readable simulator contract metadata as JSON and exit. "
+            "No simulation inputs or probes are executed."
+        ),
     )
     simulate.add_argument(
         "--github-actions-probe-json",

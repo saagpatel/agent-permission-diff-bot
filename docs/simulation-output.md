@@ -221,3 +221,22 @@ Example:
 - `risk_facets` reports analyzer-emitted categories. Each facet has `status`, `confidence`, `evidence_count`, and `live_probe_needed_count` in summary mode.
 - `live_probe_needed` is retained in summary mode so automation can route required follow-up checks.
 - Full JSON keeps `deterministic_evidence`, `live_probe_evidence`, and `live_probe_needed`, plus risk facet indexes back into those arrays.
+
+## Contract Discovery
+
+Use `simulate --explain-schema` when a gate or integration needs to discover the simulator
+contract without scraping Markdown examples or running a simulation.
+
+```bash
+agent-permission-diff simulate --explain-schema
+```
+
+The command emits JSON with:
+
+- report and summary schema versions
+- default static/no-credential/no-network mode and safety boundary
+- capability names and summary fields
+- analyzer-emitted risk facet names and fields
+- accepted input kinds
+- built-in scenario fixtures
+- supported live-read-only probe adapters and the live-probe opt-in boundary
