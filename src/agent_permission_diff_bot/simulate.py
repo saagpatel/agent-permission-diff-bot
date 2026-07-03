@@ -818,6 +818,7 @@ def _analyze_workflow(builder: SimulationBuilder, text: str) -> None:
             builder.add_evidence(evidence)
     _analyze_workflow_permission_inheritance(builder, workflow_data, text)
     _analyze_workflow_reusable_and_action_boundaries(builder, workflow_data)
+    _analyze_workflow_environment_protection(builder, workflow_data, text)
     _analyze_workflow_artifact_and_secret_exposure(builder, workflow_data)
     if "pull_request_target" in text:
         builder.add_capability(
@@ -1193,6 +1194,136 @@ def _uses_ref_is_unpinned(value: str) -> bool:
         return True
     ref = value.rsplit("@", 1)[1]
     return not bool(re.fullmatch(r"[0-9a-fA-F]{40}", ref))
+
+
+def _analyze_workflow_environment_protection(
+    builder: SimulationBuilder,
+    workflow_data: dict[str, Any] | None,
+    text: str,
+) -> None:
+    if workflow_data is None:
+        return
+    jobs = workflow_data.get("jobs")
+    if not isinstance(jobs, dict):
+        return
+
+    trigger_config = _workflow_on_value(workflow_data)
+    triggers = _workflow_trigger_names(trigger_config)
+    trigger_text = json.dumps(trigger_config, sort_keys=True, default=str)
+    has_oidc = "id-token: write" in text or "id-token:write" in text
+    found_deploy_job = False
+    found_environment = False
+    found_deploy_without_environment = False
+    for job_name, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        environment = job.get("environment")
+        if environment is not None:
+            found_environment = True
+            environment_name = _stringify_yaml(environment)
+            builder.add_evidence(
+                f"Job `{job_name}` declares deployment environment `{environment_name}`."
+            )
+            builder.add_gap(
+                f"Confirm environment `{environment_name}` has required reviewers, "
+                "wait timers, deployment branch/tag rules, and protected secrets."
+            )
+        if _job_is_deploy_shaped(job):
+            found_deploy_job = True
+            builder.add_capability(
+                "deploy",
+                "yes",
+                "medium",
+                f"Job `{job_name}` contains deploy/publish-shaped steps.",
+            )
+            if environment is None:
+                found_deploy_without_environment = True
+                builder.add_gap(
+                    f"Deploy-shaped job `{job_name}` has no visible GitHub environment gate."
+                )
+
+    if found_environment:
+        builder.add_capability(
+            "deploy",
+            "possible",
+            "medium",
+            "Workflow declares GitHub deployment environment gates.",
+        )
+    if found_deploy_job and has_oidc and not found_environment:
+        builder.add_gap(
+            "OIDC deploy path lacks a visible GitHub environment; confirm cloud trust policy "
+            "and repository environment protections."
+        )
+    if found_deploy_without_environment and _trigger_allows_push_or_tag(triggers, trigger_text):
+        builder.add_gap(
+            "Deploy-shaped workflow can run from push/tag triggers without a visible "
+            "environment gate."
+        )
+    if found_deploy_job and not _trigger_has_visible_branch_or_tag_filter(trigger_text):
+        builder.add_gap(
+            "Deploy-shaped workflow lacks visible branch or tag restrictions in supplied YAML."
+        )
+
+
+def _workflow_on_value(workflow_data: dict[str, Any]) -> object:
+    if "on" in workflow_data:
+        return workflow_data["on"]
+    if True in workflow_data:
+        return workflow_data[True]
+    return None
+
+
+def _workflow_trigger_names(raw: object) -> set[str]:
+    if isinstance(raw, str):
+        return {raw}
+    if isinstance(raw, list):
+        return {str(item) for item in raw}
+    if isinstance(raw, dict):
+        return {str(key) for key in raw}
+    return set()
+
+
+def _trigger_allows_push_or_tag(triggers: set[str], trigger_text: str) -> bool:
+    return "push" in triggers or "tags" in trigger_text
+
+
+def _trigger_has_visible_branch_or_tag_filter(trigger_text: str) -> bool:
+    return any(token in trigger_text for token in ('"branches"', '"branches-ignore"', '"tags"'))
+
+
+def _job_is_deploy_shaped(job: dict[str, Any]) -> bool:
+    if job.get("environment") is not None:
+        return True
+    steps = job.get("steps")
+    if not isinstance(steps, list):
+        return False
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        uses = str(step.get("uses") or "").lower()
+        run = str(step.get("run") or "")
+        if any(
+            hint in uses
+            for hint in (
+                "pypa/gh-action-pypi-publish",
+                "docker/build-push-action",
+                "actions/deploy-pages",
+                "cloudflare/",
+                "vercel/",
+            )
+        ):
+            return True
+        if DEPLOY_COMMAND_RE.search(run):
+            return True
+    return False
+
+
+def _stringify_yaml(value: object) -> str:
+    if isinstance(value, dict):
+        name = value.get("name")
+        if name is not None:
+            return str(name)
+    return str(value)
 
 
 def _analyze_workflow_artifact_and_secret_exposure(

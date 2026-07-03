@@ -205,6 +205,74 @@ jobs:
     assert not any("setup-python" in gap for gap in report.live_probe_needed)
 
 
+def test_simulates_deploy_without_environment_gate() -> None:
+    report = build_simulation(
+        workflow_text="""
+name: Deploy
+on:
+  push:
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - run: vercel deploy --prod
+"""
+    )
+
+    assert report.capabilities["deploy"].level == "yes"
+    assert any("Deploy-shaped job `deploy`" in gap for gap in report.live_probe_needed)
+    assert any("push/tag triggers" in gap for gap in report.live_probe_needed)
+    assert any("branch or tag restrictions" in gap for gap in report.live_probe_needed)
+
+
+def test_simulates_deploy_environment_protection_review() -> None:
+    report = build_simulation(
+        workflow_text="""
+name: Deploy
+on:
+  push:
+    branches: [main]
+jobs:
+  deploy:
+    environment:
+      name: production
+    runs-on: ubuntu-latest
+    steps:
+      - run: wrangler deploy
+"""
+    )
+
+    assert report.capabilities["deploy"].level == "yes"
+    assert any(
+        "deployment environment `production`" in item for item in report.deterministic_evidence
+    )
+    assert any("required reviewers" in gap for gap in report.live_probe_needed)
+    assert not any("no visible GitHub environment gate" in gap for gap in report.live_probe_needed)
+    assert not any("branch or tag restrictions" in gap for gap in report.live_probe_needed)
+
+
+def test_simulates_oidc_deploy_without_visible_environment() -> None:
+    report = build_simulation(
+        workflow_text="""
+name: Publish
+on:
+  workflow_dispatch:
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: pypa/gh-action-pypi-publish@release/v1
+"""
+    )
+
+    assert report.capabilities["deploy"].level == "yes"
+    assert report.capabilities["escalate"].level == "yes"
+    assert any("OIDC deploy path lacks" in gap for gap in report.live_probe_needed)
+
+
 def test_simulates_workflow_artifact_upload_exposure() -> None:
     report = build_simulation(
         workflow_text="""

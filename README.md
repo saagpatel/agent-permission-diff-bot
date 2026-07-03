@@ -100,6 +100,11 @@ actions, and action references that are not pinned to full commit SHAs. These ar
 as deterministic trust-boundary evidence with live-probe-needed gaps for called workflow
 code, caller secrets, local action contents, and floating ref trust.
 
+Deployment gates are treated as another static boundary. Deploy-shaped jobs, OIDC publish
+paths, missing job `environment` gates, visible deployment environments, and supplied
+branch/tag trigger filters are classified, with live-probe-needed gaps for required
+reviewers, wait timers, protected environment secrets, and branch/tag deployment rules.
+
 The workflow simulator also classifies common GitHub Actions data-exposure paths such as
 artifact uploads, cache save/restore steps, GitHub secret references, and writes to
 `GITHUB_OUTPUT`, `GITHUB_ENV`, or `GITHUB_STEP_SUMMARY`. These are static signals only:
