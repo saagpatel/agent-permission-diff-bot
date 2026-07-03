@@ -39,6 +39,32 @@ CAPABILITIES: tuple[CapabilityName, ...] = (
     "escalate",
 )
 
+RISK_FACETS: dict[str, str] = {
+    "artifact_exposure": (
+        "Workflow artifact, cache, output, or summary paths that may expose data outside "
+        "the immediate job boundary."
+    ),
+    "deployment_gate": (
+        "Deploy-shaped workflow paths and whether static evidence shows environment, branch, "
+        "or tag controls."
+    ),
+    "pull_request_target_boundary": (
+        "Privileged pull_request_target workflows that may evaluate fork-controlled code or "
+        "metadata with elevated token or secret access."
+    ),
+    "reusable_workflow_boundary": (
+        "Reusable workflow and local/external action boundaries, including floating refs and "
+        "callee trust assumptions."
+    ),
+    "secret_exposure": (
+        "Secret references that may flow into logs, outputs, artifacts, caches, reusable "
+        "workflow callees, or external actions."
+    ),
+    "token_inheritance": (
+        "Explicit, inherited, omitted, disabled, or broad GITHUB_TOKEN permission posture."
+    ),
+}
+
 READ_COMMAND_RE = re.compile(
     r"(^|[;&|]\s*)(cat|bat|less|more|head|tail|nl|sed|awk|grep|rg|find|ls|"
     r"git\s+(show|diff|log|status)|gh\s+(repo\s+view|pr\s+view|api\s+-X\s+GET))\b",
@@ -536,6 +562,65 @@ def list_simulation_scenarios() -> list[dict[str, str]]:
 
 def list_simulation_probes() -> list[dict[str, str]]:
     return list(SUPPORTED_PROBES.values())
+
+
+def explain_simulation_schema() -> dict[str, Any]:
+    return {
+        "schema_version": "agent-permission-simulation.contract.v1",
+        "report_schema_version": "agent-permission-simulation.v1",
+        "summary_schema_version": "agent-permission-simulation.v1.summary.v1",
+        "default_mode": "static/no-credential/no-network",
+        "safety_boundary": (
+            "Static simulation only: no credentials read, no network calls, no MCP server "
+            "launches, no workflow dispatches, no deploys, and no destructive probes."
+        ),
+        "capabilities": [
+            {
+                "name": name,
+                "levels": ["yes", "possible", "unknown", "no"],
+                "summary_fields": ["level", "confidence"],
+            }
+            for name in CAPABILITIES
+        ],
+        "risk_facets": [
+            {
+                "name": name,
+                "description": description,
+                "summary_fields": [
+                    "status",
+                    "confidence",
+                    "evidence_count",
+                    "live_probe_needed_count",
+                ],
+                "full_report_fields": [
+                    "status",
+                    "confidence",
+                    "deterministic_evidence_indices",
+                    "live_probe_evidence_indices",
+                    "live_probe_needed_indices",
+                ],
+            }
+            for name, description in sorted(RISK_FACETS.items())
+        ],
+        "input_kinds": [
+            "command",
+            "workflow",
+            "mcp_config",
+            "mcpaudit_json",
+            "subagent",
+            "hook_policy",
+            "scenario",
+            "probe",
+        ],
+        "scenarios": list_simulation_scenarios(),
+        "probes": list_simulation_probes(),
+        "live_probe_default": "disabled",
+        "live_probe_boundary": (
+            "Live probes require an explicit --probe plus probe-specific opt-in context. "
+            "The initial GitHub Actions adapter is read-only and must not dispatch workflows, "
+            "read secrets, deploy, or mutate GitHub."
+        ),
+    }
 
 
 def write_simulation_json(report: SimulationReport, path: Path) -> None:

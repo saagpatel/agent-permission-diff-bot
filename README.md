@@ -95,6 +95,11 @@ statuses/counts, inputs, and live-probe-needed gaps without the full evidence pa
 See [Simulation Output Contract](docs/simulation-output.md) for downstream automation
 examples.
 
+Use `simulate --explain-schema` when automation needs machine-readable simulator contract
+metadata before running a simulation. It prints schema versions, capability names, risk
+facets, input kinds, built-in scenarios, supported probes, and live-probe boundaries without
+reading input files or running probes.
+
 For supplied GitHub Actions workflow snapshots, `simulate` also flags
 `pull_request_target` workflows that check out or execute pull request head code, since
 that can collapse fork isolation into privileged token or secret exposure. Obvious
