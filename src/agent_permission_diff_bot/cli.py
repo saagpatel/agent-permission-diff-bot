@@ -23,6 +23,7 @@ from agent_permission_diff_bot.simulate import (
     list_simulation_scenarios,
     render_simulation_markdown,
     write_simulation_json,
+    write_simulation_json_summary,
     write_simulation_markdown,
 )
 from agent_permission_diff_bot.sources import (
@@ -103,9 +104,11 @@ def _run_simulate(args: argparse.Namespace) -> int:
     )
     if args.json:
         write_simulation_json(report, Path(args.json))
+    if args.json_summary:
+        write_simulation_json_summary(report, Path(args.json_summary))
     if args.markdown:
         write_simulation_markdown(report, Path(args.markdown))
-    if not args.json and not args.markdown:
+    if not args.json and not args.json_summary and not args.markdown:
         print(render_simulation_markdown(report))
     return 0
 
@@ -269,6 +272,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Timeout in seconds for explicit GitHub read-only probe requests. Max: 30.",
     )
     simulate.add_argument("--json", help="Write JSON simulation output")
+    simulate.add_argument(
+        "--json-summary",
+        help=(
+            "Write compact JSON simulation summary with capabilities, risk facets, and "
+            "live-probe-needed gaps."
+        ),
+    )
     simulate.add_argument("--markdown", help="Write Markdown simulation output")
     return parser
 

@@ -14,6 +14,7 @@ from agent_permission_diff_bot.simulate import (
     fetch_github_actions_readonly_metadata,
     list_simulation_probes,
     list_simulation_scenarios,
+    render_simulation_json_summary,
     render_simulation_markdown,
     resolve_github_pull_head_sha,
 )
@@ -587,6 +588,61 @@ jobs:
     assert "## Risk Facets" in markdown
     assert "`artifact_exposure`" in markdown
     assert "| Facet | Status | Confidence | Evidence | Live Gaps |" in markdown
+
+
+def test_render_json_summary_omits_full_evidence_payloads() -> None:
+    report = build_simulation(
+        workflow_text="""
+name: Package
+on:
+  pull_request:
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/upload-artifact@v4
+        with:
+          path: dist/
+"""
+    )
+
+    summary = render_simulation_json_summary(report)
+
+    assert summary["schema_version"] == "agent-permission-simulation.v1.summary.v1"
+    assert summary["capabilities"]["send"]["level"] == "possible"
+    assert summary["risk_facets"]["artifact_exposure"]["status"] == "review_needed"
+    assert summary["risk_facets"]["artifact_exposure"]["live_probe_needed_count"] > 0
+    assert "deterministic_evidence" not in summary
+    assert "live_probe_evidence" not in summary
+    assert "live_probe_needed" in summary
+
+
+def test_cli_simulate_writes_json_summary(tmp_path: Path) -> None:
+    workflow = tmp_path / "workflow.yml"
+    workflow.write_text(
+        """
+name: Package
+on:
+  pull_request:
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/upload-artifact@v4
+        with:
+          path: dist/
+""",
+        encoding="utf-8",
+    )
+    summary_path = tmp_path / "summary.json"
+
+    code = main(["simulate", "--workflow", str(workflow), "--json-summary", str(summary_path)])
+
+    payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    assert code == 0
+    assert payload["input_count"] == 1
+    assert payload["risk_facets"]["artifact_exposure"]["evidence_count"] > 0
+    assert "deterministic_evidence" not in payload
 
 
 def test_lists_builtin_simulation_scenarios() -> None:

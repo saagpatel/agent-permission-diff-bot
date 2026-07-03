@@ -542,6 +542,13 @@ def write_simulation_json(report: SimulationReport, path: Path) -> None:
     path.write_text(json.dumps(report.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def write_simulation_json_summary(report: SimulationReport, path: Path) -> None:
+    path.write_text(
+        json.dumps(render_simulation_json_summary(report), indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+
 def write_simulation_markdown(report: SimulationReport, path: Path) -> None:
     path.write_text(render_simulation_markdown(report), encoding="utf-8")
 
@@ -550,6 +557,34 @@ def _extend_unique_indices(target: list[int], values: tuple[int, ...]) -> None:
     for value in values:
         if value >= 0 and value not in target:
             target.append(value)
+
+
+def render_simulation_json_summary(report: SimulationReport) -> dict[str, Any]:
+    return {
+        "schema_version": f"{report.schema_version}.summary.v1",
+        "mode": report.mode,
+        "safety_boundary": report.safety_boundary,
+        "input_count": len(report.inputs),
+        "inputs": [item.to_dict() for item in report.inputs],
+        "capabilities": {
+            name: {
+                "level": report.capabilities[name].level,
+                "confidence": report.capabilities[name].confidence,
+            }
+            for name in CAPABILITIES
+        },
+        "risk_facets": {
+            name: {
+                "status": facet.status,
+                "confidence": facet.confidence,
+                "evidence_count": len(facet.deterministic_evidence_indices)
+                + len(facet.live_probe_evidence_indices),
+                "live_probe_needed_count": len(facet.live_probe_needed_indices),
+            }
+            for name, facet in sorted(report.risk_facets.items())
+        },
+        "live_probe_needed": report.live_probe_needed,
+    }
 
 
 def render_simulation_markdown(report: SimulationReport) -> str:

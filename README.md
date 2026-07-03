@@ -72,6 +72,7 @@ agent-permission-diff simulate \
   --mcp-config .mcp.json \
   --scenario github-actions-oidc-deploy \
   --json simulation.json \
+  --json-summary simulation-summary.json \
   --markdown simulation.md
 ```
 
@@ -88,6 +89,9 @@ live-probe-needed gaps, structured `risk_facets`, and the active safety boundary
 `reusable_workflow_boundary`, `secret_exposure`, and `pull_request_target_boundary`.
 Each facet includes a status, confidence, and indexes back to deterministic evidence,
 live probe evidence, and live-probe-needed gaps.
+
+Use `--json-summary` when automation only needs compact capability levels, risk facet
+statuses/counts, inputs, and live-probe-needed gaps without the full evidence payload.
 
 For supplied GitHub Actions workflow snapshots, `simulate` also flags
 `pull_request_target` workflows that check out or execute pull request head code, since
