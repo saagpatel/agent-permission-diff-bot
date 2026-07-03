@@ -394,6 +394,7 @@ class SimulationBuilder:
     def __init__(self) -> None:
         self.inputs: list[SimulationInput] = []
         self.capabilities = {name: CapabilityAssessment(capability=name) for name in CAPABILITIES}
+        self.risk_facets: dict[str, SimulationRiskFacet] = {}
         self.deterministic_evidence: list[str] = []
         self.live_probe_evidence: list[str] = []
         self.live_probe_needed: list[str] = []
@@ -414,21 +415,57 @@ class SimulationBuilder:
         level: CapabilityLevel,
         confidence: str,
         evidence: str,
-    ) -> None:
+    ) -> int:
         self.capabilities[capability].add(level, confidence, evidence)
-        self.add_evidence(evidence)
+        return self.add_evidence(evidence)
 
-    def add_evidence(self, evidence: str) -> None:
-        if evidence and evidence not in self.deterministic_evidence:
+    def add_evidence(self, evidence: str) -> int:
+        if evidence and evidence in self.deterministic_evidence:
+            return self.deterministic_evidence.index(evidence)
+        if evidence:
             self.deterministic_evidence.append(evidence)
+            return len(self.deterministic_evidence) - 1
+        return -1
 
-    def add_live_probe_evidence(self, evidence: str) -> None:
-        if evidence and evidence not in self.live_probe_evidence:
+    def add_live_probe_evidence(self, evidence: str) -> int:
+        if evidence and evidence in self.live_probe_evidence:
+            return self.live_probe_evidence.index(evidence)
+        if evidence:
             self.live_probe_evidence.append(evidence)
+            return len(self.live_probe_evidence) - 1
+        return -1
 
-    def add_gap(self, gap: str) -> None:
-        if gap and gap not in self.live_probe_needed:
+    def add_gap(self, gap: str) -> int:
+        if gap and gap in self.live_probe_needed:
+            return self.live_probe_needed.index(gap)
+        if gap:
             self.live_probe_needed.append(gap)
+            return len(self.live_probe_needed) - 1
+        return -1
+
+    def add_facet(
+        self,
+        name: str,
+        status: RiskFacetStatus,
+        confidence: str,
+        *,
+        deterministic_evidence_indices: tuple[int, ...] = (),
+        live_probe_evidence_indices: tuple[int, ...] = (),
+        live_probe_needed_indices: tuple[int, ...] = (),
+    ) -> None:
+        facet = self.risk_facets.get(name)
+        if facet is None:
+            facet = SimulationRiskFacet(name=name, status=status, confidence=confidence)
+            self.risk_facets[name] = facet
+        if status == "review_needed":
+            facet.status = "review_needed"
+        facet.confidence = _weaker_confidence(facet.confidence, confidence)
+        _extend_unique_indices(
+            facet.deterministic_evidence_indices,
+            deterministic_evidence_indices,
+        )
+        _extend_unique_indices(facet.live_probe_evidence_indices, live_probe_evidence_indices)
+        _extend_unique_indices(facet.live_probe_needed_indices, live_probe_needed_indices)
 
     def build(self) -> SimulationReport:
         return SimulationReport(
@@ -440,11 +477,7 @@ class SimulationBuilder:
             ),
             inputs=self.inputs,
             capabilities=self.capabilities,
-            risk_facets=_build_risk_facets(
-                self.deterministic_evidence,
-                self.live_probe_evidence,
-                self.live_probe_needed,
-            ),
+            risk_facets=self.risk_facets,
             deterministic_evidence=self.deterministic_evidence,
             live_probe_evidence=self.live_probe_evidence,
             live_probe_needed=self.live_probe_needed,
@@ -513,68 +546,10 @@ def write_simulation_markdown(report: SimulationReport, path: Path) -> None:
     path.write_text(render_simulation_markdown(report), encoding="utf-8")
 
 
-def _build_risk_facets(
-    deterministic_evidence: list[str],
-    live_probe_evidence: list[str],
-    live_probe_needed: list[str],
-) -> dict[str, SimulationRiskFacet]:
-    specs: dict[str, tuple[tuple[str, ...], tuple[str, ...], str]] = {
-        "token_inheritance": (
-            ("GITHUB_TOKEN", "permissions", "write-all"),
-            ("GITHUB_TOKEN permissions", "inherited token scope", "write-capable GITHUB_TOKEN"),
-            "medium",
-        ),
-        "deployment_gate": (
-            ("deployment environment", "environment gate", "deploy/publish-shaped"),
-            ("environment gate", "required reviewers", "OIDC deploy path", "branch or tag"),
-            "medium",
-        ),
-        "artifact_exposure": (
-            ("uploads artifacts", "cache-capable", "GitHub output, env, or step summary"),
-            ("artifact upload paths", "cache keys", "output/env/summary"),
-            "medium",
-        ),
-        "reusable_workflow_boundary": (
-            ("reusable workflow", "composite action", "full-length SHA pin"),
-            ("reusable workflow", "caller secrets", "floating ref", "full commit SHA"),
-            "medium",
-        ),
-        "secret_exposure": (
-            ("GitHub secrets", "secret-derived", "secrets: inherit"),
-            ("which secrets are available", "secret-derived data exposure", "caller secrets"),
-            "medium",
-        ),
-        "pull_request_target_boundary": (
-            ("pull_request_target",),
-            ("pull_request_target", "non-fork guard", "privileged PR automation"),
-            "high",
-        ),
-    }
-    facets: dict[str, SimulationRiskFacet] = {}
-    for name, (evidence_terms, gap_terms, default_confidence) in specs.items():
-        evidence_indices = _matching_indices(deterministic_evidence, evidence_terms)
-        probe_evidence_indices = _matching_indices(live_probe_evidence, evidence_terms)
-        gap_indices = _matching_indices(live_probe_needed, gap_terms)
-        if not evidence_indices and not probe_evidence_indices and not gap_indices:
-            continue
-        facets[name] = SimulationRiskFacet(
-            name=name,
-            status="review_needed" if gap_indices else "detected",
-            confidence=default_confidence if evidence_indices or probe_evidence_indices else "low",
-            deterministic_evidence_indices=evidence_indices,
-            live_probe_evidence_indices=probe_evidence_indices,
-            live_probe_needed_indices=gap_indices,
-        )
-    return facets
-
-
-def _matching_indices(items: list[str], terms: tuple[str, ...]) -> list[int]:
-    lowered_terms = tuple(term.lower() for term in terms)
-    return [
-        index
-        for index, item in enumerate(items)
-        if any(term in item.lower() for term in lowered_terms)
-    ]
+def _extend_unique_indices(target: list[int], values: tuple[int, ...]) -> None:
+    for value in values:
+        if value >= 0 and value not in target:
+            target.append(value)
 
 
 def render_simulation_markdown(report: SimulationReport) -> str:
@@ -935,12 +910,18 @@ def _analyze_workflow(builder: SimulationBuilder, text: str) -> None:
     _analyze_workflow_environment_protection(builder, workflow_data, text)
     _analyze_workflow_artifact_and_secret_exposure(builder, workflow_data)
     if "pull_request_target" in text:
-        builder.add_capability(
+        evidence_index = builder.add_capability(
             "escalate",
             "possible",
             "medium",
             "Workflow uses pull_request_target; token/secrets exposure depends on job "
             "checkout and conditions.",
+        )
+        builder.add_facet(
+            "pull_request_target_boundary",
+            "detected",
+            "high",
+            deterministic_evidence_indices=(evidence_index,),
         )
         _analyze_pull_request_target_workflow_risk(builder, workflow_data, text)
 
@@ -1016,14 +997,26 @@ def _analyze_pull_request_target_workflow_risk(
                 else:
                     found_unguarded_untrusted_checkout = True
                     job_saw_unguarded_untrusted_checkout = True
-                builder.add_evidence(
+                evidence_index = builder.add_evidence(
                     "pull_request_target workflow checks out the pull request head "
                     f"in job `{job_name}`."
                 )
+                builder.add_facet(
+                    "pull_request_target_boundary",
+                    "detected",
+                    "high",
+                    deterministic_evidence_indices=(evidence_index,),
+                )
                 if guarded:
-                    builder.add_evidence(
+                    evidence_index = builder.add_evidence(
                         "pull_request_target pull request head checkout is guarded by "
                         f"a non-fork condition in job `{job_name}`."
+                    )
+                    builder.add_facet(
+                        "pull_request_target_boundary",
+                        "detected",
+                        "high",
+                        deterministic_evidence_indices=(evidence_index,),
                     )
             elif job_saw_untrusted_checkout and _step_executes_code(step):
                 found_execution_after_untrusted_checkout = True
@@ -1051,14 +1044,26 @@ def _analyze_pull_request_target_workflow_risk(
             "permission separation.",
         )
         if found_unguarded_untrusted_checkout:
-            builder.add_gap(
+            gap_index = builder.add_gap(
                 "Review pull_request_target checkout of untrusted head code for token, secret, "
                 "and write-permission exposure."
             )
+            builder.add_facet(
+                "pull_request_target_boundary",
+                "review_needed",
+                "high",
+                live_probe_needed_indices=(gap_index,),
+            )
         elif found_guarded_untrusted_checkout:
-            builder.add_gap(
+            gap_index = builder.add_gap(
                 "Confirm pull_request_target non-fork guard cannot be bypassed before trusting "
                 "pull request head checkout."
+            )
+            builder.add_facet(
+                "pull_request_target_boundary",
+                "review_needed",
+                "high",
+                live_probe_needed_indices=(gap_index,),
             )
     if found_execution_after_untrusted_checkout:
         builder.add_capability(
@@ -1068,18 +1073,30 @@ def _analyze_pull_request_target_workflow_risk(
             "pull_request_target workflow executes commands after untrusted head checkout.",
         )
         if found_unguarded_untrusted_checkout:
-            builder.add_gap(
+            gap_index = builder.add_gap(
                 "Review commands after untrusted pull request head checkout for script, install, "
                 "test, build, and artifact side effects."
+            )
+            builder.add_facet(
+                "pull_request_target_boundary",
+                "review_needed",
+                "high",
+                live_probe_needed_indices=(gap_index,),
             )
     if (
         "pull_request_target" in text
         and "github.event.pull_request.head" in text
         and found_unguarded_untrusted_checkout
     ):
-        builder.add_gap(
+        gap_index = builder.add_gap(
             "pull_request_target workflow references pull request head context; static review "
             "should confirm it does not execute untrusted code with privileged token scope."
+        )
+        builder.add_facet(
+            "pull_request_target_boundary",
+            "review_needed",
+            "high",
+            live_probe_needed_indices=(gap_index,),
         )
 
 
@@ -1097,24 +1114,37 @@ def _analyze_workflow_permission_inheritance(
         return
 
     if not workflow_has_permissions:
-        builder.add_evidence(
+        evidence_index = builder.add_evidence(
             "Workflow omits top-level `permissions`; GITHUB_TOKEN defaults are inherited "
             "from repository or organization settings."
         )
-        builder.add_capability(
+        capability_index = builder.add_capability(
             "write",
             "unknown",
             "low",
             "Workflow top-level GITHUB_TOKEN permissions are inherited from live settings.",
         )
-        builder.add_gap(
+        gap_index = builder.add_gap(
             "Confirm repository or organization default GITHUB_TOKEN permissions for workflows "
             "without explicit top-level `permissions`."
         )
+        builder.add_facet(
+            "token_inheritance",
+            "review_needed",
+            "medium",
+            deterministic_evidence_indices=(evidence_index, capability_index),
+            live_probe_needed_indices=(gap_index,),
+        )
         if "pull_request_target" in text:
-            builder.add_gap(
+            pr_gap_index = builder.add_gap(
                 "pull_request_target workflow omits top-level `permissions`; confirm inherited "
                 "token scope before trusting privileged PR automation."
+            )
+            builder.add_facet(
+                "pull_request_target_boundary",
+                "review_needed",
+                "high",
+                live_probe_needed_indices=(pr_gap_index,),
             )
     else:
         _record_workflow_permission_value(builder, "workflow", workflow_permissions)
@@ -1131,18 +1161,31 @@ def _analyze_workflow_permission_inheritance(
                 "`permissions`."
             )
             if _permissions_allow_write(workflow_permissions):
-                builder.add_gap(
+                gap_index = builder.add_gap(
                     f"Confirm job `{job_name}` needs inherited write-capable GITHUB_TOKEN "
                     "permissions."
                 )
+                builder.add_facet(
+                    "token_inheritance",
+                    "review_needed",
+                    "medium",
+                    live_probe_needed_indices=(gap_index,),
+                )
         else:
-            builder.add_evidence(
+            evidence_index = builder.add_evidence(
                 f"Job `{job_name}` omits `permissions` and inherits live default GITHUB_TOKEN "
                 "scope."
             )
-            builder.add_gap(
+            gap_index = builder.add_gap(
                 f"Confirm job `{job_name}` effective GITHUB_TOKEN scope from repository or "
                 "organization defaults."
+            )
+            builder.add_facet(
+                "token_inheritance",
+                "review_needed",
+                "medium",
+                deterministic_evidence_indices=(evidence_index,),
+                live_probe_needed_indices=(gap_index,),
             )
 
 
@@ -1156,20 +1199,35 @@ def _record_workflow_permission_value(
     if isinstance(permissions, str):
         value = permissions.lower()
         if value == "read-all":
-            builder.add_capability(
+            evidence_index = builder.add_capability(
                 "read",
                 "possible",
                 "medium",
                 f"{scope} sets GITHUB_TOKEN `permissions: read-all`.",
             )
+            builder.add_facet(
+                "token_inheritance",
+                "detected",
+                "medium",
+                deterministic_evidence_indices=(evidence_index,),
+            )
         elif value == "write-all":
-            builder.add_capability(
+            evidence_index = builder.add_capability(
                 "write",
                 "yes",
                 "high",
                 f"{scope} sets GITHUB_TOKEN `permissions: write-all`.",
             )
-            builder.add_gap(f"Review whether {scope} requires broad `permissions: write-all`.")
+            gap_index = builder.add_gap(
+                f"Review whether {scope} requires broad `permissions: write-all`."
+            )
+            builder.add_facet(
+                "token_inheritance",
+                "review_needed",
+                "medium",
+                deterministic_evidence_indices=(evidence_index,),
+                live_probe_needed_indices=(gap_index,),
+            )
         elif value == "{}":
             builder.add_evidence(
                 f"{scope} disables GITHUB_TOKEN permissions with `permissions: {{}}`."
@@ -1207,35 +1265,61 @@ def _analyze_workflow_reusable_and_action_boundaries(
         job_uses = str(job.get("uses") or "")
         if job_uses:
             if job_uses.startswith("./"):
-                builder.add_evidence(
+                evidence_index = builder.add_evidence(
                     f"Job `{job_name}` calls local reusable workflow `{job_uses}`."
                 )
-                builder.add_gap(
+                gap_index = builder.add_gap(
                     f"Review local reusable workflow `{job_uses}` with caller permissions, "
                     "inputs, and secrets."
                 )
+                builder.add_facet(
+                    "reusable_workflow_boundary",
+                    "review_needed",
+                    "medium",
+                    deterministic_evidence_indices=(evidence_index,),
+                    live_probe_needed_indices=(gap_index,),
+                )
             else:
                 found_external_reusable = True
-                builder.add_evidence(
+                evidence_index = builder.add_evidence(
                     f"Job `{job_name}` calls external reusable workflow `{job_uses}`."
                 )
+                gap_indices: list[int] = []
                 if _uses_ref_is_unpinned(job_uses):
                     found_unpinned_action = True
-                    builder.add_gap(
-                        f"External reusable workflow `{job_uses}` is not pinned to a full SHA."
+                    gap_indices.append(
+                        builder.add_gap(
+                            f"External reusable workflow `{job_uses}` is not pinned to a full SHA."
+                        )
                     )
-                builder.add_gap(
-                    f"Confirm external reusable workflow `{job_uses}` trust, requested "
-                    "permissions, and called workflow code at the referenced ref."
+                gap_indices.append(
+                    builder.add_gap(
+                        f"Confirm external reusable workflow `{job_uses}` trust, requested "
+                        "permissions, and called workflow code at the referenced ref."
+                    )
+                )
+                builder.add_facet(
+                    "reusable_workflow_boundary",
+                    "review_needed",
+                    "medium",
+                    deterministic_evidence_indices=(evidence_index,),
+                    live_probe_needed_indices=tuple(gap_indices),
                 )
             if str(job.get("secrets") or "").lower() == "inherit":
                 found_secrets_inherit = True
-                builder.add_evidence(
+                evidence_index = builder.add_evidence(
                     f"Job `{job_name}` passes caller secrets with `secrets: inherit`."
                 )
-                builder.add_gap(
+                gap_index = builder.add_gap(
                     f"Review which caller secrets are exposed to reusable workflow job "
                     f"`{job_name}`."
+                )
+                builder.add_facet(
+                    "secret_exposure",
+                    "review_needed",
+                    "medium",
+                    deterministic_evidence_indices=(evidence_index,),
+                    live_probe_needed_indices=(gap_index,),
                 )
 
         steps = job.get("steps")
@@ -1249,57 +1333,95 @@ def _analyze_workflow_reusable_and_action_boundaries(
                 continue
             if uses.startswith("./"):
                 found_local_action = True
-                builder.add_evidence(
+                evidence_index = builder.add_evidence(
                     f"Job `{job_name}` runs local action or composite action `{uses}`."
                 )
-                builder.add_gap(
+                gap_index = builder.add_gap(
                     f"Review local action `{uses}` source, composite steps, and inherited "
                     "environment."
                 )
+                builder.add_facet(
+                    "reusable_workflow_boundary",
+                    "review_needed",
+                    "medium",
+                    deterministic_evidence_indices=(evidence_index,),
+                    live_probe_needed_indices=(gap_index,),
+                )
             elif _uses_ref_is_unpinned(uses):
                 found_unpinned_action = True
-                builder.add_evidence(
+                evidence_index = builder.add_evidence(
                     f"Job `{job_name}` uses action `{uses}` without a full-length SHA pin."
                 )
-                builder.add_gap(
+                gap_index = builder.add_gap(
                     f"Pin action `{uses}` to a full commit SHA or confirm trusted floating ref."
+                )
+                builder.add_facet(
+                    "reusable_workflow_boundary",
+                    "review_needed",
+                    "medium",
+                    deterministic_evidence_indices=(evidence_index,),
+                    live_probe_needed_indices=(gap_index,),
                 )
 
     if found_external_reusable:
-        builder.add_capability(
+        send_index = builder.add_capability(
             "send",
             "possible",
             "medium",
             "Workflow calls external reusable workflow code outside this repository.",
         )
-        builder.add_capability(
+        bypass_index = builder.add_capability(
             "bypass",
             "possible",
             "medium",
             "External reusable workflow behavior is outside the supplied static workflow body.",
         )
+        builder.add_facet(
+            "reusable_workflow_boundary",
+            "detected",
+            "medium",
+            deterministic_evidence_indices=(send_index, bypass_index),
+        )
     if found_secrets_inherit:
-        builder.add_capability(
+        evidence_index = builder.add_capability(
             "read",
             "possible",
             "medium",
             "Reusable workflow call uses `secrets: inherit`; effective secret exposure is live "
             "caller context.",
         )
+        builder.add_facet(
+            "secret_exposure",
+            "detected",
+            "medium",
+            deterministic_evidence_indices=(evidence_index,),
+        )
     if found_local_action:
-        builder.add_capability(
+        evidence_index = builder.add_capability(
             "bypass",
             "possible",
             "medium",
             "Local action or composite action behavior is outside the supplied workflow step.",
         )
+        builder.add_facet(
+            "reusable_workflow_boundary",
+            "detected",
+            "medium",
+            deterministic_evidence_indices=(evidence_index,),
+        )
     if found_unpinned_action:
-        builder.add_capability(
+        evidence_index = builder.add_capability(
             "bypass",
             "possible",
             "medium",
             "Workflow uses action or reusable workflow references that are not pinned to full "
             "commit SHAs.",
+        )
+        builder.add_facet(
+            "reusable_workflow_boundary",
+            "detected",
+            "medium",
+            deterministic_evidence_indices=(evidence_index,),
         )
 
 
@@ -1335,47 +1457,90 @@ def _analyze_workflow_environment_protection(
         if environment is not None:
             found_environment = True
             environment_name = _stringify_yaml(environment)
-            builder.add_evidence(
+            evidence_index = builder.add_evidence(
                 f"Job `{job_name}` declares deployment environment `{environment_name}`."
             )
-            builder.add_gap(
+            gap_index = builder.add_gap(
                 f"Confirm environment `{environment_name}` has required reviewers, "
                 "wait timers, deployment branch/tag rules, and protected secrets."
             )
+            builder.add_facet(
+                "deployment_gate",
+                "review_needed",
+                "medium",
+                deterministic_evidence_indices=(evidence_index,),
+                live_probe_needed_indices=(gap_index,),
+            )
         if _job_is_deploy_shaped(job):
             found_deploy_job = True
-            builder.add_capability(
+            evidence_index = builder.add_capability(
                 "deploy",
                 "yes",
                 "medium",
                 f"Job `{job_name}` contains deploy/publish-shaped steps.",
             )
+            builder.add_facet(
+                "deployment_gate",
+                "detected",
+                "medium",
+                deterministic_evidence_indices=(evidence_index,),
+            )
             if environment is None:
                 found_deploy_without_environment = True
-                builder.add_gap(
+                gap_index = builder.add_gap(
                     f"Deploy-shaped job `{job_name}` has no visible GitHub environment gate."
+                )
+                builder.add_facet(
+                    "deployment_gate",
+                    "review_needed",
+                    "medium",
+                    live_probe_needed_indices=(gap_index,),
                 )
 
     if found_environment:
-        builder.add_capability(
+        evidence_index = builder.add_capability(
             "deploy",
             "possible",
             "medium",
             "Workflow declares GitHub deployment environment gates.",
         )
+        builder.add_facet(
+            "deployment_gate",
+            "detected",
+            "medium",
+            deterministic_evidence_indices=(evidence_index,),
+        )
     if found_deploy_job and has_oidc and not found_environment:
-        builder.add_gap(
+        gap_index = builder.add_gap(
             "OIDC deploy path lacks a visible GitHub environment; confirm cloud trust policy "
             "and repository environment protections."
         )
+        builder.add_facet(
+            "deployment_gate",
+            "review_needed",
+            "medium",
+            live_probe_needed_indices=(gap_index,),
+        )
     if found_deploy_without_environment and _trigger_allows_push_or_tag(triggers, trigger_text):
-        builder.add_gap(
+        gap_index = builder.add_gap(
             "Deploy-shaped workflow can run from push/tag triggers without a visible "
             "environment gate."
         )
+        builder.add_facet(
+            "deployment_gate",
+            "review_needed",
+            "medium",
+            live_probe_needed_indices=(gap_index,),
+        )
     if found_deploy_job and not _trigger_has_visible_branch_or_tag_filter(trigger_text):
-        builder.add_gap(
+        gap_index = builder.add_gap(
             "Deploy-shaped workflow lacks visible branch or tag restrictions in supplied YAML."
+        )
+        builder.add_facet(
+            "deployment_gate",
+            "review_needed",
+            "medium",
+            live_probe_needed_indices=(gap_index,),
         )
 
 
@@ -1469,103 +1634,167 @@ def _analyze_workflow_artifact_and_secret_exposure(
             step_blob = json.dumps(step, sort_keys=True, default=str)
             if "actions/upload-artifact" in uses:
                 found_artifact_upload = True
-                builder.add_evidence(
+                evidence_index = builder.add_evidence(
                     f"Workflow uploads artifacts in job `{job_name}` via `{step.get('uses')}`."
+                )
+                builder.add_facet(
+                    "artifact_exposure",
+                    "detected",
+                    "medium",
+                    deterministic_evidence_indices=(evidence_index,),
                 )
             if "actions/cache" in uses or ("actions/setup-" in uses and "cache" in step_blob):
                 found_cache = True
-                builder.add_evidence(
+                evidence_index = builder.add_evidence(
                     "Workflow uses cache-capable step in job "
                     f"`{job_name}` via `{step.get('uses')}`."
                 )
+                builder.add_facet(
+                    "artifact_exposure",
+                    "detected",
+                    "medium",
+                    deterministic_evidence_indices=(evidence_index,),
+                )
             if SECRET_REFERENCE_RE.search(step_blob):
                 found_secret_reference = True
-                builder.add_evidence(
+                evidence_index = builder.add_evidence(
                     f"Workflow references GitHub secrets in job `{job_name}` step."
+                )
+                builder.add_facet(
+                    "secret_exposure",
+                    "detected",
+                    "medium",
+                    deterministic_evidence_indices=(evidence_index,),
                 )
             if LOG_SECRET_RE.search(run) or (
                 SECRET_REFERENCE_RE.search(run) and STEP_OUTPUT_ENV_RE.search(run)
             ):
                 found_secret_log_or_output = True
-                builder.add_evidence(
+                evidence_index = builder.add_evidence(
                     f"Workflow may write secret-derived data to logs or GitHub output files "
                     f"in job `{job_name}`."
                 )
+                builder.add_facet(
+                    "secret_exposure",
+                    "detected",
+                    "medium",
+                    deterministic_evidence_indices=(evidence_index,),
+                )
             if STEP_OUTPUT_ENV_RE.search(run):
                 found_step_output_env = True
-                builder.add_evidence(
+                evidence_index = builder.add_evidence(
                     f"Workflow writes to GitHub output, env, or step summary files in job "
                     f"`{job_name}`."
                 )
+                builder.add_facet(
+                    "artifact_exposure",
+                    "detected",
+                    "medium",
+                    deterministic_evidence_indices=(evidence_index,),
+                )
 
     if found_artifact_upload:
-        builder.add_capability(
+        read_index = builder.add_capability(
             "read",
             "possible",
             "medium",
             "Workflow uploads artifacts; selected paths may include generated files or secrets.",
         )
-        builder.add_capability(
+        send_index = builder.add_capability(
             "send",
             "possible",
             "medium",
             "Workflow uploads artifacts to GitHub-hosted artifact storage.",
         )
-        builder.add_capability(
+        write_index = builder.add_capability(
             "write",
             "possible",
             "medium",
             "Workflow creates downloadable GitHub Actions artifacts.",
         )
-        builder.add_gap(
+        gap_index = builder.add_gap(
             "Review artifact upload paths, retention days, artifact visibility, and whether "
             "artifacts can contain credentials or generated sensitive files."
         )
+        builder.add_facet(
+            "artifact_exposure",
+            "review_needed",
+            "medium",
+            deterministic_evidence_indices=(read_index, send_index, write_index),
+            live_probe_needed_indices=(gap_index,),
+        )
     if found_cache:
-        builder.add_capability(
+        read_index = builder.add_capability(
             "read",
             "possible",
             "medium",
             "Workflow cache steps can restore dependency or build state from shared keys.",
         )
-        builder.add_capability(
+        write_index = builder.add_capability(
             "write",
             "possible",
             "medium",
             "Workflow cache steps can save dependency or build state for later runs.",
         )
-        builder.add_gap(
+        gap_index = builder.add_gap(
             "Review cache keys, restore-keys, branch/fork cache isolation, and whether cached "
             "paths include credentials or generated sensitive files."
         )
+        builder.add_facet(
+            "artifact_exposure",
+            "review_needed",
+            "medium",
+            deterministic_evidence_indices=(read_index, write_index),
+            live_probe_needed_indices=(gap_index,),
+        )
     if found_secret_reference:
-        builder.add_capability(
+        evidence_index = builder.add_capability(
             "read",
             "possible",
             "medium",
             "Workflow references GitHub secrets; exact secret availability depends on trigger, "
             "environment, and repository settings.",
         )
-        builder.add_gap(
+        gap_index = builder.add_gap(
             "Confirm which secrets are available for this trigger, fork context, environment, "
             "and job permission boundary."
         )
+        builder.add_facet(
+            "secret_exposure",
+            "review_needed",
+            "medium",
+            deterministic_evidence_indices=(evidence_index,),
+            live_probe_needed_indices=(gap_index,),
+        )
     if found_secret_log_or_output:
-        builder.add_capability(
+        evidence_index = builder.add_capability(
             "send",
             "possible",
             "medium",
             "Workflow may copy secret-derived values into logs, step outputs, env files, or "
             "summaries.",
         )
-        builder.add_gap(
+        gap_index = builder.add_gap(
             "Review log masking, step output consumers, summaries, and artifact/cache paths for "
             "secret-derived data exposure."
         )
+        builder.add_facet(
+            "secret_exposure",
+            "review_needed",
+            "medium",
+            deterministic_evidence_indices=(evidence_index,),
+            live_probe_needed_indices=(gap_index,),
+        )
     elif found_step_output_env:
-        builder.add_gap(
+        gap_index = builder.add_gap(
             "Review GitHub output/env/summary writes for sensitive values and downstream step "
             "or job consumers."
+        )
+        builder.add_facet(
+            "artifact_exposure",
+            "review_needed",
+            "medium",
+            live_probe_needed_indices=(gap_index,),
         )
 
 

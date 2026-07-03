@@ -83,7 +83,7 @@ run destructive probes. The JSON and Markdown outputs summarize `read`, `write`,
 `deploy`, `bypass`, and `escalate` capabilities, confidence, deterministic evidence,
 live-probe-needed gaps, structured `risk_facets`, and the active safety boundary.
 
-`risk_facets` groups the prose evidence into machine-readable categories such as
+`risk_facets` records analyzer-emitted machine-readable categories such as
 `token_inheritance`, `deployment_gate`, `artifact_exposure`,
 `reusable_workflow_boundary`, `secret_exposure`, and `pull_request_target_boundary`.
 Each facet includes a status, confidence, and indexes back to deterministic evidence,
