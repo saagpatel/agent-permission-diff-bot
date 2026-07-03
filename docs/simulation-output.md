@@ -251,3 +251,14 @@ agent-permission-diff simulate --json-schema contract
 ```
 
 Schema export is static and exits before reading input files or running live probes.
+
+Validate a generated artifact offline with:
+
+```bash
+agent-permission-diff simulate --validate-json simulation-summary.json --schema summary
+agent-permission-diff simulate --validate-json simulation.json --schema full
+agent-permission-diff simulate --validate-json contract.json --schema contract
+```
+
+Validation prints JSON with `valid`, `errors`, `schema`, and `schema_id`. It exits `0`
+when the artifact matches the selected schema and exits `2` when validation fails.

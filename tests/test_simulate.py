@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import re
+import sys
 import urllib.error
 from pathlib import Path
 
@@ -22,6 +23,7 @@ from agent_permission_diff_bot.simulate import (
     render_simulation_markdown,
     resolve_github_pull_head_sha,
     simulation_json_schema,
+    validate_simulation_json,
 )
 
 
@@ -809,6 +811,87 @@ def test_cli_simulate_json_schema_exits_without_reading_inputs(capsys) -> None:
     assert code == 0
     assert payload["title"] == "Agent Permission Simulation Summary"
     assert payload["properties"]["schema_version"]["const"].endswith(".summary.v1")
+
+
+def test_validate_simulation_json_accepts_generated_summary() -> None:
+    report = build_simulation(scenarios=("github-actions-oidc-deploy",))
+    summary = render_simulation_json_summary(report)
+
+    result = validate_simulation_json(summary, "summary")
+
+    assert result == {
+        "schema": "summary",
+        "schema_id": simulation_json_schema("summary")["$id"],
+        "valid": True,
+        "errors": [],
+    }
+
+
+def test_validate_simulation_json_reports_schema_errors() -> None:
+    report = build_simulation(scenarios=("github-actions-oidc-deploy",))
+    summary = render_simulation_json_summary(report)
+    summary.pop("schema_version")
+    summary["capabilities"]["read"]["level"] = "absolutely"
+    summary["risk_facets"]["made_up"] = {
+        "status": "review_needed",
+        "confidence": "medium",
+        "evidence_count": 0,
+        "live_probe_needed_count": 0,
+    }
+
+    result = validate_simulation_json(summary, "summary")
+
+    assert result["valid"] is False
+    assert "$: missing required property `schema_version`" in result["errors"]
+    assert "$.capabilities.read.level: expected one of" in "\n".join(result["errors"])
+    assert "$.risk_facets: unexpected property name `made_up`" in result["errors"]
+
+
+def test_cli_simulate_validate_json_exits_zero_for_valid_summary(tmp_path: Path, capsys) -> None:
+    summary_path = tmp_path / "summary.json"
+    report = build_simulation(scenarios=("github-actions-oidc-deploy",))
+    summary_path.write_text(
+        json.dumps(render_simulation_json_summary(report)),
+        encoding="utf-8",
+    )
+
+    code = main(["simulate", "--validate-json", str(summary_path), "--schema", "summary"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["valid"] is True
+    assert payload["errors"] == []
+
+
+def test_cli_simulate_validate_json_exits_two_for_invalid_summary(
+    tmp_path: Path,
+    capsys,
+) -> None:
+    summary_path = tmp_path / "summary.json"
+    summary_path.write_text('{"schema_version":"wrong"}', encoding="utf-8")
+
+    code = main(["simulate", "--validate-json", str(summary_path), "--schema", "summary"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 2
+    assert payload["valid"] is False
+    assert payload["errors"]
+
+
+def test_cli_simulate_validate_json_reads_stdin(monkeypatch, capsys) -> None:
+    report = build_simulation(scenarios=("github-actions-oidc-deploy",))
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(json.dumps(render_simulation_json_summary(report))),
+    )
+
+    code = main(["simulate", "--validate-json", "-", "--schema", "summary"])
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["schema"] == "summary"
+    assert payload["valid"] is True
 
 
 def _assert_schema_required_keys(schema: dict[str, object], payload: dict[str, object]) -> None:
