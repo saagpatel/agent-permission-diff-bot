@@ -89,6 +89,12 @@ that can collapse fork isolation into privileged token or secret exposure. Obvio
 non-fork guards such as `github.event.pull_request.head.repo.fork == false` are recorded
 as mitigating evidence while still requiring guard review.
 
+The workflow simulator also classifies common GitHub Actions data-exposure paths such as
+artifact uploads, cache save/restore steps, GitHub secret references, and writes to
+`GITHUB_OUTPUT`, `GITHUB_ENV`, or `GITHUB_STEP_SUMMARY`. These are static signals only:
+the report separates deterministic evidence from live-probe-needed checks for artifact
+retention, visibility, cache isolation, masking, and trigger-specific secret availability.
+
 List built-in static scenarios:
 
 ```bash

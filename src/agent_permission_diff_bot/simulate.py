@@ -76,6 +76,12 @@ ESCALATE_COMMAND_RE = re.compile(
     r"\bid-token:\s*write\b|--privileged|docker\s+run\b.*--privileged",
     re.IGNORECASE | re.DOTALL,
 )
+SECRET_REFERENCE_RE = re.compile(r"\bsecrets\.[A-Za-z_][A-Za-z0-9_]*\b", re.IGNORECASE)
+STEP_OUTPUT_ENV_RE = re.compile(r"\bGITHUB_(OUTPUT|ENV|STEP_SUMMARY)\b", re.IGNORECASE)
+LOG_SECRET_RE = re.compile(
+    r"\b(echo|printf|cat|tee|env|printenv|set|set\s+-x)\b.*\bsecrets\.",
+    re.IGNORECASE | re.DOTALL,
+)
 
 SUBAGENT_TOOL_MAP: tuple[tuple[str, tuple[CapabilityName, ...]], ...] = (
     ("Bash", ("read", "write", "send", "deploy", "escalate")),
@@ -810,6 +816,7 @@ def _analyze_workflow(builder: SimulationBuilder, text: str) -> None:
             builder.add_capability("send", "possible", atom.confidence, evidence)
         if atom.action == "deployment_environment":
             builder.add_evidence(evidence)
+    _analyze_workflow_artifact_and_secret_exposure(builder, workflow_data)
     if "pull_request_target" in text:
         builder.add_capability(
             "escalate",
@@ -956,6 +963,135 @@ def _analyze_pull_request_target_workflow_risk(
         builder.add_gap(
             "pull_request_target workflow references pull request head context; static review "
             "should confirm it does not execute untrusted code with privileged token scope."
+        )
+
+
+def _analyze_workflow_artifact_and_secret_exposure(
+    builder: SimulationBuilder,
+    workflow_data: dict[str, Any] | None,
+) -> None:
+    if workflow_data is None:
+        return
+    jobs = workflow_data.get("jobs")
+    if not isinstance(jobs, dict):
+        return
+
+    found_artifact_upload = False
+    found_cache = False
+    found_secret_reference = False
+    found_secret_log_or_output = False
+    found_step_output_env = False
+    for job_name, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        steps = job.get("steps")
+        if not isinstance(steps, list):
+            continue
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            uses = str(step.get("uses") or "").lower()
+            run = str(step.get("run") or "")
+            step_blob = json.dumps(step, sort_keys=True, default=str)
+            if "actions/upload-artifact" in uses:
+                found_artifact_upload = True
+                builder.add_evidence(
+                    f"Workflow uploads artifacts in job `{job_name}` via `{step.get('uses')}`."
+                )
+            if "actions/cache" in uses or ("actions/setup-" in uses and "cache" in step_blob):
+                found_cache = True
+                builder.add_evidence(
+                    "Workflow uses cache-capable step in job "
+                    f"`{job_name}` via `{step.get('uses')}`."
+                )
+            if SECRET_REFERENCE_RE.search(step_blob):
+                found_secret_reference = True
+                builder.add_evidence(
+                    f"Workflow references GitHub secrets in job `{job_name}` step."
+                )
+            if LOG_SECRET_RE.search(run) or (
+                SECRET_REFERENCE_RE.search(run) and STEP_OUTPUT_ENV_RE.search(run)
+            ):
+                found_secret_log_or_output = True
+                builder.add_evidence(
+                    f"Workflow may write secret-derived data to logs or GitHub output files "
+                    f"in job `{job_name}`."
+                )
+            if STEP_OUTPUT_ENV_RE.search(run):
+                found_step_output_env = True
+                builder.add_evidence(
+                    f"Workflow writes to GitHub output, env, or step summary files in job "
+                    f"`{job_name}`."
+                )
+
+    if found_artifact_upload:
+        builder.add_capability(
+            "read",
+            "possible",
+            "medium",
+            "Workflow uploads artifacts; selected paths may include generated files or secrets.",
+        )
+        builder.add_capability(
+            "send",
+            "possible",
+            "medium",
+            "Workflow uploads artifacts to GitHub-hosted artifact storage.",
+        )
+        builder.add_capability(
+            "write",
+            "possible",
+            "medium",
+            "Workflow creates downloadable GitHub Actions artifacts.",
+        )
+        builder.add_gap(
+            "Review artifact upload paths, retention days, artifact visibility, and whether "
+            "artifacts can contain credentials or generated sensitive files."
+        )
+    if found_cache:
+        builder.add_capability(
+            "read",
+            "possible",
+            "medium",
+            "Workflow cache steps can restore dependency or build state from shared keys.",
+        )
+        builder.add_capability(
+            "write",
+            "possible",
+            "medium",
+            "Workflow cache steps can save dependency or build state for later runs.",
+        )
+        builder.add_gap(
+            "Review cache keys, restore-keys, branch/fork cache isolation, and whether cached "
+            "paths include credentials or generated sensitive files."
+        )
+    if found_secret_reference:
+        builder.add_capability(
+            "read",
+            "possible",
+            "medium",
+            "Workflow references GitHub secrets; exact secret availability depends on trigger, "
+            "environment, and repository settings.",
+        )
+        builder.add_gap(
+            "Confirm which secrets are available for this trigger, fork context, environment, "
+            "and job permission boundary."
+        )
+    if found_secret_log_or_output:
+        builder.add_capability(
+            "send",
+            "possible",
+            "medium",
+            "Workflow may copy secret-derived values into logs, step outputs, env files, or "
+            "summaries.",
+        )
+        builder.add_gap(
+            "Review log masking, step output consumers, summaries, and artifact/cache paths for "
+            "secret-derived data exposure."
+        )
+    elif found_step_output_env:
+        builder.add_gap(
+            "Review GitHub output/env/summary writes for sensitive values and downstream step "
+            "or job consumers."
         )
 
 

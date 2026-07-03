@@ -53,6 +53,97 @@ jobs:
     assert any("OIDC provider trust policy" in gap for gap in report.live_probe_needed)
 
 
+def test_simulates_workflow_artifact_upload_exposure() -> None:
+    report = build_simulation(
+        workflow_text="""
+name: Package
+on:
+  pull_request:
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - run: mkdir -p dist && echo build > dist/app.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: build-output
+          path: dist/
+"""
+    )
+
+    assert report.capabilities["read"].level == "possible"
+    assert report.capabilities["write"].level == "possible"
+    assert report.capabilities["send"].level == "possible"
+    assert any("uploads artifacts" in item for item in report.deterministic_evidence)
+    assert any("artifact upload paths" in gap for gap in report.live_probe_needed)
+
+
+def test_simulates_workflow_cache_exposure() -> None:
+    report = build_simulation(
+        workflow_text="""
+name: Cache
+on:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('requirements.txt') }}
+          restore-keys: pip-${{ runner.os }}-
+"""
+    )
+
+    assert report.capabilities["read"].level == "possible"
+    assert report.capabilities["write"].level == "possible"
+    assert any("cache-capable step" in item for item in report.deterministic_evidence)
+    assert any("cache keys" in gap for gap in report.live_probe_needed)
+
+
+def test_simulates_workflow_secret_output_exposure() -> None:
+    report = build_simulation(
+        workflow_text="""
+name: Secret Output
+on:
+  workflow_dispatch:
+jobs:
+  expose:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "token=${{ secrets.DEPLOY_TOKEN }}" >> "$GITHUB_OUTPUT"
+          echo "${{ secrets.DEPLOY_TOKEN }}"
+"""
+    )
+
+    assert report.capabilities["read"].level == "possible"
+    assert report.capabilities["send"].level == "possible"
+    assert any("GitHub secrets" in item for item in report.deterministic_evidence)
+    assert any("secret-derived data" in item for item in report.deterministic_evidence)
+    assert any("log masking" in gap for gap in report.live_probe_needed)
+
+
+def test_simulates_workflow_output_without_secret_as_review_gap_only() -> None:
+    report = build_simulation(
+        workflow_text="""
+name: Output
+on:
+  pull_request:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "result=ok" >> "$GITHUB_OUTPUT"
+"""
+    )
+
+    assert report.capabilities["send"].level == "no"
+    assert any("output/env/summary writes" in gap for gap in report.live_probe_needed)
+    assert not any("secret-derived data" in item for item in report.deterministic_evidence)
+
+
 def test_simulates_pull_request_target_untrusted_head_checkout_risk() -> None:
     report = build_simulation(
         workflow_text="""
