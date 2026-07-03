@@ -120,6 +120,7 @@ jobs:
 
     assert report.capabilities["read"].level == "possible"
     assert report.capabilities["send"].level == "possible"
+    assert report.capabilities["deploy"].level == "no"
     assert any("GitHub secrets" in item for item in report.deterministic_evidence)
     assert any("secret-derived data" in item for item in report.deterministic_evidence)
     assert any("log masking" in gap for gap in report.live_probe_needed)

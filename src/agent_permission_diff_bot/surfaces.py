@@ -59,6 +59,13 @@ DEPLOY_ACTION_HINTS = (
     "docker/login-action",
     "docker/build-push-action",
 )
+DEPLOY_RUN_RE = re.compile(
+    r"\b(vercel\s+(deploy|--prod)|wrangler\s+(deploy|publish)|"
+    r"firebase\s+deploy|netlify\s+deploy|render\s+deploy|fly\s+deploy|"
+    r"docker\s+(push|buildx\s+build)|npm\s+publish|pnpm\s+publish|"
+    r"yarn\s+npm\s+publish|twine\s+upload|pypi)\b",
+    re.IGNORECASE,
+)
 WEAKENING_INSTRUCTION_RE = re.compile(
     r"\b(skip|bypass|ignore|disable|avoid)\b.{0,60}\b(test|review|approval|secret|"
     r"permission|policy|guard|hook|check)\b",
@@ -254,10 +261,7 @@ def _step_atoms(
         uses = str(step.get("uses", ""))
         run = str(step.get("run", ""))
         lower_uses = uses.lower()
-        lower_run = run.lower()
-        if any(hint in lower_uses for hint in DEPLOY_ACTION_HINTS) or any(
-            word in lower_run for word in ("deploy", "publish", "wrangler", "vercel", "pypi")
-        ):
+        if any(hint in lower_uses for hint in DEPLOY_ACTION_HINTS) or DEPLOY_RUN_RE.search(run):
             atoms.append(
                 PermissionAtom(
                     surface="actions",
