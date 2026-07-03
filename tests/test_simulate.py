@@ -21,6 +21,7 @@ from agent_permission_diff_bot.simulate import (
     render_simulation_json_summary,
     render_simulation_markdown,
     resolve_github_pull_head_sha,
+    simulation_json_schema,
 )
 
 
@@ -724,6 +725,95 @@ def test_cli_simulate_explain_schema_exits_without_reading_inputs(capsys) -> Non
     assert code == 0
     assert payload["schema_version"] == "agent-permission-simulation.contract.v1"
     assert payload["live_probe_default"] == "disabled"
+
+
+def test_simulation_json_schema_exports_summary_full_and_contract() -> None:
+    summary_schema = simulation_json_schema("summary")
+    full_schema = simulation_json_schema("full")
+    contract_schema = simulation_json_schema("contract")
+
+    assert summary_schema["$schema"] == "https://json-schema.org/draft/2020-12/schema"
+    assert summary_schema["properties"]["schema_version"] == {
+        "const": "agent-permission-simulation.v1.summary.v1"
+    }
+    assert summary_schema["required"] == [
+        "schema_version",
+        "mode",
+        "safety_boundary",
+        "input_count",
+        "inputs",
+        "capabilities",
+        "risk_facets",
+        "live_probe_needed",
+    ]
+    assert set(summary_schema["properties"]["capabilities"]["required"]) == set(CAPABILITIES)
+    assert set(summary_schema["properties"]["risk_facets"]["propertyNames"]["enum"]) == set(
+        RISK_FACETS
+    )
+    assert (
+        "evidence"
+        not in summary_schema["properties"]["capabilities"]["properties"]["read"]["properties"]
+    )
+
+    assert full_schema["properties"]["schema_version"] == {
+        "const": "agent-permission-simulation.v1"
+    }
+    assert "deterministic_evidence" in full_schema["required"]
+    assert (
+        "evidence" in full_schema["properties"]["capabilities"]["properties"]["read"]["properties"]
+    )
+
+    assert contract_schema["properties"]["schema_version"] == {
+        "const": "agent-permission-simulation.contract.v1"
+    }
+    assert contract_schema["properties"]["live_probe_default"] == {"const": "disabled"}
+
+
+def test_simulation_json_schemas_cover_generated_payloads() -> None:
+    report = build_simulation(scenarios=("github-actions-oidc-deploy",))
+    summary = render_simulation_json_summary(report)
+    full = report.to_dict()
+    contract = explain_simulation_schema()
+
+    _assert_schema_required_keys(simulation_json_schema("summary"), summary)
+    _assert_schema_required_keys(simulation_json_schema("full"), full)
+    _assert_schema_required_keys(simulation_json_schema("contract"), contract)
+    assert (
+        summary["schema_version"]
+        == simulation_json_schema("summary")["properties"]["schema_version"]["const"]
+    )
+    assert (
+        full["schema_version"]
+        == simulation_json_schema("full")["properties"]["schema_version"]["const"]
+    )
+    assert (
+        contract["schema_version"]
+        == simulation_json_schema("contract")["properties"]["schema_version"]["const"]
+    )
+
+
+def test_cli_simulate_json_schema_exits_without_reading_inputs(capsys) -> None:
+    code = main(
+        [
+            "simulate",
+            "--json-schema",
+            "summary",
+            "--workflow",
+            "missing-workflow.yml",
+            "--probe",
+            "unknown-probe",
+        ]
+    )
+
+    payload = json.loads(capsys.readouterr().out)
+    assert code == 0
+    assert payload["title"] == "Agent Permission Simulation Summary"
+    assert payload["properties"]["schema_version"]["const"].endswith(".summary.v1")
+
+
+def _assert_schema_required_keys(schema: dict[str, object], payload: dict[str, object]) -> None:
+    assert set(schema["required"]).issubset(payload)
+    assert set(payload).issubset(schema["properties"])
 
 
 def test_cli_simulate_writes_json_summary(tmp_path: Path) -> None:

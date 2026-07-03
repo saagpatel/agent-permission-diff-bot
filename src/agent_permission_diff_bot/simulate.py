@@ -623,6 +623,211 @@ def explain_simulation_schema() -> dict[str, Any]:
     }
 
 
+def simulation_json_schema(kind: str) -> dict[str, Any]:
+    schemas = {
+        "contract": _simulation_contract_json_schema(),
+        "full": _simulation_full_json_schema(),
+        "summary": _simulation_summary_json_schema(),
+    }
+    if kind not in schemas:
+        raise ValueError(f"unknown simulation JSON schema: {kind}")
+    return schemas[kind]
+
+
+def _schema_base(schema_id: str, title: str) -> dict[str, Any]:
+    return {
+        "$schema": "https://json-schema.org/draft/2020-12/schema",
+        "$id": schema_id,
+        "title": title,
+        "type": "object",
+        "additionalProperties": False,
+    }
+
+
+def _string_array_schema() -> dict[str, Any]:
+    return {"type": "array", "items": {"type": "string"}}
+
+
+def _simulation_input_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["kind", "source", "status", "notes"],
+        "properties": {
+            "kind": {"enum": list(InputKind.__args__)},
+            "source": {"type": "string"},
+            "status": {"type": "string"},
+            "notes": _string_array_schema(),
+        },
+    }
+
+
+def _capabilities_summary_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": list(CAPABILITIES),
+        "properties": {
+            name: {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["level", "confidence"],
+                "properties": {
+                    "level": {"enum": ["yes", "possible", "unknown", "no"]},
+                    "confidence": {"type": "string"},
+                },
+            }
+            for name in CAPABILITIES
+        },
+    }
+
+
+def _capabilities_full_schema() -> dict[str, Any]:
+    schema = _capabilities_summary_schema()
+    for capability in schema["properties"].values():
+        capability["required"] = ["level", "confidence", "evidence"]
+        capability["properties"]["evidence"] = _string_array_schema()
+    return schema
+
+
+def _risk_facet_summary_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["status", "confidence", "evidence_count", "live_probe_needed_count"],
+        "properties": {
+            "status": {"enum": ["detected", "review_needed"]},
+            "confidence": {"type": "string"},
+            "evidence_count": {"type": "integer", "minimum": 0},
+            "live_probe_needed_count": {"type": "integer", "minimum": 0},
+        },
+    }
+
+
+def _risk_facet_full_schema() -> dict[str, Any]:
+    index_array = {"type": "array", "items": {"type": "integer", "minimum": 0}}
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "status",
+            "confidence",
+            "deterministic_evidence_indices",
+            "live_probe_evidence_indices",
+            "live_probe_needed_indices",
+        ],
+        "properties": {
+            "status": {"enum": ["detected", "review_needed"]},
+            "confidence": {"type": "string"},
+            "deterministic_evidence_indices": index_array,
+            "live_probe_evidence_indices": index_array,
+            "live_probe_needed_indices": index_array,
+        },
+    }
+
+
+def _risk_facets_schema(facet_schema: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": facet_schema,
+        "propertyNames": {"enum": sorted(RISK_FACETS)},
+    }
+
+
+def _simulation_summary_json_schema() -> dict[str, Any]:
+    schema = _schema_base(
+        "https://agent-permission-diff-bot.local/schemas/simulation-summary.v1.json",
+        "Agent Permission Simulation Summary",
+    )
+    schema["required"] = [
+        "schema_version",
+        "mode",
+        "safety_boundary",
+        "input_count",
+        "inputs",
+        "capabilities",
+        "risk_facets",
+        "live_probe_needed",
+    ]
+    schema["properties"] = {
+        "schema_version": {"const": "agent-permission-simulation.v1.summary.v1"},
+        "mode": {"type": "string"},
+        "safety_boundary": {"type": "string"},
+        "input_count": {"type": "integer", "minimum": 0},
+        "inputs": {"type": "array", "items": _simulation_input_schema()},
+        "capabilities": _capabilities_summary_schema(),
+        "risk_facets": _risk_facets_schema(_risk_facet_summary_schema()),
+        "live_probe_needed": _string_array_schema(),
+    }
+    return schema
+
+
+def _simulation_full_json_schema() -> dict[str, Any]:
+    schema = _schema_base(
+        "https://agent-permission-diff-bot.local/schemas/simulation-full.v1.json",
+        "Agent Permission Simulation Full Report",
+    )
+    schema["required"] = [
+        "schema_version",
+        "mode",
+        "safety_boundary",
+        "inputs",
+        "capabilities",
+        "risk_facets",
+        "deterministic_evidence",
+        "live_probe_evidence",
+        "live_probe_needed",
+    ]
+    schema["properties"] = {
+        "schema_version": {"const": "agent-permission-simulation.v1"},
+        "mode": {"type": "string"},
+        "safety_boundary": {"type": "string"},
+        "inputs": {"type": "array", "items": _simulation_input_schema()},
+        "capabilities": _capabilities_full_schema(),
+        "risk_facets": _risk_facets_schema(_risk_facet_full_schema()),
+        "deterministic_evidence": _string_array_schema(),
+        "live_probe_evidence": _string_array_schema(),
+        "live_probe_needed": _string_array_schema(),
+    }
+    return schema
+
+
+def _simulation_contract_json_schema() -> dict[str, Any]:
+    schema = _schema_base(
+        "https://agent-permission-diff-bot.local/schemas/simulation-contract.v1.json",
+        "Agent Permission Simulation Contract Metadata",
+    )
+    schema["required"] = [
+        "schema_version",
+        "report_schema_version",
+        "summary_schema_version",
+        "default_mode",
+        "safety_boundary",
+        "capabilities",
+        "risk_facets",
+        "input_kinds",
+        "scenarios",
+        "probes",
+        "live_probe_default",
+        "live_probe_boundary",
+    ]
+    schema["properties"] = {
+        "schema_version": {"const": "agent-permission-simulation.contract.v1"},
+        "report_schema_version": {"const": "agent-permission-simulation.v1"},
+        "summary_schema_version": {"const": "agent-permission-simulation.v1.summary.v1"},
+        "default_mode": {"type": "string"},
+        "safety_boundary": {"type": "string"},
+        "capabilities": {"type": "array", "items": {"type": "object"}},
+        "risk_facets": {"type": "array", "items": {"type": "object"}},
+        "input_kinds": _string_array_schema(),
+        "scenarios": {"type": "array", "items": {"type": "object"}},
+        "probes": {"type": "array", "items": {"type": "object"}},
+        "live_probe_default": {"const": "disabled"},
+        "live_probe_boundary": {"type": "string"},
+    }
+    return schema
+
+
 def write_simulation_json(report: SimulationReport, path: Path) -> None:
     path.write_text(json.dumps(report.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
 

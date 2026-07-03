@@ -240,3 +240,14 @@ The command emits JSON with:
 - accepted input kinds
 - built-in scenario fixtures
 - supported live-read-only probe adapters and the live-probe opt-in boundary
+
+Use `simulate --json-schema` when a gate needs a JSON Schema for validating emitted
+artifacts:
+
+```bash
+agent-permission-diff simulate --json-schema summary
+agent-permission-diff simulate --json-schema full
+agent-permission-diff simulate --json-schema contract
+```
+
+Schema export is static and exits before reading input files or running live probes.
