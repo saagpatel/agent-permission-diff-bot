@@ -7,6 +7,7 @@ from pathlib import Path
 
 from agent_permission_diff_bot.cli import main
 from agent_permission_diff_bot.simulate import (
+    CAPABILITIES,
     GitHubActionsLiveProbeOptions,
     GitHubProbeError,
     GitHubPullResolution,
@@ -615,6 +616,49 @@ jobs:
     assert "deterministic_evidence" not in summary
     assert "live_probe_evidence" not in summary
     assert "live_probe_needed" in summary
+
+
+def test_render_json_summary_schema_contract() -> None:
+    report = build_simulation(
+        workflow_text="""
+name: Package
+on:
+  pull_request:
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/upload-artifact@v4
+        with:
+          path: dist/
+"""
+    )
+
+    summary = render_simulation_json_summary(report)
+
+    assert set(summary) == {
+        "schema_version",
+        "mode",
+        "safety_boundary",
+        "input_count",
+        "inputs",
+        "capabilities",
+        "risk_facets",
+        "live_probe_needed",
+    }
+    assert set(summary["capabilities"]) == set(CAPABILITIES)
+    assert all(
+        set(capability) == {"level", "confidence"}
+        for capability in summary["capabilities"].values()
+    )
+    assert set(summary["risk_facets"]["artifact_exposure"]) == {
+        "status",
+        "confidence",
+        "evidence_count",
+        "live_probe_needed_count",
+    }
+    assert "deterministic_evidence" not in summary
+    assert "live_probe_evidence" not in summary
 
 
 def test_cli_simulate_writes_json_summary(tmp_path: Path) -> None:
