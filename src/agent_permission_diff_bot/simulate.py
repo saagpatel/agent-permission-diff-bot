@@ -817,6 +817,7 @@ def _analyze_workflow(builder: SimulationBuilder, text: str) -> None:
         if atom.action == "deployment_environment":
             builder.add_evidence(evidence)
     _analyze_workflow_permission_inheritance(builder, workflow_data, text)
+    _analyze_workflow_reusable_and_action_boundaries(builder, workflow_data)
     _analyze_workflow_artifact_and_secret_exposure(builder, workflow_data)
     if "pull_request_target" in text:
         builder.add_capability(
@@ -1069,6 +1070,129 @@ def _permissions_allow_write(permissions: object) -> bool:
     if not isinstance(permissions, dict):
         return False
     return any(str(value).lower() in {"write", "write-all"} for value in permissions.values())
+
+
+def _analyze_workflow_reusable_and_action_boundaries(
+    builder: SimulationBuilder,
+    workflow_data: dict[str, Any] | None,
+) -> None:
+    if workflow_data is None:
+        return
+    jobs = workflow_data.get("jobs")
+    if not isinstance(jobs, dict):
+        return
+
+    found_external_reusable = False
+    found_secrets_inherit = False
+    found_local_action = False
+    found_unpinned_action = False
+    for job_name, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        job_uses = str(job.get("uses") or "")
+        if job_uses:
+            if job_uses.startswith("./"):
+                builder.add_evidence(
+                    f"Job `{job_name}` calls local reusable workflow `{job_uses}`."
+                )
+                builder.add_gap(
+                    f"Review local reusable workflow `{job_uses}` with caller permissions, "
+                    "inputs, and secrets."
+                )
+            else:
+                found_external_reusable = True
+                builder.add_evidence(
+                    f"Job `{job_name}` calls external reusable workflow `{job_uses}`."
+                )
+                if _uses_ref_is_unpinned(job_uses):
+                    found_unpinned_action = True
+                    builder.add_gap(
+                        f"External reusable workflow `{job_uses}` is not pinned to a full SHA."
+                    )
+                builder.add_gap(
+                    f"Confirm external reusable workflow `{job_uses}` trust, requested "
+                    "permissions, and called workflow code at the referenced ref."
+                )
+            if str(job.get("secrets") or "").lower() == "inherit":
+                found_secrets_inherit = True
+                builder.add_evidence(
+                    f"Job `{job_name}` passes caller secrets with `secrets: inherit`."
+                )
+                builder.add_gap(
+                    f"Review which caller secrets are exposed to reusable workflow job "
+                    f"`{job_name}`."
+                )
+
+        steps = job.get("steps")
+        if not isinstance(steps, list):
+            continue
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            uses = str(step.get("uses") or "")
+            if not uses:
+                continue
+            if uses.startswith("./"):
+                found_local_action = True
+                builder.add_evidence(
+                    f"Job `{job_name}` runs local action or composite action `{uses}`."
+                )
+                builder.add_gap(
+                    f"Review local action `{uses}` source, composite steps, and inherited "
+                    "environment."
+                )
+            elif _uses_ref_is_unpinned(uses):
+                found_unpinned_action = True
+                builder.add_evidence(
+                    f"Job `{job_name}` uses action `{uses}` without a full-length SHA pin."
+                )
+                builder.add_gap(
+                    f"Pin action `{uses}` to a full commit SHA or confirm trusted floating ref."
+                )
+
+    if found_external_reusable:
+        builder.add_capability(
+            "send",
+            "possible",
+            "medium",
+            "Workflow calls external reusable workflow code outside this repository.",
+        )
+        builder.add_capability(
+            "bypass",
+            "possible",
+            "medium",
+            "External reusable workflow behavior is outside the supplied static workflow body.",
+        )
+    if found_secrets_inherit:
+        builder.add_capability(
+            "read",
+            "possible",
+            "medium",
+            "Reusable workflow call uses `secrets: inherit`; effective secret exposure is live "
+            "caller context.",
+        )
+    if found_local_action:
+        builder.add_capability(
+            "bypass",
+            "possible",
+            "medium",
+            "Local action or composite action behavior is outside the supplied workflow step.",
+        )
+    if found_unpinned_action:
+        builder.add_capability(
+            "bypass",
+            "possible",
+            "medium",
+            "Workflow uses action or reusable workflow references that are not pinned to full "
+            "commit SHAs.",
+        )
+
+
+def _uses_ref_is_unpinned(value: str) -> bool:
+    if "@" not in value:
+        return True
+    ref = value.rsplit("@", 1)[1]
+    return not bool(re.fullmatch(r"[0-9a-fA-F]{40}", ref))
 
 
 def _analyze_workflow_artifact_and_secret_exposure(
