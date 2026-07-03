@@ -11,6 +11,24 @@ Both modes are static/no-credential/no-network unless an explicit live read-only
 
 Use `--json` when a consumer needs traceability back to exact evidence strings.
 
+The examples below use this workflow snapshot:
+
+```yaml
+name: Publish
+on:
+  workflow_dispatch:
+permissions:
+  id-token: write
+jobs:
+  publish:
+    uses: org/platform/.github/workflows/release.yml@main
+    secrets: inherit
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: pypa/gh-action-pypi-publish@release/v1
+```
+
 ```bash
 agent-permission-diff simulate \
   --workflow workflow.yml \

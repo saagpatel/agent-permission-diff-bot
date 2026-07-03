@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import urllib.error
 from pathlib import Path
 
@@ -659,6 +660,30 @@ jobs:
     }
     assert "deterministic_evidence" not in summary
     assert "live_probe_evidence" not in summary
+
+
+def test_simulation_output_docs_summary_example_matches_renderer() -> None:
+    docs = Path("docs/simulation-output.md").read_text(encoding="utf-8")
+
+    workflow_match = re.search(
+        r"The examples below use this workflow snapshot:\n\n```yaml\n(?P<workflow>.*?)\n```",
+        docs,
+        flags=re.DOTALL,
+    )
+    summary_match = re.search(
+        r"## Summary JSON.*?Example:\n\n```json\n(?P<summary>.*?)\n```",
+        docs,
+        flags=re.DOTALL,
+    )
+
+    assert workflow_match is not None
+    assert summary_match is not None
+    documented_summary = json.loads(summary_match.group("summary"))
+    generated_summary = render_simulation_json_summary(
+        build_simulation(workflow_text=workflow_match.group("workflow"))
+    )
+
+    assert documented_summary == generated_summary
 
 
 def test_cli_simulate_writes_json_summary(tmp_path: Path) -> None:
