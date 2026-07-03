@@ -81,7 +81,13 @@ Codex/Claude hook-policy snapshot, and built-in static scenario fixtures. It doe
 credentials, launch MCP servers, contact network endpoints, dispatch workflows, deploy, or
 run destructive probes. The JSON and Markdown outputs summarize `read`, `write`, `send`,
 `deploy`, `bypass`, and `escalate` capabilities, confidence, deterministic evidence,
-live-probe-needed gaps, and the active safety boundary.
+live-probe-needed gaps, structured `risk_facets`, and the active safety boundary.
+
+`risk_facets` groups the prose evidence into machine-readable categories such as
+`token_inheritance`, `deployment_gate`, `artifact_exposure`,
+`reusable_workflow_boundary`, `secret_exposure`, and `pull_request_target_boundary`.
+Each facet includes a status, confidence, and indexes back to deterministic evidence,
+live probe evidence, and live-probe-needed gaps.
 
 For supplied GitHub Actions workflow snapshots, `simulate` also flags
 `pull_request_target` workflows that check out or execute pull request head code, since

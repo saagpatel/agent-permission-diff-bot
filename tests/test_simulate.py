@@ -536,6 +536,59 @@ def test_render_markdown_lists_live_probe_gaps() -> None:
     assert "MCPAudit connected or supplied tool-schema evidence" in markdown
 
 
+def test_simulation_report_includes_structured_risk_facets() -> None:
+    report = build_simulation(
+        workflow_text="""
+name: Publish
+on:
+  workflow_dispatch:
+permissions:
+  id-token: write
+jobs:
+  publish:
+    uses: org/platform/.github/workflows/release.yml@main
+    secrets: inherit
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: pypa/gh-action-pypi-publish@release/v1
+"""
+    )
+
+    payload = report.to_dict()
+    facets = payload["risk_facets"]
+    assert facets["token_inheritance"]["status"] == "review_needed"
+    assert facets["deployment_gate"]["status"] == "review_needed"
+    assert facets["reusable_workflow_boundary"]["status"] == "review_needed"
+    assert facets["secret_exposure"]["status"] == "review_needed"
+    assert facets["reusable_workflow_boundary"]["live_probe_needed_indices"]
+    gap_index = facets["reusable_workflow_boundary"]["live_probe_needed_indices"][0]
+    assert "reusable workflow" in payload["live_probe_needed"][gap_index]
+
+
+def test_render_markdown_lists_risk_facets() -> None:
+    report = build_simulation(
+        workflow_text="""
+name: Package
+on:
+  pull_request:
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/upload-artifact@v4
+        with:
+          path: dist/
+"""
+    )
+
+    markdown = render_simulation_markdown(report)
+
+    assert "## Risk Facets" in markdown
+    assert "`artifact_exposure`" in markdown
+    assert "| Facet | Status | Confidence | Evidence | Live Gaps |" in markdown
+
+
 def test_lists_builtin_simulation_scenarios() -> None:
     names = {item["name"] for item in list_simulation_scenarios()}
 
