@@ -816,6 +816,7 @@ def _analyze_workflow(builder: SimulationBuilder, text: str) -> None:
             builder.add_capability("send", "possible", atom.confidence, evidence)
         if atom.action == "deployment_environment":
             builder.add_evidence(evidence)
+    _analyze_workflow_permission_inheritance(builder, workflow_data, text)
     _analyze_workflow_artifact_and_secret_exposure(builder, workflow_data)
     if "pull_request_target" in text:
         builder.add_capability(
@@ -964,6 +965,110 @@ def _analyze_pull_request_target_workflow_risk(
             "pull_request_target workflow references pull request head context; static review "
             "should confirm it does not execute untrusted code with privileged token scope."
         )
+
+
+def _analyze_workflow_permission_inheritance(
+    builder: SimulationBuilder,
+    workflow_data: dict[str, Any] | None,
+    text: str,
+) -> None:
+    if workflow_data is None:
+        return
+    workflow_permissions = workflow_data.get("permissions")
+    workflow_has_permissions = "permissions" in workflow_data
+    jobs = workflow_data.get("jobs")
+    if not isinstance(jobs, dict):
+        return
+
+    if not workflow_has_permissions:
+        builder.add_evidence(
+            "Workflow omits top-level `permissions`; GITHUB_TOKEN defaults are inherited "
+            "from repository or organization settings."
+        )
+        builder.add_capability(
+            "write",
+            "unknown",
+            "low",
+            "Workflow top-level GITHUB_TOKEN permissions are inherited from live settings.",
+        )
+        builder.add_gap(
+            "Confirm repository or organization default GITHUB_TOKEN permissions for workflows "
+            "without explicit top-level `permissions`."
+        )
+        if "pull_request_target" in text:
+            builder.add_gap(
+                "pull_request_target workflow omits top-level `permissions`; confirm inherited "
+                "token scope before trusting privileged PR automation."
+            )
+    else:
+        _record_workflow_permission_value(builder, "workflow", workflow_permissions)
+
+    for job_name, job in jobs.items():
+        if not isinstance(job, dict):
+            continue
+        if "permissions" in job:
+            _record_workflow_permission_value(builder, f"job `{job_name}`", job.get("permissions"))
+            continue
+        if workflow_has_permissions:
+            builder.add_evidence(
+                f"Job `{job_name}` omits `permissions` and inherits top-level workflow "
+                "`permissions`."
+            )
+            if _permissions_allow_write(workflow_permissions):
+                builder.add_gap(
+                    f"Confirm job `{job_name}` needs inherited write-capable GITHUB_TOKEN "
+                    "permissions."
+                )
+        else:
+            builder.add_evidence(
+                f"Job `{job_name}` omits `permissions` and inherits live default GITHUB_TOKEN "
+                "scope."
+            )
+            builder.add_gap(
+                f"Confirm job `{job_name}` effective GITHUB_TOKEN scope from repository or "
+                "organization defaults."
+            )
+
+
+def _record_workflow_permission_value(
+    builder: SimulationBuilder,
+    scope: str,
+    permissions: object,
+) -> None:
+    if permissions is None:
+        return
+    if isinstance(permissions, str):
+        value = permissions.lower()
+        if value == "read-all":
+            builder.add_capability(
+                "read",
+                "possible",
+                "medium",
+                f"{scope} sets GITHUB_TOKEN `permissions: read-all`.",
+            )
+        elif value == "write-all":
+            builder.add_capability(
+                "write",
+                "yes",
+                "high",
+                f"{scope} sets GITHUB_TOKEN `permissions: write-all`.",
+            )
+            builder.add_gap(f"Review whether {scope} requires broad `permissions: write-all`.")
+        elif value == "{}":
+            builder.add_evidence(
+                f"{scope} disables GITHUB_TOKEN permissions with `permissions: {{}}`."
+            )
+        return
+    if isinstance(permissions, dict) and not permissions:
+        builder.add_evidence(f"{scope} disables GITHUB_TOKEN permissions with `permissions: {{}}`.")
+
+
+def _permissions_allow_write(permissions: object) -> bool:
+    if isinstance(permissions, str):
+        return permissions.lower() in {"write-all", "write"}
+    if not isinstance(permissions, dict):
+        return False
+    return any(str(value).lower() in {"write", "write-all"} for value in permissions.values())
 
 
 def _analyze_workflow_artifact_and_secret_exposure(
