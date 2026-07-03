@@ -108,6 +108,8 @@ running probes.
 Use `simulate --validate-json PATH --schema summary|full|contract` to validate an existing
 simulation artifact offline against the exported schemas. The command prints JSON with
 `valid` and `errors`, exits `0` for valid artifacts, and exits `2` for validation failures.
+See [Simulation CI Recipe](docs/simulation-ci-recipe.md) for a static GitHub Actions
+pattern that generates, validates, and routes a simulation summary.
 
 For supplied GitHub Actions workflow snapshots, `simulate` also flags
 `pull_request_target` workflows that check out or execute pull request head code, since

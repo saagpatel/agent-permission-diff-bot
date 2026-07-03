@@ -262,3 +262,6 @@ agent-permission-diff simulate --validate-json contract.json --schema contract
 
 Validation prints JSON with `valid`, `errors`, `schema`, and `schema_id`. It exits `0`
 when the artifact matches the selected schema and exits `2` when validation fails.
+
+See [Simulation CI Recipe](simulation-ci-recipe.md) for an end-to-end GitHub Actions
+example that generates a summary, validates it, and routes review work from summary fields.
