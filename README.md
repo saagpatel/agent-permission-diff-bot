@@ -94,6 +94,12 @@ or jobs that omit `permissions` are reported as inherited live defaults, with fo
 gaps for repository or organization default token settings. Broad `permissions: write-all`
 and jobs that inherit write-capable workflow permissions are called out separately.
 
+Reusable workflow and action trust boundaries are also classified. Static reports call out
+local reusable workflows, external reusable workflows, `secrets: inherit`, local composite
+actions, and action references that are not pinned to full commit SHAs. These are reported
+as deterministic trust-boundary evidence with live-probe-needed gaps for called workflow
+code, caller secrets, local action contents, and floating ref trust.
+
 The workflow simulator also classifies common GitHub Actions data-exposure paths such as
 artifact uploads, cache save/restore steps, GitHub secret references, and writes to
 `GITHUB_OUTPUT`, `GITHUB_ENV`, or `GITHUB_STEP_SUMMARY`. These are static signals only:

@@ -135,6 +135,76 @@ jobs:
     assert any("broad `permissions: write-all`" in gap for gap in broad.live_probe_needed)
 
 
+def test_simulates_external_reusable_workflow_with_inherited_secrets() -> None:
+    report = build_simulation(
+        workflow_text="""
+name: Reusable
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  release:
+    uses: org/platform/.github/workflows/release.yml@main
+    secrets: inherit
+"""
+    )
+
+    assert report.capabilities["read"].level == "possible"
+    assert report.capabilities["send"].level == "possible"
+    assert report.capabilities["bypass"].level == "possible"
+    assert any("external reusable workflow" in item for item in report.deterministic_evidence)
+    assert any("secrets: inherit" in item for item in report.deterministic_evidence)
+    assert any("not pinned to a full SHA" in gap for gap in report.live_probe_needed)
+    assert any("caller secrets" in gap for gap in report.live_probe_needed)
+
+
+def test_simulates_local_reusable_workflow_and_local_action_boundaries() -> None:
+    report = build_simulation(
+        workflow_text="""
+name: Local Boundaries
+on:
+  workflow_dispatch:
+permissions: read-all
+jobs:
+  checks:
+    uses: ./.github/workflows/checks.yml
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./actions/build
+"""
+    )
+
+    assert report.capabilities["bypass"].level == "possible"
+    assert any("local reusable workflow" in item for item in report.deterministic_evidence)
+    assert any("local action or composite action" in item for item in report.deterministic_evidence)
+    assert any("caller permissions" in gap for gap in report.live_probe_needed)
+    assert any("composite steps" in gap for gap in report.live_probe_needed)
+
+
+def test_simulates_unpinned_and_pinned_action_refs() -> None:
+    report = build_simulation(
+        workflow_text="""
+name: Pins
+on:
+  workflow_dispatch:
+permissions: read-all
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@0123456789abcdef0123456789abcdef01234567
+"""
+    )
+
+    assert report.capabilities["bypass"].level == "possible"
+    assert any("actions/checkout@v4" in item for item in report.deterministic_evidence)
+    assert any("actions/checkout@v4" in gap for gap in report.live_probe_needed)
+    assert not any("setup-python" in gap for gap in report.live_probe_needed)
+
+
 def test_simulates_workflow_artifact_upload_exposure() -> None:
     report = build_simulation(
         workflow_text="""
