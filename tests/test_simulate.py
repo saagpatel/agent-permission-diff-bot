@@ -53,6 +53,88 @@ jobs:
     assert any("OIDC provider trust policy" in gap for gap in report.live_probe_needed)
 
 
+def test_simulates_workflow_omitted_permissions_as_inherited_unknown() -> None:
+    report = build_simulation(
+        workflow_text="""
+name: Inherited
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+"""
+    )
+
+    assert report.capabilities["write"].level == "unknown"
+    assert any("omits top-level `permissions`" in item for item in report.deterministic_evidence)
+    assert any("Job `test` omits `permissions`" in item for item in report.deterministic_evidence)
+    assert any("default GITHUB_TOKEN permissions" in gap for gap in report.live_probe_needed)
+
+
+def test_simulates_pull_request_target_omitted_permissions_as_privileged_gap() -> None:
+    report = build_simulation(
+        workflow_text="""
+name: PR Target
+on:
+  pull_request_target:
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/labeler@v5
+"""
+    )
+
+    assert report.capabilities["escalate"].level == "possible"
+    assert any("omits top-level `permissions`" in gap for gap in report.live_probe_needed)
+    assert any("privileged PR automation" in gap for gap in report.live_probe_needed)
+
+
+def test_simulates_job_inherits_write_capable_workflow_permissions() -> None:
+    report = build_simulation(
+        workflow_text="""
+name: Write Inherited
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+"""
+    )
+
+    assert report.capabilities["write"].level == "yes"
+    assert any("inherits top-level workflow" in item for item in report.deterministic_evidence)
+    assert any("inherited write-capable" in gap for gap in report.live_probe_needed)
+
+
+def test_simulates_write_all_and_empty_permissions() -> None:
+    broad = build_simulation(
+        workflow_text="""
+name: Broad
+on:
+  workflow_dispatch:
+permissions: write-all
+jobs:
+  test:
+    permissions: {}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+"""
+    )
+
+    assert broad.capabilities["write"].level == "yes"
+    assert any("permissions: write-all" in item for item in broad.deterministic_evidence)
+    assert any("disables GITHUB_TOKEN permissions" in item for item in broad.deterministic_evidence)
+    assert any("broad `permissions: write-all`" in gap for gap in broad.live_probe_needed)
+
+
 def test_simulates_workflow_artifact_upload_exposure() -> None:
     report = build_simulation(
         workflow_text="""

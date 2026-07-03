@@ -89,6 +89,11 @@ that can collapse fork isolation into privileged token or secret exposure. Obvio
 non-fork guards such as `github.event.pull_request.head.repo.fork == false` are recorded
 as mitigating evidence while still requiring guard review.
 
+The simulator records explicit and inherited `GITHUB_TOKEN` permission posture. Workflows
+or jobs that omit `permissions` are reported as inherited live defaults, with follow-up
+gaps for repository or organization default token settings. Broad `permissions: write-all`
+and jobs that inherit write-capable workflow permissions are called out separately.
+
 The workflow simulator also classifies common GitHub Actions data-exposure paths such as
 artifact uploads, cache save/restore steps, GitHub secret references, and writes to
 `GITHUB_OUTPUT`, `GITHUB_ENV`, or `GITHUB_STEP_SUMMARY`. These are static signals only:
