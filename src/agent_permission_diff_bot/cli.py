@@ -23,6 +23,7 @@ from agent_permission_diff_bot.simulate import (
     list_simulation_probes,
     list_simulation_scenarios,
     render_simulation_markdown,
+    simulation_json_schema,
     write_simulation_json,
     write_simulation_json_summary,
     write_simulation_markdown,
@@ -93,6 +94,9 @@ def _run_simulate(args: argparse.Namespace) -> int:
         return 0
     if args.explain_schema:
         print(json.dumps(explain_simulation_schema(), indent=2, sort_keys=True))
+        return 0
+    if args.json_schema:
+        print(json.dumps(simulation_json_schema(args.json_schema), indent=2, sort_keys=True))
         return 0
     report = build_simulation(
         scenarios=tuple(args.scenario or ()),
@@ -236,6 +240,14 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Print machine-readable simulator contract metadata as JSON and exit. "
+            "No simulation inputs or probes are executed."
+        ),
+    )
+    simulate.add_argument(
+        "--json-schema",
+        choices=("summary", "full", "contract"),
+        help=(
+            "Print a JSON Schema for a simulator output shape and exit. "
             "No simulation inputs or probes are executed."
         ),
     )

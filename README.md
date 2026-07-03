@@ -100,6 +100,11 @@ metadata before running a simulation. It prints schema versions, capability name
 facets, input kinds, built-in scenarios, supported probes, and live-probe boundaries without
 reading input files or running probes.
 
+Use `simulate --json-schema summary`, `simulate --json-schema full`, or
+`simulate --json-schema contract` when integrations need a JSON Schema for validating
+simulator artifacts. Schema export is also static and exits before reading input files or
+running probes.
+
 For supplied GitHub Actions workflow snapshots, `simulate` also flags
 `pull_request_target` workflows that check out or execute pull request head code, since
 that can collapse fork isolation into privileged token or secret exposure. Obvious
