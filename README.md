@@ -28,13 +28,13 @@ with a composite GitHub Action for pull request scanning.
 Install directly from GitHub (no PyPI release yet):
 
 ```bash
-pip install git+https://github.com/saagpatel/agent-permission-diff-bot.git@v0.4.0
+pip install git+https://github.com/saagpatel/agent-permission-diff-bot.git@v0.5.0
 ```
 
 Or pin to a specific tag for reproducible installs:
 
 ```bash
-pip install "git+https://github.com/saagpatel/agent-permission-diff-bot.git@v0.4.0"
+pip install "git+https://github.com/saagpatel/agent-permission-diff-bot.git@v0.5.0"
 ```
 
 ## Usage
@@ -242,7 +242,7 @@ steps:
     with:
       fetch-depth: 0
 
-  - uses: saagpatel/agent-permission-diff-bot@v0.4.0
+  - uses: saagpatel/agent-permission-diff-bot@v0.5.0
     with:
       mode: observe
       upload-sarif: "false"
@@ -262,7 +262,7 @@ steps:
     with:
       fetch-depth: 0
 
-  - uses: saagpatel/agent-permission-diff-bot@v0.4.0
+  - uses: saagpatel/agent-permission-diff-bot@v0.5.0
     with:
       mode: observe
       comment: "true"
