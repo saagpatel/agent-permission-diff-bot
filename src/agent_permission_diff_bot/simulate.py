@@ -18,6 +18,7 @@ from agent_permission_diff_bot.surfaces import extract_atoms
 
 CapabilityName = Literal["read", "write", "send", "deploy", "bypass", "escalate"]
 CapabilityLevel = Literal["yes", "possible", "unknown", "no"]
+RiskFacetStatus = Literal["detected", "review_needed"]
 InputKind = Literal[
     "command",
     "workflow",
@@ -343,12 +344,32 @@ class SimulationInput:
 
 
 @dataclass
+class SimulationRiskFacet:
+    name: str
+    status: RiskFacetStatus
+    confidence: str
+    deterministic_evidence_indices: list[int] = field(default_factory=list)
+    live_probe_evidence_indices: list[int] = field(default_factory=list)
+    live_probe_needed_indices: list[int] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "confidence": self.confidence,
+            "deterministic_evidence_indices": self.deterministic_evidence_indices,
+            "live_probe_evidence_indices": self.live_probe_evidence_indices,
+            "live_probe_needed_indices": self.live_probe_needed_indices,
+        }
+
+
+@dataclass
 class SimulationReport:
     schema_version: str
     mode: str
     safety_boundary: str
     inputs: list[SimulationInput]
     capabilities: dict[CapabilityName, CapabilityAssessment]
+    risk_facets: dict[str, SimulationRiskFacet]
     deterministic_evidence: list[str]
     live_probe_evidence: list[str]
     live_probe_needed: list[str]
@@ -360,6 +381,9 @@ class SimulationReport:
             "safety_boundary": self.safety_boundary,
             "inputs": [item.to_dict() for item in self.inputs],
             "capabilities": {name: self.capabilities[name].to_dict() for name in CAPABILITIES},
+            "risk_facets": {
+                name: self.risk_facets[name].to_dict() for name in sorted(self.risk_facets)
+            },
             "deterministic_evidence": self.deterministic_evidence,
             "live_probe_evidence": self.live_probe_evidence,
             "live_probe_needed": self.live_probe_needed,
@@ -416,6 +440,11 @@ class SimulationBuilder:
             ),
             inputs=self.inputs,
             capabilities=self.capabilities,
+            risk_facets=_build_risk_facets(
+                self.deterministic_evidence,
+                self.live_probe_evidence,
+                self.live_probe_needed,
+            ),
             deterministic_evidence=self.deterministic_evidence,
             live_probe_evidence=self.live_probe_evidence,
             live_probe_needed=self.live_probe_needed,
@@ -484,6 +513,70 @@ def write_simulation_markdown(report: SimulationReport, path: Path) -> None:
     path.write_text(render_simulation_markdown(report), encoding="utf-8")
 
 
+def _build_risk_facets(
+    deterministic_evidence: list[str],
+    live_probe_evidence: list[str],
+    live_probe_needed: list[str],
+) -> dict[str, SimulationRiskFacet]:
+    specs: dict[str, tuple[tuple[str, ...], tuple[str, ...], str]] = {
+        "token_inheritance": (
+            ("GITHUB_TOKEN", "permissions", "write-all"),
+            ("GITHUB_TOKEN permissions", "inherited token scope", "write-capable GITHUB_TOKEN"),
+            "medium",
+        ),
+        "deployment_gate": (
+            ("deployment environment", "environment gate", "deploy/publish-shaped"),
+            ("environment gate", "required reviewers", "OIDC deploy path", "branch or tag"),
+            "medium",
+        ),
+        "artifact_exposure": (
+            ("uploads artifacts", "cache-capable", "GitHub output, env, or step summary"),
+            ("artifact upload paths", "cache keys", "output/env/summary"),
+            "medium",
+        ),
+        "reusable_workflow_boundary": (
+            ("reusable workflow", "composite action", "full-length SHA pin"),
+            ("reusable workflow", "caller secrets", "floating ref", "full commit SHA"),
+            "medium",
+        ),
+        "secret_exposure": (
+            ("GitHub secrets", "secret-derived", "secrets: inherit"),
+            ("which secrets are available", "secret-derived data exposure", "caller secrets"),
+            "medium",
+        ),
+        "pull_request_target_boundary": (
+            ("pull_request_target",),
+            ("pull_request_target", "non-fork guard", "privileged PR automation"),
+            "high",
+        ),
+    }
+    facets: dict[str, SimulationRiskFacet] = {}
+    for name, (evidence_terms, gap_terms, default_confidence) in specs.items():
+        evidence_indices = _matching_indices(deterministic_evidence, evidence_terms)
+        probe_evidence_indices = _matching_indices(live_probe_evidence, evidence_terms)
+        gap_indices = _matching_indices(live_probe_needed, gap_terms)
+        if not evidence_indices and not probe_evidence_indices and not gap_indices:
+            continue
+        facets[name] = SimulationRiskFacet(
+            name=name,
+            status="review_needed" if gap_indices else "detected",
+            confidence=default_confidence if evidence_indices or probe_evidence_indices else "low",
+            deterministic_evidence_indices=evidence_indices,
+            live_probe_evidence_indices=probe_evidence_indices,
+            live_probe_needed_indices=gap_indices,
+        )
+    return facets
+
+
+def _matching_indices(items: list[str], terms: tuple[str, ...]) -> list[int]:
+    lowered_terms = tuple(term.lower() for term in terms)
+    return [
+        index
+        for index, item in enumerate(items)
+        if any(term in item.lower() for term in lowered_terms)
+    ]
+
+
 def render_simulation_markdown(report: SimulationReport) -> str:
     lines = [
         "# Agent Permission Simulation",
@@ -503,6 +596,27 @@ def render_simulation_markdown(report: SimulationReport) -> str:
         lines.append(
             f"| `{name}` | `{assessment.level}` | `{assessment.confidence}` | {evidence} |"
         )
+
+    lines.extend(["", "## Risk Facets", ""])
+    if report.risk_facets:
+        lines.extend(
+            [
+                "| Facet | Status | Confidence | Evidence | Live Gaps |",
+                "|---|---|---|---|---|",
+            ]
+        )
+        for name in sorted(report.risk_facets):
+            facet = report.risk_facets[name]
+            evidence_refs = ", ".join(
+                f"D{index}" for index in facet.deterministic_evidence_indices[:4]
+            )
+            gap_refs = ", ".join(f"G{index}" for index in facet.live_probe_needed_indices[:4])
+            lines.append(
+                f"| `{name}` | `{facet.status}` | `{facet.confidence}` | "
+                f"{evidence_refs} | {gap_refs} |"
+            )
+    else:
+        lines.append("- None detected for the supplied evidence.")
 
     lines.extend(["", "## Inputs", ""])
     for item in report.inputs:
