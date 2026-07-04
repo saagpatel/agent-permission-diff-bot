@@ -1,3 +1,18 @@
+## Review guidelines
+
+Focus Codex review on permission-diff correctness, exact JSON/SARIF/Markdown
+output contracts, simulator gate exit codes, acknowledgement handling,
+pull_request_target and fork/base trust boundaries, OIDC/deployment gates,
+`GITHUB_TOKEN` permission inheritance, reusable workflow boundaries, artifact
+and cache exposure, and static-vs-live probe separation. Treat changes that
+perform network or credential reads without explicit flags, hide live-probe
+gaps, misclassify write/deploy/bypass capabilities, or make unsafe workflows
+look acknowledged or low-risk as merge-relevant.
+
+For docs-only PRs, comment only when docs claim a simulator boundary, schema,
+gate behavior, probe behavior, or CI recipe that the reviewed code, fixtures, or
+contract docs do not support.
+
 <!-- portfolio-context:start -->
 # Portfolio Context
 
