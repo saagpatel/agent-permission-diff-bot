@@ -138,7 +138,7 @@ def _read_optional_text(path: str | None) -> str | None:
 def _github_actions_live_options(
     args: argparse.Namespace,
 ) -> GitHubActionsLiveProbeOptions | None:
-    if not args.github_actions_live:
+    if not args.github_actions_live and not args.github_repository:
         return None
     return GitHubActionsLiveProbeOptions(
         repository=args.github_repository,
