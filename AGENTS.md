@@ -18,7 +18,7 @@ contract docs do not support.
 
 ## What This Project Is
 
-agent-permission-diff-bot is an active local project in the /Users/d/Projects portfolio.
+agent-permission-diff-bot is an active local project in the ~/Projects portfolio.
 
 ## Current State
 
