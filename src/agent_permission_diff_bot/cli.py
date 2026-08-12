@@ -16,6 +16,26 @@ from agent_permission_diff_bot.reporting import (
     write_markdown,
     write_sarif,
 )
+from agent_permission_diff_bot.server_card_diff import build_server_card_report
+from agent_permission_diff_bot.server_card_model import SourceSnapshot
+from agent_permission_diff_bot.server_card_reporting import (
+    render_server_card_human,
+    write_server_card_human,
+    write_server_card_json,
+    write_server_card_markdown,
+    write_server_card_sarif,
+)
+from agent_permission_diff_bot.server_card_schema import (
+    explain_server_card_schema,
+    server_card_json_schema,
+    validate_server_card_json,
+)
+from agent_permission_diff_bot.server_card_sources import (
+    ServerCardInputError,
+    read_server_card_directory,
+    read_server_card_file,
+    read_server_card_git_ref,
+)
 from agent_permission_diff_bot.simulate import (
     GitHubActionsLiveProbeOptions,
     build_simulation,
@@ -43,6 +63,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_diff(args)
     if args.command == "simulate":
         return _run_simulate(args)
+    if args.command in {"server-card-diff", "mcp-server-card-diff"}:
+        return _run_server_card_diff(args)
     parser.print_help()
     return 1
 
@@ -125,6 +147,85 @@ def _run_simulate(args: argparse.Namespace) -> int:
     if not args.json and not args.json_summary and not args.markdown:
         print(render_simulation_markdown(report))
     return 0
+
+
+def _run_server_card_diff(args: argparse.Namespace) -> int:
+    if args.explain_schema:
+        print(json.dumps(explain_server_card_schema(), indent=2, sort_keys=True))
+        return 0
+    if args.json_schema:
+        print(json.dumps(server_card_json_schema(args.json_schema), indent=2, sort_keys=True))
+        return 0
+    if args.validate_json:
+        payload = json.loads(_read_optional_text(args.validate_json) or "null")
+        result = validate_server_card_json(payload, args.schema)
+        print(json.dumps(result, indent=2, sort_keys=True))
+        return 0 if result["valid"] else 2
+    try:
+        base, head = _read_server_card_inputs(args)
+    except ServerCardInputError as exc:
+        raise SystemExit(str(exc)) from exc
+    report = build_server_card_report(
+        base,
+        head,
+        mode=args.mode,
+        fail_on=Severity.parse(args.fail_on),
+    )
+    if args.json:
+        write_server_card_json(report, Path(args.json))
+    if args.human:
+        write_server_card_human(report, Path(args.human))
+    if args.markdown:
+        write_server_card_markdown(report, Path(args.markdown))
+    if args.sarif:
+        write_server_card_sarif(report, Path(args.sarif))
+    if not any((args.json, args.human, args.markdown, args.sarif)):
+        print(render_server_card_human(report), end="")
+    return report.gate.exit_code if report.gate is not None else 0
+
+
+def _read_server_card_inputs(
+    args: argparse.Namespace,
+) -> tuple[SourceSnapshot, SourceSnapshot]:
+    card_paths = tuple(args.card_path or ())
+    modes = sum(
+        bool(value)
+        for value in (
+            args.repo,
+            args.base_file or args.head_file,
+            args.base_dir or args.head_dir,
+        )
+    )
+    if modes != 1:
+        raise ServerCardInputError(
+            "provide exactly one input mode: --repo with refs, --base-file/--head-file, "
+            "or --base-dir/--head-dir"
+        )
+    if args.repo:
+        if not args.base_ref or not args.head_ref:
+            raise ServerCardInputError("--repo requires --base-ref and --head-ref")
+        repo = Path(args.repo)
+        return (
+            read_server_card_git_ref(repo, args.base_ref, card_paths=card_paths),
+            read_server_card_git_ref(repo, args.head_ref, card_paths=card_paths),
+        )
+    if args.base_file or args.head_file:
+        if not args.base_file or not args.head_file:
+            raise ServerCardInputError("file mode requires --base-file and --head-file")
+        return (
+            read_server_card_file(Path(args.base_file), label=args.base_label),
+            read_server_card_file(Path(args.head_file), label=args.head_label),
+        )
+    if not args.base_dir or not args.head_dir:
+        raise ServerCardInputError("directory mode requires --base-dir and --head-dir")
+    return (
+        read_server_card_directory(
+            Path(args.base_dir), label=args.base_label, card_paths=card_paths
+        ),
+        read_server_card_directory(
+            Path(args.head_dir), label=args.head_label, card_paths=card_paths
+        ),
+    )
 
 
 def _read_optional_text(path: str | None) -> str | None:
@@ -323,6 +424,60 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     simulate.add_argument("--markdown", help="Write Markdown simulation output")
+
+    server_card = subparsers.add_parser(
+        "server-card-diff",
+        aliases=("mcp-server-card-diff",),
+        help="compare declared MCP Registry metadata or server-card snapshots offline",
+    )
+    server_card.add_argument("--repo", help="Git repository containing both snapshots")
+    server_card.add_argument("--base-ref", help="Base Git ref (local objects only; no fetch)")
+    server_card.add_argument("--head-ref", help="Head Git ref (local objects only; no fetch)")
+    server_card.add_argument("--base-file", help="Explicit base metadata JSON file")
+    server_card.add_argument("--head-file", help="Explicit head metadata JSON file")
+    server_card.add_argument("--base-dir", help="Base directory containing server cards")
+    server_card.add_argument("--head-dir", help="Head directory containing server cards")
+    server_card.add_argument("--base-label", help="Stable base label for file/directory input")
+    server_card.add_argument("--head-label", help="Stable head label for file/directory input")
+    server_card.add_argument(
+        "--card-path",
+        action="append",
+        help=(
+            "Relative card path for directory or Git-ref input. May be repeated; otherwise "
+            "server.json, mcp-server.json, and *.server.json are discovered."
+        ),
+    )
+    server_card.add_argument("--human", help="Write plain-text human report")
+    server_card.add_argument("--json", help="Write versioned JSON drift report")
+    server_card.add_argument("--markdown", help="Write Markdown drift report")
+    server_card.add_argument("--sarif", help="Write SARIF 2.1.0 drift report")
+    server_card.add_argument("--mode", choices=("observe", "warn", "enforce"), default="observe")
+    server_card.add_argument(
+        "--fail-on",
+        choices=("critical", "high", "medium", "low"),
+        default="critical",
+        help="Minimum severity that exits 2 in warn/enforce mode.",
+    )
+    server_card.add_argument(
+        "--explain-schema",
+        action="store_true",
+        help="Print static contract metadata and exit without reading inputs.",
+    )
+    server_card.add_argument(
+        "--json-schema",
+        choices=("report", "contract"),
+        help="Print a JSON Schema and exit without reading inputs.",
+    )
+    server_card.add_argument(
+        "--validate-json",
+        help="Validate an existing report or contract artifact offline; '-' reads stdin.",
+    )
+    server_card.add_argument(
+        "--schema",
+        choices=("report", "contract"),
+        default="report",
+        help="Schema used with --validate-json. Default: report.",
+    )
     return parser
 
 

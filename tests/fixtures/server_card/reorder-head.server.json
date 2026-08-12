@@ -1,0 +1,14 @@
+{
+  "version": "1.0.0",
+  "description": "Reorder fixture",
+  "name": "io.example/reorder",
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "remotes": [
+    {"url": "https://example.test/mcp", "type": "streamable-http"},
+    {"url": "https://example.test/sse", "type": "sse"}
+  ],
+  "packages": [
+    {"transport": {"type": "stdio"}, "version": "1", "identifier": "b", "registryType": "pypi"},
+    {"transport": {"type": "stdio"}, "version": "1", "identifier": "a", "registryType": "npm"}
+  ]
+}

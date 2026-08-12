@@ -1,0 +1,14 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-10-17/server.schema.json",
+  "name": "io.example/legacy",
+  "description": "Legacy schema fixture",
+  "version": "0.9.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "legacy-mcp",
+      "version": "0.9.0",
+      "transport": {"type": "stdio"}
+    }
+  ]
+}

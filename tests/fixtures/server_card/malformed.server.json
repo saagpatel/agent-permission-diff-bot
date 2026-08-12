@@ -1,0 +1,4 @@
+{
+  "name": "io.example/malformed",
+  "description": "This fixture intentionally has malformed JSON",
+}

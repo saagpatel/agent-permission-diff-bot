@@ -14,6 +14,8 @@ with a composite GitHub Action for pull request scanning.
 
 - MCP and Copilot MCP config: `mcpServers`, `tools`, `env`, `headers`, `url`, `command`,
   and launch args.
+- MCP Registry metadata and server cards: identity, versions, packages, remotes,
+  transports, authentication declarations, capabilities, compatibility, and endpoints.
 - GitHub Actions: token permissions, OIDC, runner labels, trigger context, environments,
   secrets/env references, and deploy/publish actions.
 - Egress policy: `allow_hosts`, `allow_connectors`, `network_name_globs`, and related
@@ -61,6 +63,24 @@ agent-permission-diff diff \
   --json report.json \
   --sarif report.sarif
 ```
+
+Compare two declared MCP server metadata snapshots without network or credentials:
+
+```bash
+agent-permission-diff server-card-diff \
+  --base-file snapshots/v1/server.json \
+  --head-file snapshots/v2/server.json \
+  --json server-card-drift.json \
+  --markdown server-card-drift.md \
+  --sarif server-card-drift.sarif
+```
+
+The examiner also accepts directories or local Git refs, distinguishes `ABSENT` from
+`UNKNOWN`, preserves Registry/protocol/vendor provenance, and never treats declared
+metadata as observed runtime behavior. Use `server-card-diff --explain-schema` or
+`--json-schema report` for the versioned contract. See
+[MCP Server Card Drift Examiner](docs/server-card-drift.md) and the
+[CI recipe](docs/server-card-ci-recipe.md).
 
 Run a static no-credential, no-network permission simulation before executing a command or
 workflow:

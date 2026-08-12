@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- Added `server-card-diff`, an offline MCP Registry metadata and server-card examiner with
+  file, directory, and local Git-ref inputs.
+- Added provenance-preserving normalization, explicit ABSENT/UNKNOWN and
+  added/removed/widened/narrowed/changed semantics, deterministic gate policy, secret-safe
+  rendering, and separate Registry, protocol-discovery, vendor-alias, and extension claims.
+- Added versioned human, JSON, Markdown, and SARIF outputs, JSON Schema export/validation,
+  pinned official standards documentation, fixtures, a CI recipe, and a five-minute demo.
+
 ## 0.5.0
 
 - Added `agent-permission-diff simulate` for static/no-credential/no-network permission

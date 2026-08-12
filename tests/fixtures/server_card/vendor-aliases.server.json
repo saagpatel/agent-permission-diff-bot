@@ -1,0 +1,11 @@
+{
+  "serverName": "vendor/weather",
+  "schemaVersion": "vendor-2",
+  "packages": [
+    {"registry_type": "npm", "identifier": "vendor-weather", "version": "2"}
+  ],
+  "auth": {"scheme": "bearer", "scopes": ["read"]},
+  "protocolVersions": ["2026-07-28"],
+  "endpoints": [{"transport": "http", "url": "https://vendor.example.test/mcp"}],
+  "custom": {"opaque": "vendor-only-value"}
+}

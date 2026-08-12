@@ -1,0 +1,13 @@
+{
+  "$schema": "https://vendor.example.test/schemas/future-card-v99.json",
+  "name": "io.example/future",
+  "description": "Unknown schema fixture",
+  "version": "99.0.0",
+  "securitySchemes": {
+    "oauth": {
+      "type": "oauth2",
+      "tokenUrl": "https://auth.example.test/token",
+      "clientSecret": "unknown-schema-secret-must-not-render"
+    }
+  }
+}

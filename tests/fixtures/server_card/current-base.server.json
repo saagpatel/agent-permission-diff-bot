@@ -1,0 +1,45 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.example/weather",
+  "title": "Weather",
+  "description": "Weather tools",
+  "version": "1.0.0",
+  "repository": {
+    "url": "https://github.com/example/weather-mcp",
+    "source": "github",
+    "id": "repo-100"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@example/weather-mcp",
+      "version": "1.0.0",
+      "transport": {"type": "stdio"},
+      "environmentVariables": [
+        {
+          "name": "WEATHER_API_KEY",
+          "isRequired": true,
+          "isSecret": true,
+          "value": "fixture-token-should-never-render"
+        }
+      ]
+    },
+    {
+      "registryType": "oci",
+      "identifier": "ghcr.io/example/weather-mcp:1.0.0",
+      "fileSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "transport": {"type": "stdio"}
+    }
+  ],
+  "remotes": [
+    {
+      "type": "streamable-http",
+      "url": "https://weather.example.test/mcp",
+      "headers": [
+        {"name": "Authorization", "isRequired": true, "isSecret": true}
+      ]
+    }
+  ],
+  "capabilities": {"tools": true, "resources": {"subscribe": false}},
+  "x-example": {"opaque": "base-private-extension-value"}
+}

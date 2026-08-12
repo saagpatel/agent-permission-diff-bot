@@ -1,0 +1,42 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.example/weather",
+  "title": "Weather Plus",
+  "description": "Weather tools",
+  "version": "2.0.0",
+  "repository": {
+    "url": "https://github.com/example/weather-mcp",
+    "source": "github",
+    "id": "repo-200"
+  },
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "@example/weather-mcp",
+      "version": "2.0.0",
+      "registryBaseUrl": "https://registry.example.test",
+      "transport": {"type": "streamable-http", "url": "https://pkg.example.test/mcp"},
+      "environmentVariables": [
+        {
+          "name": "WEATHER_API_KEY",
+          "isRequired": false,
+          "isSecret": false,
+          "value": "changed-fixture-token-should-never-render"
+        }
+      ]
+    },
+    {
+      "registryType": "pypi",
+      "identifier": "example-weather-mcp",
+      "version": "2.0.0",
+      "transport": {"type": "stdio"}
+    }
+  ],
+  "remotes": [
+    {"type": "streamable-http", "url": "https://weather.example.test/v2/mcp"},
+    {"type": "sse", "url": "https://weather.example.test/sse"}
+  ],
+  "capabilities": {"tools": true, "resources": {"subscribe": true}, "prompts": true},
+  "authentication": {"type": "oauth2", "scopes": ["weather:read", "weather:write"]},
+  "x-example": {"opaque": "head-private-extension-value"}
+}

@@ -1,0 +1,17 @@
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "supportedVersions": ["2026-07-28"],
+    "capabilities": {
+      "tools": {},
+      "prompts": {}
+    },
+    "_meta": {
+      "io.modelcontextprotocol/serverInfo": {
+        "name": "io.example/discovery",
+        "version": "3.0.0"
+      }
+    }
+  }
+}

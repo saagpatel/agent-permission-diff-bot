@@ -1,0 +1,93 @@
+{
+  "$id": "https://agent-permission-diff.dev/schemas/mcp-server-card-drift-report-v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "const": "https://agent-permission-diff.dev/schemas/mcp-server-card-drift-report-v1.json"
+    },
+    "changes": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "base": {
+            "additionalProperties": false,
+            "properties": {
+              "display": {"type": "string"},
+              "state": {"enum": ["present", "absent", "unknown"], "type": "string"}
+            },
+            "required": ["state", "display"],
+            "type": "object"
+          },
+          "card_key": {"type": "string"},
+          "category": {"type": "string"},
+          "confidence": {"enum": ["low", "medium", "high"], "type": "string"},
+          "explanation": {"type": "string"},
+          "head": {
+            "additionalProperties": false,
+            "properties": {
+              "display": {"type": "string"},
+              "state": {"enum": ["present", "absent", "unknown"], "type": "string"}
+            },
+            "required": ["state", "display"],
+            "type": "object"
+          },
+          "kind": {
+            "enum": ["added", "removed", "widened", "narrowed", "changed", "unknown"],
+            "type": "string"
+          },
+          "locations": {"items": {"type": "string"}, "type": "array"},
+          "path": {"type": "string"},
+          "rule_id": {"pattern": "^MCP[0-9]{3}$", "type": "string"},
+          "severity": {
+            "enum": ["low", "medium", "high", "critical"],
+            "type": "string"
+          },
+          "source_contracts": {"items": {"type": "string"}, "type": "array"},
+          "standard": {"type": "boolean"}
+        },
+        "required": [
+          "rule_id",
+          "card_key",
+          "path",
+          "category",
+          "kind",
+          "severity",
+          "confidence",
+          "base",
+          "head",
+          "explanation",
+          "standard",
+          "source_contracts",
+          "locations"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "contract_version": {"const": "1.0.0"},
+    "gate": {"type": "object"},
+    "inputs": {"type": "object"},
+    "normalized_cards": {"type": "object"},
+    "report_id": {"type": "string"},
+    "safety_boundary": {"type": "string"},
+    "schema_version": {"const": "1.0.0"},
+    "standards": {"type": "object"},
+    "summary": {"type": "object"}
+  },
+  "required": [
+    "$schema",
+    "schema_version",
+    "contract_version",
+    "report_id",
+    "safety_boundary",
+    "standards",
+    "inputs",
+    "normalized_cards",
+    "summary",
+    "changes",
+    "gate"
+  ],
+  "title": "MCP Server Card Drift Report v1",
+  "type": "object"
+}
