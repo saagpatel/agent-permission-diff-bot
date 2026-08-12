@@ -138,6 +138,7 @@ def normalize_card(raw: RawServerCard) -> NormalizedServerCard:
 
     schema_uri = card_payload.get("$schema") if isinstance(card_payload, dict) else None
     schema_status = _schema_status(schema_uri, family)
+    safe_schema_uri = _redact_url(schema_uri) if isinstance(schema_uri, str) else None
 
     if family in {"mcp_registry_server_json", "mcp_registry_api"}:
         _normalize_server_json(builder, card_payload, issues)
@@ -149,7 +150,7 @@ def normalize_card(raw: RawServerCard) -> NormalizedServerCard:
         _normalize_vendor_card(builder, card_payload, issues)
 
     if schema_status == "unknown":
-        issues.append(f"Unrecognized declared schema URI: {schema_uri}")
+        issues.append(f"Unrecognized declared schema URI: {safe_schema_uri}")
     if family in {"mcp_registry_server_json", "mcp_registry_api"}:
         for required in ("name", "description", "version"):
             if not isinstance(card_payload.get(required), str) or not card_payload.get(required):
@@ -160,7 +161,7 @@ def normalize_card(raw: RawServerCard) -> NormalizedServerCard:
         key=key,
         provenance=raw.provenance,
         contract_family=family,
-        schema_uri=schema_uri if isinstance(schema_uri, str) else None,
+        schema_uri=safe_schema_uri,
         schema_status=schema_status,
         validity=validity,
         fields=builder.values(),
@@ -793,13 +794,15 @@ def _display(value: Any) -> str:
 
 
 def _redact_url(value: str) -> str:
-    parsed = urlsplit(value)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return "[REDACTED_INVALID_URI]"
+    if not parsed.netloc and not parsed.query:
         return value
-    hostname = parsed.hostname or ""
-    port = f":{parsed.port}" if parsed.port is not None else ""
-    userinfo = "[REDACTED]@" if parsed.username is not None else ""
-    netloc = f"{userinfo}{hostname}{port}"
+    has_userinfo = "@" in parsed.netloc
+    authority = parsed.netloc.rsplit("@", 1)[-1]
+    netloc = f"[REDACTED]@{authority}" if has_userinfo else authority
     query = urlencode(
         [(key, "[REDACTED]") for key, _ in parse_qsl(parsed.query, keep_blank_values=True)]
     )

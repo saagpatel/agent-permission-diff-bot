@@ -45,7 +45,11 @@ def read_server_card_directory(
     if card_paths:
         paths = [_safe_child(resolved, item) for item in card_paths]
     else:
-        paths = [path for path in resolved.rglob("*.json") if _is_card_candidate(path.name)]
+        paths = [
+            _safe_child(resolved, path.relative_to(resolved).as_posix())
+            for path in resolved.rglob("*.json")
+            if _is_card_candidate(path.name)
+        ]
     cards: list[RawServerCard] = []
     for path in sorted(set(paths)):
         if not path.is_file() or _is_vendor_path(path.relative_to(resolved).as_posix()):
@@ -92,8 +96,6 @@ def read_server_card_git_ref(
             continue
         text = _git_show(resolved, ref, path)
         if text is None:
-            if card_paths:
-                raise ServerCardInputError(f"{ref}:{path} is not a readable file")
             continue
         cards.append(
             RawServerCard(
@@ -107,7 +109,7 @@ def read_server_card_git_ref(
                 text=text,
             )
         )
-    if not cards:
+    if not cards and not card_paths:
         raise ServerCardInputError(
             f"no server-card JSON files found at {ref}; use --card-path for custom names"
         )

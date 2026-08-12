@@ -205,9 +205,16 @@ def _read_server_card_inputs(
         if not args.base_ref or not args.head_ref:
             raise ServerCardInputError("--repo requires --base-ref and --head-ref")
         repo = Path(args.repo)
+        base = read_server_card_git_ref(repo, args.base_ref, card_paths=card_paths)
+        head = read_server_card_git_ref(repo, args.head_ref, card_paths=card_paths)
+        if card_paths and not base.cards and not head.cards:
+            selected = ", ".join(card_paths)
+            raise ServerCardInputError(
+                f"explicit server-card path(s) not found in either Git ref: {selected}"
+            )
         return (
-            read_server_card_git_ref(repo, args.base_ref, card_paths=card_paths),
-            read_server_card_git_ref(repo, args.head_ref, card_paths=card_paths),
+            base,
+            head,
         )
     if args.base_file or args.head_file:
         if not args.base_file or not args.head_file:
