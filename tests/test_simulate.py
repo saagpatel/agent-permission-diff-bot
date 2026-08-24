@@ -1164,8 +1164,7 @@ def test_github_actions_live_probe_uses_injected_fetcher_without_token_leak() ->
     assert (
         "GitHub Actions read-only metadata fetched from api.github.com "
         "for repository `saagpatel/agent-permission-diff-bot` ref `abc123` "
-        "using token source `env:SECRET_GITHUB_TOKEN`."
-        in report.live_probe_evidence
+        "using token source `env:SECRET_GITHUB_TOKEN`." in report.live_probe_evidence
     )
     assert any("env:SECRET_GITHUB_TOKEN" in item for item in report.live_probe_evidence)
     serialized = json.dumps(report.to_dict())
