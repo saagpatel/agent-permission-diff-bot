@@ -46,7 +46,7 @@ def test_agent_permission_diff_workflow_comments_in_observe_mode() -> None:
     assert "issues: write" in text
     assert "pull-requests: write" in text
     assert "fetch-depth: 0" in text
-    assert "uses: saagpatel/agent-permission-diff-bot@v0.5.0" in text
+    assert "uses: ./" in text
     assert "mode: observe" in text
     assert "fail-on: critical" in text
     assert 'comment: "true"' in text
