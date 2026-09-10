@@ -230,4 +230,21 @@ simulator integration work, start from `docs/simulation-output.md` and
 `docs/simulation-ci-recipe.md`, then keep default behavior static/no-credential/no-network
 unless a live probe is explicitly requested.
 
+## Cursor Cloud specific instructions
+
+Cursor Cloud uses `.cursor/environment.json` to install the locked development
+environment on Ubuntu with Python 3.11.15. Cloud work must stay static and
+fixture-driven by default: do not read credentials, contact live APIs, dispatch
+workflows, or execute analyzed commands unless a task explicitly authorizes the
+existing opt-in live-probe boundary.
+
+Verify changes with:
+
+```sh
+uv run ruff format --check .
+uv run ruff check .
+uv run pytest
+uv build
+```
+
 <!-- portfolio-context:end -->
