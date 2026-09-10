@@ -3,7 +3,9 @@ name: CI
 on:
   pull_request:
     paths:
+      - .cursor/**
       - .github/workflows/ci.yml
+      - AGENTS.md
       - src/agent_permission_diff_bot/**
       - tests/**
       - pyproject.toml
@@ -12,7 +14,9 @@ on:
     branches:
       - main
     paths:
+      - .cursor/**
       - .github/workflows/ci.yml
+      - AGENTS.md
       - src/agent_permission_diff_bot/**
       - tests/**
       - pyproject.toml
