@@ -9,6 +9,12 @@ from agent_permission_diff_bot.model import (
     PermissionDiffReport,
     Severity,
 )
+from agent_permission_diff_bot.persistence import (
+    extract_payload_atoms,
+    persistence_findings,
+    referenced_paths,
+    snapshot_hook_references,
+)
 from agent_permission_diff_bot.surfaces import extract_atoms
 
 
@@ -21,6 +27,28 @@ def build_report(
     base_atoms = _extract_snapshot_atoms(base_files)
     head_atoms = _extract_snapshot_atoms(head_files)
     changes = diff_atoms(base_atoms, head_atoms)
+    for change in list(changes):
+        if change.kind != "added" or change.atom.action != "auto_hook":
+            continue
+        for target in sorted(referenced_paths(change.atom.value)):
+            if target in head_files and target not in base_files:
+                changes.append(
+                    PermissionChange(
+                        kind="added",
+                        atom=PermissionAtom(
+                            surface=change.atom.surface,
+                            actor=change.atom.actor,
+                            action="hook_executable",
+                            verb="execute",
+                            resource="repo_file",
+                            value=target,
+                            path=target,
+                            trigger=change.atom.trigger,
+                            evidence=f"{change.atom.path}: new executable `{target}` referenced by "
+                            f"{change.atom.trigger} hook: {change.atom.value}",
+                        ),
+                    )
+                )
     findings = correlate(changes)
     return PermissionDiffReport(
         base=base_label, head=head_label, changes=changes, findings=findings
@@ -49,6 +77,7 @@ def correlate(changes: list[PermissionChange]) -> list[Finding]:
 
     findings.extend(_single_surface_findings(added))
     findings.extend(_composition_findings(added))
+    findings.extend(persistence_findings(changes))
     return _dedupe_findings(findings)
 
 
@@ -56,6 +85,9 @@ def _extract_snapshot_atoms(files: dict[str, str]) -> list[PermissionAtom]:
     atoms: list[PermissionAtom] = []
     for path, text in files.items():
         atoms.extend(extract_atoms(path, text))
+    for target in sorted(snapshot_hook_references(files)):
+        if target in files:
+            atoms.extend(extract_payload_atoms(target, files[target]))
     return atoms
 
 

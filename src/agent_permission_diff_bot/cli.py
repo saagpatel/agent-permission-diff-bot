@@ -8,6 +8,7 @@ from pathlib import Path
 from agent_permission_diff_bot.engine import build_report
 from agent_permission_diff_bot.gating import evaluate_gate
 from agent_permission_diff_bot.model import Severity
+from agent_permission_diff_bot.persistence import snapshot_hook_references
 from agent_permission_diff_bot.policy import PolicyError, apply_policy_file
 from agent_permission_diff_bot.reporting import (
     append_step_summary,
@@ -82,6 +83,16 @@ def _run_diff(args: argparse.Namespace) -> int:
             raise SystemExit("provide either --repo with refs or --base-dir and --head-dir")
         base_label, base_files = read_dir_snapshot(Path(args.base_dir).resolve())
         head_label, head_files = read_dir_snapshot(Path(args.head_dir).resolve())
+
+    # Read the same referenced paths at both ends so an existing payload stays existing.
+    references = snapshot_hook_references(base_files) | snapshot_hook_references(head_files)
+    if references:
+        if args.repo:
+            base_label, base_files = read_git_snapshot(repo, args.base_ref, paths, references)
+            head_label, head_files = read_git_snapshot(repo, args.head_ref, paths, references)
+        else:
+            base_label, base_files = read_dir_snapshot(Path(args.base_dir), references)
+            head_label, head_files = read_dir_snapshot(Path(args.head_dir), references)
 
     report = build_report(base_label, base_files, head_label, head_files)
     if args.policy:

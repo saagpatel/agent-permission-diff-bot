@@ -4,28 +4,41 @@ import subprocess
 from collections.abc import Iterable
 from pathlib import Path
 
+from agent_permission_diff_bot.persistence import snapshot_hook_references
 from agent_permission_diff_bot.surfaces import is_interesting_path
 
 
-def read_dir_snapshot(root: Path) -> tuple[str, dict[str, str]]:
+def read_dir_snapshot(root: Path, referenced: Iterable[str] = ()) -> tuple[str, dict[str, str]]:
+    root = root.resolve()
     files: dict[str, str] = {}
+    available: dict[str, Path] = {}
     for path in root.rglob("*"):
-        if not path.is_file():
+        if not path.is_file() or path.is_symlink() or not path.resolve().is_relative_to(root):
             continue
         rel = path.relative_to(root).as_posix()
-        if _is_vendor_path(rel) or not is_interesting_path(rel):
+        if _is_vendor_path(rel):
+            continue
+        available[rel] = path
+        if not is_interesting_path(rel):
             continue
         try:
             files[rel] = path.read_text(encoding="utf-8")
         except UnicodeDecodeError:
             continue
+    for rel in sorted(snapshot_hook_references(files) | set(referenced)):
+        if rel not in files and rel in available:
+            try:
+                files[rel] = available[rel].read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                # Preserve presence for correlation even when payload bytes are not text.
+                files[rel] = ""
     return str(root), files
 
 
 def read_git_snapshot(
-    repo: Path, ref: str, paths: Iterable[str] | None = None
+    repo: Path, ref: str, paths: Iterable[str] | None = None, referenced: Iterable[str] = ()
 ) -> tuple[str, dict[str, str]]:
-    interesting = sorted(set(paths or _git_files(repo, ref)))
+    interesting = sorted(set(_git_files(repo, ref) if paths is None else paths))
     files: dict[str, str] = {}
     for path in interesting:
         if _is_vendor_path(path) or not is_interesting_path(path):
@@ -33,6 +46,11 @@ def read_git_snapshot(
         content = _git_show(repo, ref, path)
         if content is not None:
             files[path] = content
+    for path in sorted(snapshot_hook_references(files) | set(referenced)):
+        if path not in files and not _is_vendor_path(path):
+            content = _git_show(repo, ref, path)
+            if content is not None:
+                files[path] = content
     return ref, files
 
 
@@ -52,6 +70,8 @@ def _git_show(repo: Path, ref: str, path: str) -> str | None:
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if result.returncode != 0:
         return None

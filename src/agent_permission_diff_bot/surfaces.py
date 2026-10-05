@@ -3,12 +3,19 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import PurePosixPath
 from urllib.parse import urlparse
 
 import yaml
 
 from agent_permission_diff_bot.model import PermissionAtom
+from agent_permission_diff_bot.persistence import (
+    PROJECT_CONFIGS,
+    extract_payload_atoms,
+    extract_project_atoms,
+    load_project_config,
+)
 
 WORKFLOW_GLOBS = (".github/workflows/*.yml", ".github/workflows/*.yaml")
 MCP_PATHS = (
@@ -75,6 +82,8 @@ WEAKENING_INSTRUCTION_RE = re.compile(
 
 def is_interesting_path(path: str) -> bool:
     normalized = _normalize(path)
+    if normalized in PROJECT_CONFIGS:
+        return True
     if _is_workflow(normalized):
         return True
     if _is_mcp_config(normalized):
@@ -86,12 +95,41 @@ def is_interesting_path(path: str) -> bool:
 
 def extract_atoms(path: str, text: str) -> list[PermissionAtom]:
     normalized = _normalize(path)
+    if normalized in PROJECT_CONFIGS:
+        data = load_project_config(normalized, text)
+        servers = data.get("mcpServers", data.get("mcp_servers"))
+        mcp_atoms = _extract_mcp_atoms(normalized, json.dumps({"mcpServers": servers}))
+        return [
+            *extract_project_atoms(normalized, text),
+            *(replace(atom, actor=f"{normalized}:{atom.actor}") for atom in mcp_atoms),
+            *extract_payload_atoms(normalized, text),
+            *extract_payload_atoms(normalized, json.dumps(data, ensure_ascii=False)),
+        ]
     if _is_workflow(normalized):
         return _extract_workflow_atoms(normalized, text)
     if _is_mcp_config(normalized):
         return _extract_mcp_atoms(normalized, text)
     if _is_instruction(normalized):
-        return _extract_instruction_atoms(normalized, text)
+        atoms = _extract_instruction_atoms(normalized, text)
+        if normalized.startswith(".cursor/rules/") and normalized.endswith(".mdc"):
+            if text.startswith("---"):
+                parts = text.split("---", 2)
+                frontmatter = _load_yaml(parts[1]) if len(parts) == 3 else None
+                if isinstance(frontmatter, Mapping) and frontmatter.get("alwaysApply") is True:
+                    atoms.append(
+                        PermissionAtom(
+                            surface="instructions",
+                            actor=f"cursor:{normalized}",
+                            action="always_apply_rule",
+                            verb="trust",
+                            resource="alwaysApply",
+                            value=text,
+                            path=normalized,
+                            evidence=f"{normalized}: Cursor rule has alwaysApply: true",
+                        )
+                    )
+            atoms.extend(extract_payload_atoms(normalized, text))
+        return atoms
     if PurePosixPath(normalized).name in EGRESS_PATH_NAMES:
         return _extract_egress_atoms(normalized, text)
     return []

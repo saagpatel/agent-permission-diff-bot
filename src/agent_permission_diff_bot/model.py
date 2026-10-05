@@ -174,7 +174,7 @@ class PermissionDiffReport:
         return max(finding.severity for finding in self.gate_findings)
 
     def to_dict(self) -> dict[str, Any]:
-        payload = {
+        payload: dict[str, Any] = {
             "base": self.base,
             "head": self.head,
             "max_severity": self.max_severity.label() if self.max_severity else None,
