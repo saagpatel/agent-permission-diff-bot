@@ -5,10 +5,13 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import posixpath
 import re
 import shlex
 import tomllib
 from collections.abc import Mapping
+from dataclasses import replace
+from itertools import pairwise
 from pathlib import PurePosixPath
 
 from agent_permission_diff_bot.model import Finding, PermissionAtom, PermissionChange, Severity
@@ -24,7 +27,7 @@ PROJECT_CONFIGS = {
     ".cursor/hooks.json": "cursor",
 }
 PAYLOAD_PATTERNS = {
-    "download_pipe_execute": re.compile(r"\b(?:curl|wget)\b[^\n]*\|\s*(?:sh|bash|node)\b", re.I),
+    "download_pipe_execute": re.compile(r"\b(?:curl|wget)\b[^\n|]*\|\s*(?:sh|bash|node)\b", re.I),
     "base64_decode": re.compile(r"\bbase64\s+(?:-d\b|--decode\b)", re.I),
     "eval": re.compile(r"\beval\b"),
     "node_inline": re.compile(r"\bnode\s+(?:-e\b|--eval\b)"),
@@ -32,11 +35,14 @@ PAYLOAD_PATTERNS = {
         r"\bpython(?:3)?\s+-c\b[^\n]*(?:https?://|urllib|requests|socket)", re.I
     ),
     "credential_reference": re.compile(r"(?:~/)?\.(?:ssh|aws)\b|\.npmrc\b|\bGITHUB_TOKEN\b"),
-    "hidden_unicode": re.compile("[\u200b-\u200f\u202a-\u202e\u2060-\u2069\ufeff]"),
+    "hidden_unicode": re.compile(
+        "[\u00ad\u034f\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2069"
+        "\ufeff\ufe00-\ufe0f\U000e0000-\U000e007f\U000e0100-\U000e01ef]"
+    ),
 }
-# JSONC comments/trailing commas are accepted for editor configuration. Quoted strings
-# take precedence so URLs and command strings are left intact.
-JSONC_TOKEN = re.compile(r'"(?:\\.|[^"\\])*"|//[^\n]*|/\*[\s\S]*?\*/|,\s*(?=[}\]])')
+MAX_CONFIG_BYTES = 2 * 1024 * 1024
+MAX_INLINE_BYTES = 64 * 1024
+FOLDER_OPEN_RAW = re.compile(r'"runOn"\s*:\s*"folderopen"', re.I)
 JS_TOKEN = re.compile(
     r'"(?:\\.|[^"\\])*"|'
     r"'(?:\\.|[^'\\])*'|"
@@ -46,21 +52,99 @@ JS_TOKEN = re.compile(
 )
 
 
-def load_project_config(path: str, text: str) -> Mapping:
+class ProjectConfig(dict):
+    """Parsed mapping plus a visible failure, without reserving user JSON keys."""
+
+    def __init__(self, data: Mapping | None = None, *, error: str = "") -> None:
+        super().__init__(data or {})
+        self.error = error
+
+
+ConfigCache = dict[tuple[str, str], ProjectConfig]
+
+
+def project_config_kind(path: str) -> str | None:
+    normalized = path.replace("\\", "/").lower().removeprefix("./")
+    for config, kind in PROJECT_CONFIGS.items():
+        if normalized == config or normalized.endswith("/" + config):
+            return kind
+    parts = PurePosixPath(normalized).parts
+    if ".codex" in parts and normalized.endswith(".config.toml"):
+        return "codex"
+    if normalized.endswith(".code-workspace"):
+        return "vscode"
+    return None
+
+
+def _strip_jsonc(text: str) -> str:
+    """One linear lexical pass; preserve strings, whitespace and line numbers."""
+    output: list[str] = []
+    index = 0
+    quoted = escaped = False
+    comma: int | None = None
+    while index < len(text):
+        char = text[index]
+        if quoted:
+            output.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                quoted = False
+            index += 1
+            continue
+        if text.startswith("//", index):
+            end = text.find("\n", index + 2)
+            end = len(text) if end < 0 else end
+            output.append(" " * (end - index))
+            index = end
+            continue
+        if text.startswith("/*", index):
+            end = text.find("*/", index + 2)
+            if end < 0:
+                raise ValueError("unterminated JSONC comment")
+            end += 2
+            output.extend("\n" if c == "\n" else " " for c in text[index:end])
+            index = end
+            continue
+        if not char.isspace():
+            if char in "}]" and comma is not None:
+                output[comma] = " "
+            comma = len(output) if char == "," else None
+            quoted = char == '"'
+        output.append(char)
+        index += 1
+    return "".join(output)
+
+
+def load_project_config(path: str, text: str, cache: ConfigCache | None = None) -> ProjectConfig:
+    key = (path, text)
+    if cache is not None and key in cache:
+        return cache[key]
+    result = _parse_project_config(path, text)
+    if cache is not None:
+        cache[key] = result
+    return result
+
+
+def _parse_project_config(path: str, text: str) -> ProjectConfig:
+    if len(text.encode("utf-8", errors="surrogateescape")) > MAX_CONFIG_BYTES:
+        return ProjectConfig(error="startup config exceeds 2 MB size limit")
+    text = text.removeprefix("\ufeff")
     try:
-        if path.endswith(".toml"):
+        if path.lower().endswith(".toml"):
             data = tomllib.loads(text)
         else:
-            cleaned = JSONC_TOKEN.sub(
-                lambda match: match[0] if match[0].startswith('"') else " ", text
-            )
-            cleaned = JSONC_TOKEN.sub(
-                lambda match: match[0] if match[0].startswith('"') else " ", cleaned
-            )
-            data = json.loads(cleaned)
-    except (ValueError, tomllib.TOMLDecodeError):
-        return {}
-    return data if isinstance(data, Mapping) else {}
+            try:
+                data = json.loads(text)
+            except ValueError:
+                data = json.loads(_strip_jsonc(text))
+    except (ValueError, MemoryError, RecursionError):
+        return ProjectConfig(error="unparseable startup config")
+    if not isinstance(data, Mapping):
+        return ProjectConfig(error="startup config must be an object")
+    return ProjectConfig(data)
 
 
 def _value(value: object) -> str:
@@ -70,7 +154,7 @@ def _value(value: object) -> str:
 def _atom(
     path: str, action: str, resource: str, value: object, *, trigger: str = "", scope: str = "repo"
 ) -> PermissionAtom:
-    surface = PROJECT_CONFIGS.get(path, "instructions")
+    surface = project_config_kind(path) or "instructions"
     rendered = _value(value)
     return PermissionAtom(
         surface=surface,
@@ -91,19 +175,19 @@ def _hooks(path: str, hooks: object) -> list[PermissionAtom]:
         return []
     atoms: list[PermissionAtom] = []
 
-    def walk(event: str, item: object, context: dict) -> None:
+    pending: list[tuple[str, object, dict[str, object]]] = [
+        (str(event), entries, {}) for event, entries in hooks.items()
+    ]
+    while pending:
+        event, item, context = pending.pop()
         if isinstance(item, list):
-            for child in item:
-                walk(event, child, context)
+            pending.extend((event, child, context) for child in item)
         elif isinstance(item, Mapping):
             metadata = {k: v for k, v in item.items() if k not in {"hooks", "command"}}
             inherited = {**context, **metadata}
             command = item.get("command")
             if isinstance(command, (str, list)):
-                # argv-style hook commands are rendered as shell-quoted text, never run.
                 rendered = shlex.join(map(str, command)) if isinstance(command, list) else command
-                # Preserve metadata changes without copying arbitrary hook env/secret
-                # values into reports. Known execution selectors stay inspectable.
                 scope = {
                     "metadata_sha256": hashlib.sha256(_value(inherited).encode()).hexdigest(),
                     **{
@@ -114,24 +198,76 @@ def _hooks(path: str, hooks: object) -> list[PermissionAtom]:
                 }
                 atoms.append(
                     _atom(
-                        path,
-                        "auto_hook",
-                        "command",
-                        rendered,
-                        trigger=event,
-                        scope=_value(scope),
+                        path, "auto_hook", "command", rendered, trigger=event, scope=_value(scope)
                     )
                 )
             if "hooks" in item:
-                walk(event, item["hooks"], inherited)
-
-    for event, entries in hooks.items():
-        walk(str(event), entries, {})
+                pending.append((event, item["hooks"], inherited))
     return atoms
 
 
-def extract_project_atoms(path: str, text: str) -> list[PermissionAtom]:
-    data = load_project_config(path, text)
+def project_config_sections(path: str, data: Mapping) -> list[tuple[str, Mapping]]:
+    sections = [("", data)]
+    profiles = data.get("profiles")
+    if project_config_kind(path) == "codex" and isinstance(profiles, Mapping):
+        sections.extend(
+            (f"profiles.{name}", profile)
+            for name, profile in profiles.items()
+            if isinstance(profile, Mapping)
+        )
+    return sections
+
+
+def extract_project_atoms(
+    path: str, text: str, cache: ConfigCache | None = None
+) -> list[PermissionAtom]:
+    data = load_project_config(path, text, cache)
+    if data.error:
+        digest = hashlib.sha256(text.encode("utf-8", errors="surrogateescape")).hexdigest()
+        atoms = [_atom(path, "unparseable_config", "startup config", data.error, scope=digest)]
+        if is_task_config(path) and FOLDER_OPEN_RAW.search(text[:MAX_CONFIG_BYTES]):
+            atoms.append(
+                _atom(
+                    path,
+                    "folder_open_task",
+                    "unparsed task",
+                    "raw folderOpen marker",
+                    trigger="folderOpen",
+                    scope=digest,
+                )
+            )
+        return atoms
+    atoms = []
+    for section, values in project_config_sections(path, data):
+        for atom in _project_section_atoms(path, values):
+            atoms.append(replace(atom, actor=f"{atom.actor}:{section}") if section else atom)
+    return atoms
+
+
+def is_task_config(path: str) -> bool:
+    lowered = path.lower()
+    return lowered.endswith((".vscode/tasks.json", ".code-workspace"))
+
+
+def config_tasks(path: str, data: Mapping) -> list:
+    tasks = data.get("tasks", [])
+    if path.lower().endswith(".code-workspace") and isinstance(tasks, Mapping):
+        tasks = tasks.get("tasks", [])
+    return tasks if isinstance(tasks, list) else []
+
+
+def task_command(task: Mapping) -> str:
+    command = task.get("command", "")
+    if not isinstance(command, str):
+        return ""
+    args = task.get("args", [])
+    if isinstance(args, list):
+        # Shell task commands may already contain executable and options; only quote args.
+        command += " " + shlex.join(str(arg) for arg in args if isinstance(arg, (str, int)))
+    return command
+
+
+def _project_section_atoms(path: str, data: Mapping) -> list[PermissionAtom]:
     atoms = _hooks(path, data.get("hooks"))
     permissions = data.get("permissions")
     if isinstance(permissions, Mapping):
@@ -144,10 +280,20 @@ def extract_project_atoms(path: str, text: str) -> list[PermissionAtom]:
     for key in ("sandbox_mode", "approval_policy"):
         if key in data:
             atoms.append(_atom(path, "permission_mode", key, data[key]))
-    for key in ("enableAllProjectMcpServers", "enabledMcpjsonServers", "apiKeyHelper"):
+    for key in ("enableAllProjectMcpServers", "enabledMcpjsonServers"):
         if key in data:
             values = data[key] if isinstance(data[key], list) else [data[key]]
             atoms.extend(_atom(path, "project_setting", key, entry) for entry in values)
+    if project_config_kind(path) == "claude":
+        status = data.get("statusLine")
+        if isinstance(status, Mapping) and status.get("type") == "command":
+            command = status.get("command")
+            if isinstance(command, str):
+                atoms.append(_atom(path, "auto_hook", "command", command, trigger="statusLine"))
+        for key in ("apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper"):
+            command = data.get(key)
+            if isinstance(command, str):
+                atoms.append(_atom(path, "auto_hook", "command", command, trigger=key))
     for key in ("enabledPlugins", "extraKnownMarketplaces"):
         entries = data.get(key)
         if isinstance(entries, Mapping):
@@ -159,18 +305,14 @@ def extract_project_atoms(path: str, text: str) -> list[PermissionAtom]:
     if isinstance(env, Mapping):
         # Record environment key additions without copying possible secret values.
         atoms.extend(_atom(path, "environment", "env", str(key)) for key in env)
-    if path == ".vscode/tasks.json":
-        tasks = data.get("tasks", [])
-        if isinstance(tasks, list):
-            for task in tasks:
-                if not isinstance(task, Mapping):
-                    continue
-                options = task.get("runOptions")
-                if isinstance(options, Mapping) and options.get("runOn") == "folderOpen":
-                    atoms.append(
-                        _atom(path, "folder_open_task", "task", task, trigger="folderOpen")
-                    )
-    if path == ".vscode/settings.json":
+    if is_task_config(path):
+        for task in config_tasks(path, data):
+            if not isinstance(task, Mapping):
+                continue
+            options = task.get("runOptions")
+            if isinstance(options, Mapping) and str(options.get("runOn")).lower() == "folderopen":
+                atoms.append(_atom(path, "folder_open_task", "task", task, trigger="folderOpen"))
+    if path.lower().endswith(".vscode/settings.json"):
         for key, value in data.items():
             if key == "task.allowAutomaticTasks" or str(key).startswith(
                 (
@@ -185,10 +327,36 @@ def extract_project_atoms(path: str, text: str) -> list[PermissionAtom]:
     return atoms
 
 
-def extract_payload_atoms(path: str, text: str) -> list[PermissionAtom]:
+def project_command_strings(path: str, data: Mapping, atoms: list[PermissionAtom]) -> list[str]:
+    commands = [atom.value for atom in atoms if atom.action == "auto_hook"]
+    for _, section in project_config_sections(path, data):
+        commands.extend(
+            task_command(task) for task in config_tasks(path, section) if isinstance(task, Mapping)
+        )
+    return commands
+
+
+def extract_payload_atoms(
+    path: str, text: str, *, hidden_only: bool = False
+) -> list[PermissionAtom]:
     atoms = []
+    text = text.removeprefix("\ufeff")
     for name, pattern in PAYLOAD_PATTERNS.items():
-        matches = pattern.findall(text)
+        if hidden_only and name != "hidden_unicode":
+            continue
+        if name == "download_pipe_execute":
+            # Do not retry a greedy line suffix at every curl/wget token: repeated
+            # download words without a pipe otherwise make the scan quadratic.
+            matches = []
+            for line in text.splitlines():
+                segments = line.split("|")
+                for before, after in pairwise(segments):
+                    if re.search(r"\b(?:curl|wget)\b", before, re.I) and re.match(
+                        r"\s*(?:sh|bash|node)\b", after, re.I
+                    ):
+                        matches.append(before + "|" + after)
+        else:
+            matches = pattern.findall(text)
         if matches:
             # Escape invisible characters so reviewers see the signal in every renderer.
             values = sorted({match.encode("unicode_escape").decode() for match in matches})
@@ -197,6 +365,15 @@ def extract_payload_atoms(path: str, text: str) -> list[PermissionAtom]:
 
 
 def _inline_file_loads(name: str, code: str) -> set[str]:
+    try:
+        if len(code.encode("utf-8", errors="surrogatepass")) > MAX_INLINE_BYTES:
+            return set()
+        return _parse_inline_file_loads(name, code)
+    except (MemoryError, RecursionError):
+        return set()
+
+
+def _parse_inline_file_loads(name: str, code: str) -> set[str]:
     """Recognize literal executable loads; parse syntax without evaluating inline code."""
     if name in {"node", "nodejs", "bun", "deno"}:
         tokens = [
@@ -259,18 +436,77 @@ def _inline_file_loads(name: str, code: str) -> set[str]:
     return paths
 
 
-def referenced_paths(command: str, *, _depth: int = 0) -> set[str]:
-    """Recognize literal repo-relative paths only; no shell expansion or filesystem reads."""
-    for root in (
-        "${CLAUDE_PROJECT_DIR}",
-        "$CLAUDE_PROJECT_DIR",
-        "${workspaceFolder}",
-        "${GEMINI_PROJECT_DIR}",
-        "$GEMINI_PROJECT_DIR",
-        "${PWD}",
-        "$PWD",
-    ):
-        command = command.replace(root + "/", "./")
+# Value-taking interpreter options. Preload options additionally execute their value.
+NODE_VALUE_OPTIONS = {
+    "--env-file",
+    "--env-file-if-exists",
+    "--stack-size",
+    "--stack_size",
+    "-r",
+    "--require",
+    "--import",
+    "--loader",
+    "--experimental-loader",
+    "--conditions",
+    "--inspect-port",
+    "--input-type",
+    "--title",
+    "--icu-data-dir",
+    "--openssl-config",
+    "--redirect-warnings",
+    "--diagnostic-dir",
+    "--max-old-space-size",
+    "--max_old_space_size",
+    "-C",
+    "--dns-result-order",
+    "--unhandled-rejections",
+    "--max-http-header-size",
+    "--cpu-prof-dir",
+    "--cpu-prof-name",
+    "--cpu-prof-interval",
+    "--heap-prof-dir",
+    "--heap-prof-name",
+    "--heap-prof-interval",
+    "--heapsnapshot-near-heap-limit",
+    "--heapsnapshot-signal",
+    "--inspect-publish-uid",
+    "--debug-port",
+    "--disable-proto",
+    "--disable-warning",
+    "--max-old-space-size-percentage",
+    "--network-family-autoselection-attempt-timeout",
+    "--report-directory",
+    "--report-dir",
+    "--report-filename",
+    "--report-signal",
+    "--secure-heap",
+    "--secure-heap-min",
+    "--tls-cipher-list",
+    "--tls-keylog",
+    "--trace-event-categories",
+    "--trace-event-file-pattern",
+    "--trace-require-module",
+    "--use-largepages",
+    "--v8-pool-size",
+    "--watch-path",
+    "--watch-kill-signal",
+}
+NODE_LOAD_OPTIONS = {"-r", "--require", "--import", "--loader", "--experimental-loader"}
+PYTHON_VALUE_OPTIONS = {"-X", "-W", "--check-hash-based-pycs"}
+ROOT_VARIABLES = (
+    "${CLAUDE_PROJECT_DIR}",
+    "$CLAUDE_PROJECT_DIR",
+    "${workspaceFolder}",
+    "${GEMINI_PROJECT_DIR}",
+    "$GEMINI_PROJECT_DIR",
+    "${PWD}",
+    "$PWD",
+)
+ROOT_MARKER = "/__apd_repo_root__"
+
+
+def referenced_paths(command: str, *, _depth: int = 0, _cwd: str = "") -> set[str]:
+    """Resolve clear execution positions lexically; never expand the shell or read files."""
     try:
         lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
         lexer.whitespace_split = True
@@ -278,32 +514,61 @@ def referenced_paths(command: str, *, _depth: int = 0) -> set[str]:
         tokens = list(lexer)
     except ValueError:
         return set()
+    # Tokenize first: shell quotes may surround only the variable part of a path.
+    tokens = [
+        next(
+            (
+                ROOT_MARKER + token[len(root) :]
+                for root in ROOT_VARIABLES
+                if token == root or token.startswith(root + "/")
+            ),
+            token,
+        )
+        for token in tokens
+    ]
     paths: set[str] = set()
+    cwd: str | None = _cwd
 
-    def add_literal(token: str) -> None:
-        candidate = PurePosixPath(token)
+    def literal(token: str) -> str | None:
+        anchored = token == ROOT_MARKER or token.startswith(ROOT_MARKER + "/")
+        if anchored:
+            token = token[len(ROOT_MARKER) :].lstrip("/") or "."
         if (
-            any(ord(char) < 32 for char in token)
-            or not token
+            not token
             or token.startswith(("-", "~"))
-            or candidate.is_absolute()
-            or ".." in candidate.parts
+            or any(ord(char) < 32 for char in token)
             or any(char in token for char in "$|;&<>*?\n")
             or ":" in token
-            or any(part in {".ssh", ".aws"} for part in candidate.parts)
+            or PurePosixPath(token).is_absolute()
+            or (cwd is None and not anchored)
+        ):
+            return None
+        normalized = posixpath.normpath(posixpath.join("" if anchored else cwd or "", token))
+        candidate = PurePosixPath(normalized)
+        if (
+            normalized == ".."
+            or normalized.startswith("../")
+            or any(part.lower() in {".git", ".ssh", ".aws"} for part in candidate.parts)
             or candidate.name in {".npmrc", ".netrc", ".pypirc", ".env"}
             or candidate.name.startswith(".env.")
         ):
-            return
-        if "/" in token or candidate.suffix:
-            paths.add(candidate.as_posix())
+            return None
+        return normalized
 
-    segments: list[list[str]] = [[]]
+    def add_literal(token: str) -> None:
+        target = literal(token)
+        if target and ("/" in token or PurePosixPath(token).suffix):
+            paths.add(target)
+
+    segments: list[tuple[list[str], str]] = []
+    current: list[str] = []
     for token in tokens:
         if token in {";", "&&", "||", "|", "&", "(", ")"}:
-            segments.append([])
+            segments.append((current, token))
+            current = []
         else:
-            segments[-1].append(token)
+            current.append(token)
+    segments.append((current, ""))
     interpreters = {
         "node",
         "nodejs",
@@ -320,19 +585,36 @@ def referenced_paths(command: str, *, _depth: int = 0) -> set[str]:
         "pwsh",
         "powershell",
     }
-    for segment in segments:
-        # Recognize execution positions, rather than treating formatter/read operands
-        # as executable payloads. Unsupported launchers remain unresolved static evidence.
+    for segment, connector in segments:
         while segment and ("=" in segment[0] or segment[0] in {"env", "exec", "command", "nohup"}):
             segment = segment[1:]
         if len(segment) >= 2 and segment[:2] in (["uv", "run"], ["poetry", "run"]):
             segment = segment[2:]
+        if (
+            segment[:1] == ["timeout"]
+            and len(segment) >= 3
+            and re.fullmatch(r"[0-9]+(?:\.[0-9]+)?[smhd]?", segment[1])
+        ):
+            segment = segment[2:]
+        if segment[:1] == ["npx"]:
+            segment = segment[1:]
+            while segment[:1] in (["-y"], ["--yes"], ["--no-install"]):
+                segment = segment[1:]
+            if not segment or segment[0] not in {"tsx", "ts-node", "node"}:
+                continue
         if not segment:
             continue
         executable, *arguments = segment
-        name = PurePosixPath(executable).name
-        if name not in interpreters and not re.fullmatch(r"python(?:\d+(?:\.\d+)?)?", name):
-            # A direct repo path is a possible executable; a plain PATH tool isn't.
+        name = executable if executable == "." else PurePosixPath(executable).name
+        if name == "cd":
+            cwd = literal(arguments[0]) if len(arguments) == 1 and connector == "&&" else None
+            continue
+        if name in {"source", "."}:
+            if arguments:
+                add_literal(arguments[0])
+            continue
+        is_python = bool(re.fullmatch(r"python(?:\d+(?:\.\d+)?)?", name))
+        if name not in interpreters and not is_python:
             if "/" in executable:
                 add_literal(executable)
             continue
@@ -342,22 +624,34 @@ def referenced_paths(command: str, *, _depth: int = 0) -> set[str]:
         while index < len(arguments):
             token = arguments[index]
             if token in {"-c", "-lc", "-ic"} and name in {"sh", "bash", "zsh", "dash"}:
-                if _depth < 3 and index + 1 < len(arguments):
-                    paths.update(referenced_paths(arguments[index + 1], _depth=_depth + 1))
+                if _depth < 3 and index + 1 < len(arguments) and cwd is not None:
+                    paths.update(
+                        referenced_paths(arguments[index + 1], _depth=_depth + 1, _cwd=cwd)
+                    )
                 break
             if token in {"-e", "--eval", "-c"}:
                 if index + 1 < len(arguments):
                     for target in _inline_file_loads(name, arguments[index + 1]):
                         add_literal(target)
                 break
-            if token == "-m":
+            if token.startswith("--eval="):
+                for target in _inline_file_loads(name, token.split("=", 1)[1]):
+                    add_literal(target)
+                break
+            if token == "-m" and is_python:
                 break  # Module resolution is runtime-dependent.
-            if token in {"-r", "--require", "--import", "--loader"} and name in {"node", "nodejs"}:
-                if index + 1 < len(arguments):
-                    add_literal(arguments[index + 1])
-                index += 2
+            option = token.split("=", 1)[0]
+            if name in {"node", "nodejs", "tsx", "ts-node"} and option in NODE_VALUE_OPTIONS:
+                value = (
+                    token.split("=", 1)[1]
+                    if "=" in token
+                    else (arguments[index + 1] if index + 1 < len(arguments) else "")
+                )
+                if option in NODE_LOAD_OPTIONS:
+                    add_literal(value)
+                index += 1 if "=" in token else 2
                 continue
-            if token.lower() in {"-executionpolicy", "--conditions"}:
+            if (is_python and token in PYTHON_VALUE_OPTIONS) or token.lower() == "-executionpolicy":
                 index += 2
                 continue
             if token.startswith("-"):
@@ -368,14 +662,41 @@ def referenced_paths(command: str, *, _depth: int = 0) -> set[str]:
     return paths
 
 
-def snapshot_hook_references(files: dict[str, str]) -> set[str]:
+def _config_root(path: str) -> str:
+    parts = PurePosixPath(path).parts
+    for index, part in enumerate(parts):
+        if part.lower() in {".claude", ".vscode", ".codex", ".gemini", ".cursor"}:
+            return PurePosixPath(*parts[:index]).as_posix() if index else ""
+    parent = str(PurePosixPath(path).parent)
+    return "" if parent == "." else parent
+
+
+def atom_references(atom: PermissionAtom) -> set[str]:
+    if atom.action == "auto_hook":
+        command = atom.value
+    elif atom.action == "folder_open_task":
+        try:
+            task = json.loads(atom.value)
+        except ValueError:
+            return set()
+        if not isinstance(task, Mapping):
+            return set()
+        command = task_command(task)
+        options = task.get("options")
+        if isinstance(options, Mapping) and isinstance(options.get("cwd"), str):
+            command = "cd " + shlex.quote(options["cwd"]) + " && " + command
+    else:
+        return set()
+    return referenced_paths(command, _cwd=_config_root(atom.path))
+
+
+def snapshot_hook_references(files: dict[str, str], cache: ConfigCache | None = None) -> set[str]:
     return {
         target
         for path, text in files.items()
-        if path in PROJECT_CONFIGS
-        for atom in extract_project_atoms(path, text)
-        if atom.action == "auto_hook"
-        for target in referenced_paths(atom.value)
+        if project_config_kind(path)
+        for atom in extract_project_atoms(path, text, cache)
+        for target in atom_references(atom)
     }
 
 
@@ -400,7 +721,13 @@ def _covers_rule(broad: str, narrow: str) -> bool:
     return broad in {tool, f"{tool}(*)"}
 
 
-def persistence_findings(changes: list[PermissionChange]) -> list[Finding]:
+def is_auto_start(trigger: str) -> bool:
+    return trigger.lower() in {"sessionstart", "session_start", "folderopen", "statusline"}
+
+
+def persistence_findings(
+    changes: list[PermissionChange], *, head_atoms: list[PermissionAtom] | None = None
+) -> list[Finding]:
     findings: list[Finding] = []
     for change in changes:
         atom = change.atom
@@ -412,7 +739,7 @@ def persistence_findings(changes: list[PermissionChange]) -> list[Finding]:
             rule, title = "APD007", "Agent lifecycle hook changed"
             severity = (
                 Severity.HIGH
-                if added and atom.trigger.lower() in {"sessionstart", "session_start"}
+                if added and is_auto_start(atom.trigger)
                 else Severity.MEDIUM
                 if added
                 else Severity.LOW
@@ -427,6 +754,7 @@ def persistence_findings(changes: list[PermissionChange]) -> list[Finding]:
                     for other in changes
                     if other.kind == ("removed" if added else "added")
                     and other.atom.path == atom.path
+                    and other.atom.actor == atom.actor
                     and other.atom.action == atom.action
                     and other.atom.resource == atom.resource
                 ]
@@ -442,6 +770,7 @@ def persistence_findings(changes: list[PermissionChange]) -> list[Finding]:
                 for other in changes
                 if other.kind == "removed"
                 and other.atom.path == atom.path
+                and other.atom.actor == atom.actor
                 and other.atom.resource == atom.resource
                 and other.atom.action == atom.action
             ]
@@ -460,6 +789,7 @@ def persistence_findings(changes: list[PermissionChange]) -> list[Finding]:
                     and any(
                         other.kind == "added"
                         and other.atom.path == atom.path
+                        and other.atom.actor == atom.actor
                         and other.atom.resource == atom.resource
                         and other.atom.action == atom.action
                         for other in changes
@@ -484,8 +814,13 @@ def persistence_findings(changes: list[PermissionChange]) -> list[Finding]:
             rule, title = "APD011", "Suspicious project startup payload"
             severity = Severity.HIGH
         elif atom.action == "hook_executable":
-            rule, title = "APD012", "New executable referenced by an auto-run hook"
+            if not added:
+                continue
+            rule, title = "APD012", "New or modified executable referenced by an agent hook or task"
             severity = Severity.HIGH
+        elif atom.action == "unparseable_config":
+            rule, title = "APD008", "Unparseable startup config"
+            severity = Severity.HIGH if added else Severity.LOW
         else:
             continue
         findings.append(
@@ -501,19 +836,36 @@ def persistence_findings(changes: list[PermissionChange]) -> list[Finding]:
         )
 
     additions = [change for change in changes if change.kind == "added"]
-    hooks = [c for c in additions if c.atom.action == "auto_hook"]
     executables = [c for c in additions if c.atom.action == "hook_executable"]
-    claude = [c for c in hooks if c.atom.surface == "claude"]
-    tasks = [c for c in additions if c.atom.action == "folder_open_task"]
-    if (hooks and executables) or (claude and tasks):
-        involved = [*hooks, *executables, *tasks]
+    head = head_atoms if head_atoms is not None else [c.atom for c in additions]
+    triggers = [a for a in head if a.action in {"auto_hook", "folder_open_task"}]
+    starts = [c for c in executables if is_auto_start(c.atom.trigger)]
+    claude = [a for a in triggers if a.action == "auto_hook" and a.surface == "claude"]
+    tasks = [a for a in triggers if a.action == "folder_open_task"]
+    added_keys = {c.atom.key() for c in additions}
+    pair_changed = claude and tasks and any(a.key() in added_keys for a in [*claude, *tasks])
+    if starts or pair_changed:
+        selected = [a for a in triggers if any(a.actor == c.atom.actor for c in starts)]
+        if pair_changed:
+            selected.extend([*claude, *tasks])
+        # Existing triggers are context, not new permissions. Keep them visible in the
+        # correlated finding without adding them to the report's diff changes.
+        by_key = {c.atom.key(): c for c in additions}
+        context = {
+            a.key(): by_key.get(a.key(), PermissionChange(kind="unchanged", atom=a))
+            for a in selected
+        }
+        involved = [*context.values(), *starts]
+        if pair_changed:
+            involved.extend(c for c in executables if c not in starts)
         findings.append(
             Finding(
                 rule_id="APD105",
                 title="Worm-shaped persistence",
                 severity=Severity.CRITICAL,
                 summary=(
-                    "Added lifecycle hooks and payloads or folderOpen tasks resemble the "
+                    "New or changed startup execution, payloads, or paired Claude hooks and "
+                    "folderOpen tasks resemble the "
                     "August 2026 keyv Mini Shai-Hulud persistence pattern; static evidence "
                     "does not establish infection."
                 ),
