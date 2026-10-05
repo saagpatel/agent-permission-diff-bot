@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from collections import defaultdict
 
 from agent_permission_diff_bot.model import (
@@ -10,9 +11,10 @@ from agent_permission_diff_bot.model import (
     Severity,
 )
 from agent_permission_diff_bot.persistence import (
+    ConfigCache,
+    atom_references,
     extract_payload_atoms,
     persistence_findings,
-    referenced_paths,
     snapshot_hook_references,
 )
 from agent_permission_diff_bot.surfaces import extract_atoms
@@ -23,33 +25,14 @@ def build_report(
     base_files: dict[str, str],
     head_label: str,
     head_files: dict[str, str],
+    *,
+    base_cache: ConfigCache | None = None,
+    head_cache: ConfigCache | None = None,
 ) -> PermissionDiffReport:
-    base_atoms = _extract_snapshot_atoms(base_files)
-    head_atoms = _extract_snapshot_atoms(head_files)
+    base_atoms = _extract_snapshot_atoms(base_files, base_cache)
+    head_atoms = _extract_snapshot_atoms(head_files, head_cache)
     changes = diff_atoms(base_atoms, head_atoms)
-    for change in list(changes):
-        if change.kind != "added" or change.atom.action != "auto_hook":
-            continue
-        for target in sorted(referenced_paths(change.atom.value)):
-            if target in head_files and target not in base_files:
-                changes.append(
-                    PermissionChange(
-                        kind="added",
-                        atom=PermissionAtom(
-                            surface=change.atom.surface,
-                            actor=change.atom.actor,
-                            action="hook_executable",
-                            verb="execute",
-                            resource="repo_file",
-                            value=target,
-                            path=target,
-                            trigger=change.atom.trigger,
-                            evidence=f"{change.atom.path}: new executable `{target}` referenced by "
-                            f"{change.atom.trigger} hook: {change.atom.value}",
-                        ),
-                    )
-                )
-    findings = correlate(changes)
+    findings = correlate(changes, head_atoms=head_atoms)
     return PermissionDiffReport(
         base=base_label, head=head_label, changes=changes, findings=findings
     )
@@ -71,21 +54,52 @@ def diff_atoms(
     return changes
 
 
-def correlate(changes: list[PermissionChange]) -> list[Finding]:
+def correlate(
+    changes: list[PermissionChange], *, head_atoms: list[PermissionAtom] | None = None
+) -> list[Finding]:
     added = [change for change in changes if change.kind == "added"]
     findings: list[Finding] = []
 
     findings.extend(_single_surface_findings(added))
     findings.extend(_composition_findings(added))
-    findings.extend(persistence_findings(changes))
+    findings.extend(persistence_findings(changes, head_atoms=head_atoms))
     return _dedupe_findings(findings)
 
 
-def _extract_snapshot_atoms(files: dict[str, str]) -> list[PermissionAtom]:
+def _extract_snapshot_atoms(
+    files: dict[str, str], cache: ConfigCache | None = None
+) -> list[PermissionAtom]:
+    if cache is None:
+        cache = {}
     atoms: list[PermissionAtom] = []
     for path, text in files.items():
-        atoms.extend(extract_atoms(path, text))
-    for target in sorted(snapshot_hook_references(files)):
+        atoms.extend(extract_atoms(path, text, cache))
+    triggers = [atom for atom in atoms if atom.action in {"auto_hook", "folder_open_task"}]
+    references = snapshot_hook_references(files, cache)
+    for trigger in triggers:
+        for target in sorted(atom_references(trigger) & references):
+            if target not in files:
+                continue
+            payload = files[target]
+            digest = hashlib.sha256(payload.encode("utf-8", errors="surrogateescape")).hexdigest()
+            atoms.append(
+                PermissionAtom(
+                    surface=trigger.surface,
+                    actor=trigger.actor,
+                    action="hook_executable",
+                    verb="execute",
+                    resource="repo_file",
+                    value=target,
+                    path=target,
+                    trigger=trigger.trigger,
+                    scope=f"sha256:{digest}",
+                    evidence=(
+                        f"{trigger.path}: {target} is referenced by {trigger.trigger}: "
+                        f"{trigger.value} (sha256:{digest})"
+                    ),
+                )
+            )
+    for target in sorted(references):
         if target in files:
             atoms.extend(extract_payload_atoms(target, files[target]))
     return atoms
