@@ -22,6 +22,14 @@ with a composite GitHub Action for pull request scanning.
   policy keys.
 - Agent instructions: `AGENTS.md`, `CLAUDE.md`, Copilot instructions, Cursor rules, and
   Windsurf rules.
+- Claude settings: lifecycle hooks, permission rules/modes, project MCP opt-ins, env keys,
+  API key helpers, plugins, and marketplaces (including committed local settings).
+- VS Code tasks/settings: `folderOpen` automatic tasks and terminal execution settings.
+- Codex project config/hooks: lifecycle commands, sandbox/approval modes, and MCP servers.
+- Gemini settings and Cursor hooks: lifecycle commands and Gemini MCP servers;
+  Cursor `.mdc` rules with `alwaysApply: true` and hidden Unicode are flagged.
+- Startup payloads: suspicious command/credential signals and literal repo-relative hook
+  files, with critical correlation for worm-shaped persistence; analysis is static only.
 
 ## Installation
 
