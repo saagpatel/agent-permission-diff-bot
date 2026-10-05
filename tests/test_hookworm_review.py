@@ -621,6 +621,22 @@ def test_statusline_target_addition_is_auto_start_correlation() -> None:
     assert any(f.rule_id == "APD105" and f.severity == Severity.CRITICAL for f in report.findings)
 
 
+@pytest.mark.parametrize(
+    "key", ["apiKeyHelper", "awsAuthRefresh", "awsCredentialExport", "otelHeadersHelper"]
+)
+def test_credential_helper_target_addition_is_auto_start_correlation(key: str) -> None:
+    report = build_report(
+        "base",
+        {},
+        "head",
+        {
+            ".claude/settings.json": json.dumps({key: "node .claude/helper.mjs"}),
+            ".claude/helper.mjs": "console.log('token')",
+        },
+    )
+    assert any(f.rule_id == "APD105" and f.severity == Severity.CRITICAL for f in report.findings)
+
+
 @pytest.mark.parametrize("event", ["PreToolUse", "PostToolUse", "Stop", "UserPromptSubmit"])
 def test_non_start_hooks_are_high_without_critical(event: str) -> None:
     non_start = build_report(

@@ -26,6 +26,11 @@ PROJECT_CONFIGS = {
     ".gemini/settings.json": "gemini",
     ".cursor/hooks.json": "cursor",
 }
+_EMOJI = (
+    "\u00a9\u00ae\u203c\u2049\u2122\u2139\u2194-\u2199\u21a9\u21aa\u231a-\u23ff"
+    "\u24c2\u25aa-\u27bf\u2934\u2935\u2b05-\u2b55\u3030\u303d\u3297\u3299"
+    "\U0001f000-\U0001faff0-9#*"
+)
 PAYLOAD_PATTERNS = {
     "download_pipe_execute": re.compile(r"\b(?:curl|wget)\b[^\n|]*\|\s*(?:sh|bash|node)\b", re.I),
     "base64_decode": re.compile(r"\bbase64\s+(?:-d\b|--decode\b)", re.I),
@@ -35,9 +40,14 @@ PAYLOAD_PATTERNS = {
         r"\bpython(?:3)?\s+-c\b[^\n]*(?:https?://|urllib|requests|socket)", re.I
     ),
     "credential_reference": re.compile(r"(?:~/)?\.(?:ssh|aws)\b|\.npmrc\b|\bGITHUB_TOKEN\b"),
+    # VS16 (U+FE0F) and ZWJ (U+200D) are ordinary parts of emoji sequences such as
+    # "\u26a0\ufe0f" or family emoji; flag them only when they are not attached to an emoji.
     "hidden_unicode": re.compile(
-        "[\u00ad\u034f\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2069"
-        "\ufeff\ufe00-\ufe0f\U000e0000-\U000e007f\U000e0100-\U000e01ef]"
+        "[\u00ad\u034f\u180e\u200b\u200c\u200e\u200f\u202a-\u202e\u2060-\u2069"
+        "\ufeff\ufe00-\ufe0e\U000e0000-\U000e007f\U000e0100-\U000e01ef]"
+        f"|(?<![{_EMOJI}])\ufe0f"
+        f"|(?<![{_EMOJI}\ufe0f])\u200d"
+        f"|\u200d(?![{_EMOJI}])"
     ),
 }
 MAX_CONFIG_BYTES = 2 * 1024 * 1024
@@ -722,7 +732,18 @@ def _covers_rule(broad: str, narrow: str) -> bool:
 
 
 def is_auto_start(trigger: str) -> bool:
-    return trigger.lower() in {"sessionstart", "session_start", "folderopen", "statusline"}
+    # Credential helpers run without user action and next to credentials, so they
+    # count as auto-start triggers alongside session start, folder open and status line.
+    return trigger.lower() in {
+        "sessionstart",
+        "session_start",
+        "folderopen",
+        "statusline",
+        "apikeyhelper",
+        "awsauthrefresh",
+        "awscredentialexport",
+        "otelheadershelper",
+    }
 
 
 def persistence_findings(
