@@ -162,7 +162,12 @@ def test_claude_optins_env_helpers_plugins_marketplaces() -> None:
         }
     )
     report = build_report("base", {}, "head", {path: text})
-    assert {c.atom.action for c in report.changes} == {"project_setting", "environment", "plugin"}
+    assert {c.atom.action for c in report.changes} == {
+        "project_setting",
+        "environment",
+        "plugin",
+        "auto_hook",
+    }
     assert "do-not-copy-secret" not in json.dumps(report.to_dict())
     assert all(f.severity >= Severity.MEDIUM for f in report.findings)
 
@@ -349,7 +354,7 @@ def write_files(root: Path, files: dict[str, str]) -> None:
 
 
 @pytest.mark.parametrize("existing", [False, True])
-def test_directory_cli_correlates_only_new_payloads_and_preserves_gate(
+def test_directory_cli_correlates_new_startup_execution_and_preserves_gate(
     tmp_path: Path, existing: bool
 ) -> None:
     base, head = tmp_path / "base", tmp_path / "head"
@@ -371,8 +376,8 @@ def test_directory_cli_correlates_only_new_payloads_and_preserves_gate(
         ]
     )
     report = json.loads(output.read_text())
-    assert code == (0 if existing else 2)
-    assert ("APD105" in {f["rule_id"] for f in report["findings"]}) is not existing
+    assert code == 2
+    assert "APD105" in {f["rule_id"] for f in report["findings"]}
 
 
 def test_directory_snapshot_does_not_read_external_symlink(tmp_path: Path) -> None:
@@ -399,7 +404,7 @@ def test_directory_snapshot_does_not_dereference_credential_files(tmp_path: Path
     assert any(f.rule_id == "APD011" for f in build_report("base", {}, "head", files).findings)
 
 
-def test_existing_binary_payload_is_not_misclassified_as_new(tmp_path: Path) -> None:
+def test_existing_binary_payload_change_is_correlated(tmp_path: Path) -> None:
     base, head = tmp_path / "base", tmp_path / "head"
     write_files(base, {"payload.mjs": ""})
     write_files(
@@ -410,7 +415,13 @@ def test_existing_binary_payload_is_not_misclassified_as_new(tmp_path: Path) -> 
     assert (
         main(["diff", "--base-dir", str(base), "--head-dir", str(head), "--json", str(output)]) == 0
     )
-    assert not any(f["rule_id"] == "APD105" for f in json.loads(output.read_text())["findings"])
+    assert any(f["rule_id"] == "APD105" for f in json.loads(output.read_text())["findings"])
+    executable = next(
+        c
+        for c in json.loads(output.read_text())["changes"]
+        if c["atom"]["action"] == "hook_executable"
+    )
+    assert executable["atom"]["scope"].startswith("sha256:")
 
 
 def test_git_snapshot_reads_referenced_payload_using_only_read_commands(
@@ -421,13 +432,15 @@ def test_git_snapshot_reads_referenced_payload_using_only_read_commands(
 
     def run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess:
         calls.append(args)
+        if args[3] == "ls-tree":
+            return subprocess.CompletedProcess(args, 0, "\n".join(files), "")
         assert args[3] == "show"
         path = args[4].split(":", 1)[1]
         return subprocess.CompletedProcess(args, 0 if path in files else 1, files.get(path, ""), "")
 
     monkeypatch.setattr(subprocess, "run", run)
     assert read_git_snapshot(Path("."), "head", [".claude/settings.json"])[1] == files
-    assert len(calls) == 2
+    assert len(calls) == 3
 
 
 def test_hook_plus_folder_open_task_correlates_without_new_script() -> None:
@@ -446,5 +459,8 @@ def test_unrelated_new_file_does_not_correlate_with_hook() -> None:
 
 
 def test_malformed_project_config_does_not_crash() -> None:
-    assert not extract_atoms(".codex/config.toml", "[invalid")
-    assert not extract_atoms(".claude/settings.json", '{"hooks":')
+    for path, text in [(".codex/config.toml", "[invalid"), (".claude/settings.json", '{"hooks":')]:
+        atoms = extract_atoms(path, text)
+        assert len(atoms) == 1
+        assert atoms[0].action == "unparseable_config"
+        assert build_report("base", {}, "head", {path: text}).max_severity == Severity.HIGH
