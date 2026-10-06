@@ -20,8 +20,43 @@ with a composite GitHub Action for pull request scanning.
   secrets/env references, and deploy/publish actions.
 - Egress policy: `allow_hosts`, `allow_connectors`, `network_name_globs`, and related
   policy keys.
-- Agent instructions: `AGENTS.md`, `CLAUDE.md`, Copilot instructions, Cursor rules, and
+- Agent instructions: `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, Copilot instructions, Cursor rules, and
   Windsurf rules.
+- Claude settings: lifecycle hooks, permission rules/modes, project MCP opt-ins, env keys,
+  statusLine and credential/header helpers, plugins, and marketplaces (including committed local
+  settings).
+- VS Code tasks/settings and `*.code-workspace` tasks: case-insensitive `folderOpen` automatic
+  tasks and terminal execution settings.
+- Codex project config/hooks and profiles: lifecycle commands, sandbox/approval modes, and MCP
+  servers, including `*.config.toml` profile files under `.codex/`.
+- Gemini settings and Cursor hooks: lifecycle commands and Gemini MCP servers;
+  Cursor `.mdc` rules with `alwaysApply: true` and hidden Unicode are flagged.
+- Startup payloads: suspicious command/credential signals and literal repo-relative hook/task
+  files; analysis is static only. Startup config paths match case-insensitively, including
+  nested project directories.
+
+`APD105` reports critical worm-shaped persistence when an auto-start trigger (`SessionStart`,
+VS Code `folderOpen`, Claude `statusLine`, or a Claude credential helper) newly references an
+existing executable, its referenced executable is newly added, or an existing referenced
+executable is modified and the new content carries a payload smell. Git-ref scans read startup
+configs at both refs even when the configs are unchanged, so a payload introduced or swapped in a
+later PR is still correlated. A smell-free edit to an existing auto-start script under an
+unchanged trigger is reported as HIGH `APD012`, so routine setup-script maintenance does not fail
+the default critical gate. A newly introduced Claude hook and VS Code `folderOpen` pairing is also critical,
+including when one side already exists. This static pattern does not establish infection.
+Other hook events (`PreToolUse`, `PostToolUse`, `Stop`, `UserPromptSubmit`, etc.) referencing a
+new or modified executable produce HIGH `APD012`, without critical `APD105` unless paired with
+`folderOpen`. Adding a formatter hook alone therefore does not fail the default critical gate.
+
+Target resolution handles literal command/args paths, known project-root variables, common
+interpreter options, and clear shell wrappers; dynamic shell expansion remains unresolved.
+Explicit targets can be read from vendor directories, but `.git`, credential paths, external
+paths and symlinks are excluded. Startup configs accept a leading BOM and JSONC comments and
+trailing commas. Unparseable or oversized configs produce HIGH findings; a raw `folderOpen`
+marker in an unparseable task config also preserves the automatic-task finding. Parsing is
+cached per snapshot, limited to 2 MiB per config, and inline executable-load analysis is capped
+at 64 KiB. Hidden Unicode is checked across all supported instruction files. Payload smells
+in config files are checked on command strings rather than unrelated settings keys or values.
 
 ## Installation
 

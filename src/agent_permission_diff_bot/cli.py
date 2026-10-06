@@ -8,6 +8,7 @@ from pathlib import Path
 from agent_permission_diff_bot.engine import build_report
 from agent_permission_diff_bot.gating import evaluate_gate
 from agent_permission_diff_bot.model import Severity
+from agent_permission_diff_bot.persistence import ConfigCache, snapshot_hook_references
 from agent_permission_diff_bot.policy import PolicyError, apply_policy_file
 from agent_permission_diff_bot.reporting import (
     append_step_summary,
@@ -70,20 +71,53 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _run_diff(args: argparse.Namespace) -> int:
+    base_cache: ConfigCache = {}
+    head_cache: ConfigCache = {}
     if args.repo:
         repo = Path(args.repo).resolve()
         if not args.base_ref or not args.head_ref:
             raise SystemExit("--repo requires --base-ref and --head-ref")
         paths = changed_git_paths(repo, args.base_ref, args.head_ref)
-        base_label, base_files = read_git_snapshot(repo, args.base_ref, paths)
-        head_label, head_files = read_git_snapshot(repo, args.head_ref, paths)
+        base_label, base_files = read_git_snapshot(
+            repo, args.base_ref, paths, config_cache=base_cache
+        )
+        head_label, head_files = read_git_snapshot(
+            repo, args.head_ref, paths, config_cache=head_cache
+        )
     else:
         if not args.base_dir or not args.head_dir:
             raise SystemExit("provide either --repo with refs or --base-dir and --head-dir")
-        base_label, base_files = read_dir_snapshot(Path(args.base_dir).resolve())
-        head_label, head_files = read_dir_snapshot(Path(args.head_dir).resolve())
+        base_label, base_files = read_dir_snapshot(
+            Path(args.base_dir).resolve(), config_cache=base_cache
+        )
+        head_label, head_files = read_dir_snapshot(
+            Path(args.head_dir).resolve(), config_cache=head_cache
+        )
 
-    report = build_report(base_label, base_files, head_label, head_files)
+    # Read the same referenced paths at both ends so an existing payload stays existing.
+    references = snapshot_hook_references(base_files, base_cache) | snapshot_hook_references(
+        head_files, head_cache
+    )
+    if references:
+        if args.repo:
+            base_label, base_files = read_git_snapshot(
+                repo, args.base_ref, paths, references, base_cache
+            )
+            head_label, head_files = read_git_snapshot(
+                repo, args.head_ref, paths, references, head_cache
+            )
+        else:
+            base_label, base_files = read_dir_snapshot(Path(args.base_dir), references, base_cache)
+            head_label, head_files = read_dir_snapshot(Path(args.head_dir), references, head_cache)
+
+    report = build_report(
+        base_label,
+        base_files,
+        head_label,
+        head_files,
+        base_cache=base_cache,
+        head_cache=head_cache,
+    )
     if args.policy:
         try:
             apply_policy_file(report, Path(args.policy))

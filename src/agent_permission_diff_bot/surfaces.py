@@ -3,12 +3,22 @@ from __future__ import annotations
 import json
 import re
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import PurePosixPath
 from urllib.parse import urlparse
 
 import yaml
 
 from agent_permission_diff_bot.model import PermissionAtom
+from agent_permission_diff_bot.persistence import (
+    ConfigCache,
+    extract_payload_atoms,
+    extract_project_atoms,
+    load_project_config,
+    project_command_strings,
+    project_config_kind,
+    project_config_sections,
+)
 
 WORKFLOW_GLOBS = (".github/workflows/*.yml", ".github/workflows/*.yaml")
 MCP_PATHS = (
@@ -75,6 +85,8 @@ WEAKENING_INSTRUCTION_RE = re.compile(
 
 def is_interesting_path(path: str) -> bool:
     normalized = _normalize(path)
+    if project_config_kind(normalized):
+        return True
     if _is_workflow(normalized):
         return True
     if _is_mcp_config(normalized):
@@ -84,14 +96,55 @@ def is_interesting_path(path: str) -> bool:
     return PurePosixPath(normalized).name in EGRESS_PATH_NAMES
 
 
-def extract_atoms(path: str, text: str) -> list[PermissionAtom]:
+def extract_atoms(path: str, text: str, cache: ConfigCache | None = None) -> list[PermissionAtom]:
     normalized = _normalize(path)
+    cache = {} if cache is None else cache
+    if project_config_kind(normalized):
+        data = load_project_config(normalized, text, cache)
+        atoms = extract_project_atoms(normalized, text, cache)
+        for section, values in project_config_sections(normalized, data):
+            servers = values.get("mcpServers", values.get("mcp_servers"))
+            mcp_atoms = _extract_mcp_atoms(normalized, json.dumps({"mcpServers": servers}))
+            atoms.extend(
+                replace(atom, actor=f"{normalized}:{section}:{atom.actor}") for atom in mcp_atoms
+            )
+        for command in project_command_strings(normalized, data, atoms):
+            atoms.extend(extract_payload_atoms(normalized, command))
+        return atoms
     if _is_workflow(normalized):
         return _extract_workflow_atoms(normalized, text)
     if _is_mcp_config(normalized):
         return _extract_mcp_atoms(normalized, text)
     if _is_instruction(normalized):
-        return _extract_instruction_atoms(normalized, text)
+        atoms = _extract_instruction_atoms(normalized, text)
+        lowered = normalized.lower()
+        if (
+            (lowered.startswith(".cursor/rules/") or "/.cursor/rules/" in lowered)
+            and lowered.endswith(".mdc")
+            and text.startswith("---")
+        ):
+            parts = text.split("---", 2)
+            frontmatter = _load_yaml(parts[1]) if len(parts) == 3 else None
+            if isinstance(frontmatter, Mapping) and frontmatter.get("alwaysApply") is True:
+                atoms.append(
+                    PermissionAtom(
+                        surface="instructions",
+                        actor=f"cursor:{normalized}",
+                        action="always_apply_rule",
+                        verb="trust",
+                        resource="alwaysApply",
+                        value=text,
+                        path=normalized,
+                        evidence=f"{normalized}: Cursor rule has alwaysApply: true",
+                    )
+                )
+        cursor_rule = lowered.startswith(".cursor/rules/") or "/.cursor/rules/" in lowered
+        atoms.extend(
+            extract_payload_atoms(
+                normalized, text, hidden_only=not (cursor_rule and lowered.endswith(".mdc"))
+            )
+        )
+        return atoms
     if PurePosixPath(normalized).name in EGRESS_PATH_NAMES:
         return _extract_egress_atoms(normalized, text)
     return []
@@ -485,8 +538,17 @@ def _is_mcp_config(path: str) -> bool:
 
 
 def _is_instruction(path: str) -> bool:
-    return path in INSTRUCTION_PATHS or any(
-        path.startswith(prefix) for prefix in INSTRUCTION_PREFIXES
+    lowered = path.lower()
+    return (
+        PurePosixPath(lowered).name in {"agents.md", "claude.md", "gemini.md"}
+        or any(
+            lowered == name.lower() or lowered.endswith("/" + name.lower())
+            for name in INSTRUCTION_PATHS
+        )
+        or any(
+            lowered.startswith(prefix) or "/" + prefix in lowered
+            for prefix in (*INSTRUCTION_PREFIXES, ".windsurf/rules/")
+        )
     )
 
 
