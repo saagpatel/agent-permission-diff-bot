@@ -69,6 +69,13 @@ class ProjectConfig(dict):
         super().__init__(data or {})
         self.error = error
 
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, ProjectConfig):
+            return dict.__eq__(self, other) and self.error == other.error
+        return dict.__eq__(self, other)
+
+    __hash__ = None  # type: ignore[assignment]
+
 
 ConfigCache = dict[tuple[str, str], ProjectConfig]
 

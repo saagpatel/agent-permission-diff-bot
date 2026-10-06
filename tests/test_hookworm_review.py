@@ -12,6 +12,7 @@ from agent_permission_diff_bot.cli import main
 from agent_permission_diff_bot.engine import build_report
 from agent_permission_diff_bot.model import Severity
 from agent_permission_diff_bot.persistence import (
+    _parse_project_config,
     extract_project_atoms,
     load_project_config,
     referenced_paths,
@@ -287,8 +288,8 @@ def test_runon_matching_is_case_insensitive() -> None:
         'node "$CLAUDE_PROJECT_DIR"/.claude/setup.mjs',
         'node "${CLAUDE_PROJECT_DIR}"/.claude/setup.mjs',
         "node --env-file .runtime-config --stack-size 2048 .claude/setup.mjs",
-        "node -r preload.cjs --require required.cjs --import init.mjs "
-        "--loader loader.mjs .claude/setup.mjs",
+        "node -r preload.cjs --require required.cjs --import init.mjs"
+        + " --loader loader.mjs .claude/setup.mjs",
         "python -X utf8 -W ignore script.py",
         "python3.11 -X dev script.py",
         "npx tsx .claude/setup.ts",
@@ -534,29 +535,25 @@ def test_inline_parser_limits_large_code_and_contains_memory_or_recursion_failur
 ) -> None:
     assert referenced_paths("node -e " + json.dumps("x" * 100_000)) == set()
 
-    import agent_permission_diff_bot.persistence as persistence
-
     def memory_failure(_: str) -> object:
         raise MemoryError("simulated parser pressure")
 
-    monkeypatch.setattr(persistence.ast, "parse", memory_failure)
+    monkeypatch.setattr("agent_permission_diff_bot.persistence.ast.parse", memory_failure)
     assert referenced_paths("python -c 'print(1)' ") == set()
 
     def recursion_failure(_: str) -> object:
         raise RecursionError("simulated parser depth")
 
-    monkeypatch.setattr(persistence.ast, "parse", recursion_failure)
+    monkeypatch.setattr("agent_permission_diff_bot.persistence.ast.parse", recursion_failure)
     assert referenced_paths("python -c 'print(1)' ") == set()
 
 
 @pytest.mark.parametrize("failure", [MemoryError, RecursionError])
 def test_inline_parser_failure_keeps_unrelated_findings(monkeypatch, failure) -> None:
-    import agent_permission_diff_bot.persistence as persistence
-
     def fail(_: str) -> object:
         raise failure("simulated parser failure")
 
-    monkeypatch.setattr(persistence.ast, "parse", fail)
+    monkeypatch.setattr("agent_permission_diff_bot.persistence.ast.parse", fail)
     report = build_report(
         "base",
         {},
@@ -582,16 +579,14 @@ def test_inline_parser_failure_keeps_unrelated_findings(monkeypatch, failure) ->
 
 
 def test_each_startup_config_is_parsed_once_per_snapshot(monkeypatch) -> None:
-    import agent_permission_diff_bot.persistence as persistence
-
-    original = persistence._parse_project_config
+    original = _parse_project_config
     calls: list[tuple[str, str]] = []
 
     def counted(path: str, text: str):
         calls.append((path, text))
         return original(path, text)
 
-    monkeypatch.setattr(persistence, "_parse_project_config", counted)
+    monkeypatch.setattr("agent_permission_diff_bot.persistence._parse_project_config", counted)
     config = ".claude/settings.json"
     content = _hook("node .claude/setup.mjs")
     report = build_report(
