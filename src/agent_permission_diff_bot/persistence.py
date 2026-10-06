@@ -860,10 +860,26 @@ def persistence_findings(
     executables = [c for c in additions if c.atom.action == "hook_executable"]
     head = head_atoms if head_atoms is not None else [c.atom for c in additions]
     triggers = [a for a in head if a.action in {"auto_hook", "folder_open_task"}]
-    starts = [c for c in executables if is_auto_start(c.atom.trigger)]
     claude = [a for a in triggers if a.action == "auto_hook" and a.surface == "claude"]
     tasks = [a for a in triggers if a.action == "folder_open_task"]
     added_keys = {c.atom.key() for c in additions}
+    replaced_paths = {
+        c.atom.path for c in changes if c.kind == "removed" and c.atom.action == "hook_executable"
+    }
+    smelly_paths = {c.atom.path for c in additions if c.atom.action == "payload_smell"}
+
+    def routine_edit(change: PermissionChange) -> bool:
+        # An edit to a script that already ran at startup, under an unchanged trigger and
+        # with no payload smell, stays APD012 high so teams can maintain setup scripts.
+        atom = change.atom
+        trigger_changed = any(
+            a.key() in added_keys
+            for a in triggers
+            if a.actor == atom.actor and a.trigger == atom.trigger
+        )
+        return atom.path in replaced_paths and atom.path not in smelly_paths and not trigger_changed
+
+    starts = [c for c in executables if is_auto_start(c.atom.trigger) and not routine_edit(c)]
     pair_changed = claude and tasks and any(a.key() in added_keys for a in [*claude, *tasks])
     if starts or pair_changed:
         selected = [a for a in triggers if any(a.actor == c.atom.actor for c in starts)]

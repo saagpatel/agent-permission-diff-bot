@@ -36,10 +36,13 @@ with a composite GitHub Action for pull request scanning.
   nested project directories.
 
 `APD105` reports critical worm-shaped persistence when an auto-start trigger (`SessionStart`,
-VS Code `folderOpen`, or Claude `statusLine`) newly references an existing executable, or its
-referenced executable is added or modified. Git-ref scans read startup configs at both refs even
-when the configs are unchanged, so a payload introduced or swapped in a later PR is still
-correlated. A newly introduced Claude hook and VS Code `folderOpen` pairing is also critical,
+VS Code `folderOpen`, Claude `statusLine`, or a Claude credential helper) newly references an
+existing executable, its referenced executable is newly added, or an existing referenced
+executable is modified and the new content carries a payload smell. Git-ref scans read startup
+configs at both refs even when the configs are unchanged, so a payload introduced or swapped in a
+later PR is still correlated. A smell-free edit to an existing auto-start script under an
+unchanged trigger is reported as HIGH `APD012`, so routine setup-script maintenance does not fail
+the default critical gate. A newly introduced Claude hook and VS Code `folderOpen` pairing is also critical,
 including when one side already exists. This static pattern does not establish infection.
 Other hook events (`PreToolUse`, `PostToolUse`, `Stop`, `UserPromptSubmit`, etc.) referencing a
 new or modified executable produce HIGH `APD012`, without critical `APD105` unless paired with
