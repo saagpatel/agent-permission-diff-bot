@@ -3,7 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from agent_permission_diff_bot.cli import main
+from agent_permission_diff_bot.engine import build_report
+from agent_permission_diff_bot.sources import read_dir_snapshot
 
 
 def test_directory_diff_writes_json_and_observe_exits_zero(tmp_path: Path) -> None:
@@ -42,6 +46,72 @@ jobs:
 
     assert code == 0
     assert '"APD001"' in output.read_text(encoding="utf-8")
+
+
+def test_missing_explicit_policy_exits_two_with_stderr(capsys, tmp_path: Path) -> None:
+    base, head = tmp_path / "base", tmp_path / "head"
+    base.mkdir()
+    head.mkdir()
+    code = main(
+        [
+            "diff",
+            "--base-dir",
+            str(base),
+            "--head-dir",
+            str(head),
+            "--policy",
+            str(tmp_path / "missing.yml"),
+        ]
+    )
+    assert code == 2
+    assert "policy file does not exist" in capsys.readouterr().err
+
+
+def test_validate_json_malformed_payload_is_contract_error(tmp_path: Path, capsys) -> None:
+    invalid = tmp_path / "invalid.json"
+    invalid.write_text("{bad", encoding="utf-8")
+    code = main(["simulate", "--validate-json", str(invalid)])
+    assert code == 2
+    assert json.loads(capsys.readouterr().out) == {
+        "valid": False,
+        "errors": ["Malformed JSON at line 1, column 2."],
+    }
+
+
+def test_missing_directory_root_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError, match="scan root does not exist"):
+        read_dir_snapshot(tmp_path / "missing")
+
+
+def test_missing_explicit_cli_root_exits_two_with_stderr(tmp_path: Path, capsys) -> None:
+    head = tmp_path / "head"
+    head.mkdir()
+    code = main(
+        [
+            "diff",
+            "--base-dir",
+            str(tmp_path / "missing"),
+            "--head-dir",
+            str(head),
+        ]
+    )
+    assert code == 2
+    assert "scan root does not exist" in capsys.readouterr().err
+
+
+def test_oversized_input_is_reported_as_incomplete(tmp_path: Path) -> None:
+    (tmp_path / ".mcp.json").write_bytes(b" " * (2 * 1024 * 1024 + 1))
+    label, files = read_dir_snapshot(tmp_path)
+    report = build_report("base", {}, label, files)
+    finding = next(item for item in report.findings if item.rule_id == "APD013")
+    assert "exceeds 2 MiB" in finding.evidence[0]
+
+
+def test_incomplete_base_scan_cannot_produce_clean_pass(tmp_path: Path) -> None:
+    (tmp_path / ".mcp.json").write_bytes(b" " * (2 * 1024 * 1024 + 1))
+    _, files = read_dir_snapshot(tmp_path)
+    report = build_report("base", files, "head", {})
+    assert any(finding.rule_id == "APD013" for finding in report.findings)
 
 
 def test_directory_diff_writes_sarif_and_step_summary(tmp_path: Path) -> None:

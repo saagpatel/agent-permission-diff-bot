@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import shlex
 import subprocess
+from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -268,7 +269,7 @@ def test_reference_resolution_stays_literal_and_inside_repo() -> None:
         ".claude/setup.mjs"
     }
     for target in [
-        "/tmp/setup.mjs",
+        str(Path.cwd() / "setup.mjs"),
         "../setup.mjs",
         "~/.ssh/id_rsa",
         "$FILE",
@@ -434,11 +435,23 @@ def test_git_snapshot_reads_referenced_payload_using_only_read_commands(
         calls.append(args)
         if args[3] == "ls-tree":
             return subprocess.CompletedProcess(args, 0, "\n".join(files), "")
-        assert args[3] == "show"
-        path = args[4].split(":", 1)[1]
-        return subprocess.CompletedProcess(args, 0 if path in files else 1, files.get(path, ""), "")
+        raise AssertionError("git show must use bounded Popen streaming")
+
+    class FakeProcess:
+        def __init__(self, args: list[str], **kwargs: object) -> None:
+            calls.append(args)
+            path = args[4].split(":", 1)[1]
+            self.stdout = BytesIO(files.get(path, "").encode())
+            self.returncode = 0 if path in files else 1
+
+        def wait(self) -> int:
+            return self.returncode
+
+        def kill(self) -> None:
+            self.returncode = -9
 
     monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(subprocess, "Popen", FakeProcess)
     assert read_git_snapshot(Path("."), "head", [".claude/settings.json"])[1] == files
     assert len(calls) == 3
 

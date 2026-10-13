@@ -4,25 +4,21 @@ import json
 import os
 from pathlib import Path
 
+from agent_permission_diff_bot.atomic import atomic_write_text
 from agent_permission_diff_bot.model import PermissionDiffReport
+from agent_permission_diff_bot.redaction import redact_text
 
 
 def write_json(report: PermissionDiffReport, path: Path) -> None:
-    path.write_text(
-        json.dumps(report.to_dict(), indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_text(path, json.dumps(report.to_dict(), indent=2, sort_keys=True) + "\n")
 
 
 def write_markdown(report: PermissionDiffReport, path: Path) -> None:
-    path.write_text(render_markdown(report), encoding="utf-8")
+    atomic_write_text(path, render_markdown(report))
 
 
 def write_sarif(report: PermissionDiffReport, path: Path) -> None:
-    path.write_text(
-        json.dumps(render_sarif(report), indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    atomic_write_text(path, json.dumps(render_sarif(report), indent=2, sort_keys=True) + "\n")
 
 
 def append_step_summary(report: PermissionDiffReport, path: Path | None = None) -> None:
@@ -70,7 +66,7 @@ def render_markdown(report: PermissionDiffReport) -> str:
                         f"{finding.title}{acknowledgement_label}"
                     ),
                     "",
-                    finding.summary,
+                    redact_text(finding.summary),
                     "",
                     f"Reviewer decision: {finding.reviewer_decision}",
                     "",
@@ -83,7 +79,7 @@ def render_markdown(report: PermissionDiffReport) -> str:
                 lines.append("")
             if finding.evidence:
                 lines.append("Evidence:")
-                lines.extend(f"- {item}" for item in finding.evidence[:8])
+                lines.extend(f"- {redact_text(item)}" for item in finding.evidence[:8])
                 lines.append("")
     else:
         lines.extend(["## Findings", "", "No agent-facing permission findings.", ""])
@@ -94,7 +90,7 @@ def render_markdown(report: PermissionDiffReport) -> str:
             atom = change.atom
             lines.append(
                 f"- `{change.kind}` `{atom.surface}` `{atom.action}` "
-                f"`{atom.value}` in `{atom.path}`"
+                f"`{redact_text(atom.value)}` in `{atom.path}`"
             )
         lines.append("")
 
@@ -112,7 +108,7 @@ def render_sarif(report: PermissionDiffReport) -> dict[str, object]:
                 "id": finding.rule_id,
                 "name": finding.title,
                 "shortDescription": {"text": finding.title},
-                "fullDescription": {"text": finding.summary},
+                "fullDescription": {"text": redact_text(finding.summary)},
                 "help": {"text": finding.reviewer_decision},
                 "properties": {
                     "category": "agent-permission-diff",
@@ -124,7 +120,7 @@ def render_sarif(report: PermissionDiffReport) -> dict[str, object]:
             {
                 "ruleId": finding.rule_id,
                 "level": _sarif_level(finding.severity.label()),
-                "message": {"text": finding.summary},
+                "message": {"text": redact_text(finding.summary)},
                 "locations": _finding_locations(finding),
                 "properties": {
                     "confidence": finding.confidence,
