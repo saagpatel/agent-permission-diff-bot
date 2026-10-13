@@ -27,14 +27,17 @@ class AcknowledgementRule:
 
 def apply_policy_file(report: PermissionDiffReport, path: Path) -> None:
     if not path.exists():
-        return
+        raise PolicyError(f"policy file does not exist: {path}")
     rules = load_acknowledgements(path)
     apply_acknowledgements(report, rules)
 
 
 def load_acknowledgements(path: Path, today: date | None = None) -> list[AcknowledgementRule]:
     today = today or date.today()
-    payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    try:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except yaml.YAMLError as exc:
+        raise PolicyError(f"policy file is malformed: {path.name}") from exc
     if not isinstance(payload, dict):
         msg = f"{path} must contain a YAML mapping"
         raise PolicyError(msg)

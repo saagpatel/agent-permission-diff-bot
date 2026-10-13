@@ -1,6 +1,12 @@
 from __future__ import annotations
 
-from agent_permission_diff_bot.model import GateDecision, GateMode, PermissionDiffReport, Severity
+from agent_permission_diff_bot.model import (
+    GateDecision,
+    GateMode,
+    GateStatus,
+    PermissionDiffReport,
+    Severity,
+)
 
 
 def evaluate_gate(
@@ -43,7 +49,7 @@ def evaluate_gate(
         )
 
     if threshold_met:
-        status = "fail" if mode == "enforce" else "warn"
+        status: GateStatus = "fail" if mode == "enforce" else "warn"
         return GateDecision(
             mode=mode,
             fail_on=fail_on,
