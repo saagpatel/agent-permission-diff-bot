@@ -14,6 +14,8 @@ from typing import Any, Literal
 
 import yaml
 
+from agent_permission_diff_bot.atomic import atomic_write_text
+from agent_permission_diff_bot.redaction import redact_text
 from agent_permission_diff_bot.surfaces import extract_atoms
 
 CapabilityName = Literal["read", "write", "send", "deploy", "bypass", "escalate"]
@@ -37,6 +39,16 @@ CAPABILITIES: tuple[CapabilityName, ...] = (
     "deploy",
     "bypass",
     "escalate",
+)
+INPUT_KINDS: tuple[InputKind, ...] = (
+    "command",
+    "workflow",
+    "mcp_config",
+    "mcpaudit_json",
+    "subagent",
+    "hook_policy",
+    "scenario",
+    "probe",
 )
 
 RISK_FACETS: dict[str, str] = {
@@ -342,14 +354,15 @@ class CapabilityAssessment:
     def add(self, level: CapabilityLevel, confidence: str, evidence: str) -> None:
         self.level = _stronger_level(self.level, level)
         self.confidence = _weaker_confidence(self.confidence, confidence)
-        if evidence and evidence not in self.evidence:
-            self.evidence.append(evidence)
+        safe_evidence = redact_text(evidence)
+        if safe_evidence and safe_evidence not in self.evidence:
+            self.evidence.append(safe_evidence)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "level": self.level,
             "confidence": self.confidence,
-            "evidence": self.evidence,
+            "evidence": [redact_text(item) for item in self.evidence],
         }
 
 
@@ -418,6 +431,7 @@ class SimulationReport:
 
 class SimulationBuilder:
     def __init__(self) -> None:
+        self.live_requested = False
         self.inputs: list[SimulationInput] = []
         self.capabilities = {name: CapabilityAssessment(capability=name) for name in CAPABILITIES}
         self.risk_facets: dict[str, SimulationRiskFacet] = {}
@@ -442,10 +456,12 @@ class SimulationBuilder:
         confidence: str,
         evidence: str,
     ) -> int:
-        self.capabilities[capability].add(level, confidence, evidence)
-        return self.add_evidence(evidence)
+        safe_evidence = redact_text(evidence)
+        self.capabilities[capability].add(level, confidence, safe_evidence)
+        return self.add_evidence(safe_evidence)
 
     def add_evidence(self, evidence: str) -> int:
+        evidence = redact_text(evidence)
         if evidence and evidence in self.deterministic_evidence:
             return self.deterministic_evidence.index(evidence)
         if evidence:
@@ -454,6 +470,7 @@ class SimulationBuilder:
         return -1
 
     def add_live_probe_evidence(self, evidence: str) -> int:
+        evidence = redact_text(evidence)
         if evidence and evidence in self.live_probe_evidence:
             return self.live_probe_evidence.index(evidence)
         if evidence:
@@ -462,6 +479,7 @@ class SimulationBuilder:
         return -1
 
     def add_gap(self, gap: str) -> int:
+        gap = redact_text(gap)
         if gap and gap in self.live_probe_needed:
             return self.live_probe_needed.index(gap)
         if gap:
@@ -494,11 +512,16 @@ class SimulationBuilder:
         _extend_unique_indices(facet.live_probe_needed_indices, live_probe_needed_indices)
 
     def build(self) -> SimulationReport:
+        live_requested = self.live_requested
         return SimulationReport(
             schema_version="agent-permission-simulation.v1",
-            mode="static/no-credential/no-network",
+            mode="live-read-only" if live_requested else "static/no-credential/no-network",
             safety_boundary=(
-                "Static simulation only: no credentials read, no network calls, no MCP server "
+                "A live read-only GitHub metadata probe was requested; it may read the named "
+                "token environment variable and send GET requests to api.github.com. No "
+                "mutations, dispatches, deploys, or destructive probes are performed."
+                if live_requested
+                else "Static simulation only: no credentials read, no network calls, no MCP server "
                 "launches, no workflow dispatches, no deploys, and no destructive probes."
             ),
             inputs=self.inputs,
@@ -526,6 +549,7 @@ def build_simulation(
     github_pull_resolver: GitHubPullResolver | None = None,
 ) -> SimulationReport:
     builder = SimulationBuilder()
+    builder.live_requested = bool(probes and github_actions_live_options is not None)
     for scenario in scenarios:
         _analyze_scenario(builder, scenario)
     if command:
@@ -617,8 +641,9 @@ def explain_simulation_schema() -> dict[str, Any]:
         "live_probe_default": "disabled",
         "live_probe_boundary": (
             "Live probes require an explicit --probe plus probe-specific opt-in context. "
-            "The initial GitHub Actions adapter is read-only and must not dispatch workflows, "
-            "read secrets, deploy, or mutate GitHub."
+            "The GitHub Actions adapter may read its named token environment variable and sends "
+            "GET requests to api.github.com only; it does not read repository secrets, dispatch "
+            "workflows, deploy, or mutate GitHub."
         ),
     }
 
@@ -727,7 +752,7 @@ def _simulation_input_schema() -> dict[str, Any]:
         "additionalProperties": False,
         "required": ["kind", "source", "status", "notes"],
         "properties": {
-            "kind": {"enum": list(InputKind.__args__)},
+            "kind": {"enum": list(INPUT_KINDS)},
             "source": {"type": "string"},
             "status": {"type": "string"},
             "notes": _string_array_schema(),
@@ -824,7 +849,7 @@ def _simulation_summary_json_schema() -> dict[str, Any]:
     ]
     schema["properties"] = {
         "schema_version": {"const": "agent-permission-simulation.v1.summary.v1"},
-        "mode": {"type": "string"},
+        "mode": {"enum": ["static/no-credential/no-network", "live-read-only"]},
         "safety_boundary": {"type": "string"},
         "input_count": {"type": "integer", "minimum": 0},
         "inputs": {"type": "array", "items": _simulation_input_schema()},
@@ -853,7 +878,7 @@ def _simulation_full_json_schema() -> dict[str, Any]:
     ]
     schema["properties"] = {
         "schema_version": {"const": "agent-permission-simulation.v1"},
-        "mode": {"type": "string"},
+        "mode": {"enum": ["static/no-credential/no-network", "live-read-only"]},
         "safety_boundary": {"type": "string"},
         "inputs": {"type": "array", "items": _simulation_input_schema()},
         "capabilities": _capabilities_full_schema(),
@@ -902,18 +927,18 @@ def _simulation_contract_json_schema() -> dict[str, Any]:
 
 
 def write_simulation_json(report: SimulationReport, path: Path) -> None:
-    path.write_text(json.dumps(report.to_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    atomic_write_text(path, json.dumps(report.to_dict(), indent=2, sort_keys=True) + "\n")
 
 
 def write_simulation_json_summary(report: SimulationReport, path: Path) -> None:
-    path.write_text(
+    atomic_write_text(
+        path,
         json.dumps(render_simulation_json_summary(report), indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
     )
 
 
 def write_simulation_markdown(report: SimulationReport, path: Path) -> None:
-    path.write_text(render_simulation_markdown(report), encoding="utf-8")
+    atomic_write_text(path, render_simulation_markdown(report))
 
 
 def _extend_unique_indices(target: list[int], values: tuple[int, ...]) -> None:
@@ -978,14 +1003,14 @@ def render_simulation_markdown(report: SimulationReport) -> str:
                 "|---|---|---|---|---|",
             ]
         )
-        for name in sorted(report.risk_facets):
-            facet = report.risk_facets[name]
+        for facet_name in sorted(report.risk_facets):
+            facet = report.risk_facets[facet_name]
             evidence_refs = ", ".join(
                 f"D{index}" for index in facet.deterministic_evidence_indices[:4]
             )
             gap_refs = ", ".join(f"G{index}" for index in facet.live_probe_needed_indices[:4])
             lines.append(
-                f"| `{name}` | `{facet.status}` | `{facet.confidence}` | "
+                f"| `{facet_name}` | `{facet.status}` | `{facet.confidence}` | "
                 f"{evidence_refs} | {gap_refs} |"
             )
     else:
@@ -998,19 +1023,19 @@ def render_simulation_markdown(report: SimulationReport) -> str:
 
     lines.extend(["", "## Deterministic Evidence", ""])
     if report.deterministic_evidence:
-        lines.extend(f"- {item}" for item in report.deterministic_evidence)
+        lines.extend(f"- {redact_text(item)}" for item in report.deterministic_evidence)
     else:
         lines.append("- None.")
 
     lines.extend(["", "## Live Probe Evidence", ""])
     if report.live_probe_evidence:
-        lines.extend(f"- {item}" for item in report.live_probe_evidence)
+        lines.extend(f"- {redact_text(item)}" for item in report.live_probe_evidence)
     else:
         lines.append("- None.")
 
     lines.extend(["", "## Live Probe Needed", ""])
     if report.live_probe_needed:
-        lines.extend(f"- {item}" for item in report.live_probe_needed)
+        lines.extend(f"- {redact_text(item)}" for item in report.live_probe_needed)
     else:
         lines.append("- None for the supplied static evidence.")
 
@@ -1250,26 +1275,28 @@ def _analyze_command(builder: SimulationBuilder, command: str) -> None:
     builder.add_input("command", "inline")
     compact = _compact(command)
     if READ_COMMAND_RE.search(command):
-        builder.add_capability("read", "yes", "high", f"Command has read-shaped verb: `{compact}`")
+        builder.add_capability(
+            "read", "yes", "medium", f"Command has read-shaped verb: `{compact}`"
+        )
     if WRITE_COMMAND_RE.search(command):
         builder.add_capability(
-            "write", "yes", "high", f"Command has write-shaped verb: `{compact}`"
+            "write", "yes", "medium", f"Command has write-shaped verb: `{compact}`"
         )
     if SEND_COMMAND_RE.search(command):
         builder.add_capability(
-            "send", "yes", "high", f"Command has network/send-shaped verb: `{compact}`"
+            "send", "yes", "medium", f"Command has network/send-shaped verb: `{compact}`"
         )
     if DEPLOY_COMMAND_RE.search(command):
         builder.add_capability(
-            "deploy", "yes", "high", f"Command has deploy/publish-shaped verb: `{compact}`"
+            "deploy", "yes", "medium", f"Command has deploy/publish-shaped verb: `{compact}`"
         )
     if BYPASS_COMMAND_RE.search(command):
         builder.add_capability(
-            "bypass", "yes", "high", f"Command mentions approval/hook bypass: `{compact}`"
+            "bypass", "yes", "medium", f"Command mentions approval/hook bypass: `{compact}`"
         )
     if ESCALATE_COMMAND_RE.search(command):
         builder.add_capability(
-            "escalate", "yes", "high", f"Command has escalation-shaped token: `{compact}`"
+            "escalate", "yes", "medium", f"Command has escalation-shaped token: `{compact}`"
         )
     if _command_has_unresolved_destination(command):
         builder.add_gap(
@@ -1945,8 +1972,9 @@ def _analyze_workflow_environment_protection(
 def _workflow_on_value(workflow_data: dict[str, Any]) -> object:
     if "on" in workflow_data:
         return workflow_data["on"]
-    if True in workflow_data:
-        return workflow_data[True]
+    for key, value in workflow_data.items():
+        if key is True:
+            return value
     return None
 
 
@@ -2219,11 +2247,14 @@ def _references_pull_request_head(value: str) -> bool:
 
 
 def _has_non_fork_guard(value: str) -> bool:
-    normalized = re.sub(r"\s+", "", value.lower())
-    return (
-        "github.event.pull_request.head.repo.fork==false" in normalized
-        or "github.event.pull_request.head.repo.fork!=true" in normalized
-        or "!github.event.pull_request.head.repo.fork" in normalized
+    normalized = value.strip().lower()
+    if any(operator in normalized for operator in ("||", " or ", "!", "!=", "== true")):
+        return False
+    return bool(
+        re.fullmatch(
+            r"\$?\{?\{?\s*github\.event\.pull_request\.head\.repo\.fork\s*==\s*false\s*\}?\}?",
+            normalized,
+        )
     )
 
 
@@ -2589,7 +2620,7 @@ def _github_api_get_json(
         method="GET",
     )
     try:
-        with urllib.request.urlopen(request, timeout=options.timeout_seconds) as response:
+        with _open_github_request(request, options.timeout_seconds) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         raise GitHubProbeError(_github_http_error_message(exc)) from exc
@@ -2599,6 +2630,18 @@ def _github_api_get_json(
             "no mutation was attempted."
         ) from exc
     return payload if isinstance(payload, dict) else {}
+
+
+class _RejectRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[no-untyped-def]
+        raise GitHubProbeError(
+            "GitHub Actions live probe rejected an HTTP redirect; no mutation was attempted."
+        )
+
+
+def _open_github_request(request: urllib.request.Request, timeout: float) -> Any:
+    opener = urllib.request.build_opener(_RejectRedirects())
+    return opener.open(request, timeout=timeout)
 
 
 def _github_http_error_message(exc: urllib.error.HTTPError) -> str:

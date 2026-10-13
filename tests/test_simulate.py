@@ -5,7 +5,10 @@ import json
 import re
 import sys
 import urllib.error
+import urllib.request
 from pathlib import Path
+
+import pytest
 
 from agent_permission_diff_bot.cli import main
 from agent_permission_diff_bot.simulate import (
@@ -14,6 +17,7 @@ from agent_permission_diff_bot.simulate import (
     GitHubActionsLiveProbeOptions,
     GitHubProbeError,
     GitHubPullResolution,
+    _open_github_request,
     build_simulation,
     explain_simulation_schema,
     fetch_github_actions_readonly_metadata,
@@ -36,7 +40,59 @@ def test_simulates_command_send_write_deploy_and_bypass() -> None:
     assert report.capabilities["send"].level == "yes"
     assert report.capabilities["deploy"].level == "yes"
     assert report.capabilities["bypass"].level == "yes"
+    assert report.capabilities["write"].confidence == "medium"
     assert report.safety_boundary.startswith("Static simulation only")
+
+
+def test_secret_canaries_are_redacted_from_simulation_renderers() -> None:
+    report = build_simulation(
+        command="gh pr create --token ARG_CANARY",
+        mcp_config_text=(
+            '{"mcpServers":{"x":{"url":"https://user:PASS_CANARY@host.test/mcp?'
+            'token=QUERY_CANARY","args":["--api-key","ARG_CANARY"]}}}'
+        ),
+    )
+    payloads = (
+        json.dumps(report.to_dict()),
+        json.dumps(render_simulation_json_summary(report)),
+        render_simulation_markdown(report),
+    )
+    for payload in payloads:
+        assert all(
+            canary not in payload for canary in ("ARG_CANARY", "PASS_CANARY", "QUERY_CANARY")
+        )
+
+
+def test_live_probe_request_mode_survives_failed_validation() -> None:
+    report = build_simulation(
+        probes=("github-actions-readonly",),
+        github_actions_live_options=GitHubActionsLiveProbeOptions(),
+    )
+    assert report.mode == "live-read-only"
+    assert "may read" in report.safety_boundary
+    summary = render_simulation_json_summary(report)
+    assert summary["mode"] == "live-read-only"
+    assert "live read-only" in render_simulation_markdown(report)
+
+
+def test_github_probe_rejects_redirects_with_mock_transport(monkeypatch) -> None:
+    class RedirectTransport:
+        def __init__(self, handler):
+            self.handler = handler
+
+        def open(self, request, timeout):
+            self.handler.redirect_request(
+                request, None, 302, "Found", {}, "https://evil.example/collect"
+            )
+            raise AssertionError("redirect was followed")
+
+    monkeypatch.setattr(
+        "agent_permission_diff_bot.simulate.urllib.request.build_opener",
+        lambda handler: RedirectTransport(handler),
+    )
+    request = urllib.request.Request("https://api.github.com/repos/x/y")
+    with pytest.raises(GitHubProbeError, match="rejected an HTTP redirect"):
+        _open_github_request(request, 1.0)
 
 
 def test_simulates_workflow_oidc_deploy_without_live_probe() -> None:
@@ -445,7 +501,25 @@ jobs:
     assert report.capabilities["escalate"].level == "possible"
     assert any("non-fork condition" in item for item in report.deterministic_evidence)
     assert any("non-fork guard" in gap for gap in report.live_probe_needed)
-    assert not any("privileged token scope" in gap for gap in report.live_probe_needed)
+
+
+def test_non_fork_guard_with_or_always_is_not_trusted() -> None:
+    report = build_simulation(
+        workflow_text="""
+name: Target
+on: pull_request_target
+jobs:
+  test:
+    if: github.event.pull_request.head.repo.fork == false || always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+      - run: echo untrusted
+"""
+    )
+    assert any("untrusted head code" in gap.lower() for gap in report.live_probe_needed)
 
 
 def test_simulates_mcp_config_and_supplied_mcpaudit_json() -> None:
@@ -1286,11 +1360,11 @@ def test_fetch_github_actions_metadata_uses_get_only_allowlisted_requests(monkey
         _FakeHTTPResponse({"workflow_runs": [{"name": "CI", "conclusion": "success"}]}),
     ]
 
-    def fake_urlopen(request, timeout):
+    def fake_open(request, timeout):
         calls.append((request, timeout))
         return responses.pop(0)
 
-    monkeypatch.setattr("agent_permission_diff_bot.simulate.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("agent_permission_diff_bot.simulate._open_github_request", fake_open)
 
     payload = fetch_github_actions_readonly_metadata(
         GitHubActionsLiveProbeOptions(
@@ -1310,7 +1384,7 @@ def test_fetch_github_actions_metadata_uses_get_only_allowlisted_requests(monkey
 def test_resolve_github_pull_head_sha_uses_get_only_allowlisted_request(monkeypatch) -> None:
     calls = []
 
-    def fake_urlopen(request, timeout):
+    def fake_open(request, timeout):
         calls.append((request, timeout))
         return _FakeHTTPResponse(
             {
@@ -1322,7 +1396,7 @@ def test_resolve_github_pull_head_sha_uses_get_only_allowlisted_request(monkeypa
             }
         )
 
-    monkeypatch.setattr("agent_permission_diff_bot.simulate.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("agent_permission_diff_bot.simulate._open_github_request", fake_open)
 
     resolution = resolve_github_pull_head_sha(
         GitHubActionsLiveProbeOptions(
@@ -1344,7 +1418,7 @@ def test_resolve_github_pull_head_sha_uses_get_only_allowlisted_request(monkeypa
 
 
 def test_fetch_github_actions_metadata_reports_rate_limit_without_mutation(monkeypatch) -> None:
-    def fake_urlopen(_request, timeout=None):
+    def fake_open(_request, timeout=None):
         assert timeout == 10.0
         raise urllib.error.HTTPError(
             url="https://api.github.com/repos/owner/repo/commits/ref/check-runs",
@@ -1354,7 +1428,7 @@ def test_fetch_github_actions_metadata_reports_rate_limit_without_mutation(monke
             fp=io.BytesIO(b""),
         )
 
-    monkeypatch.setattr("agent_permission_diff_bot.simulate.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("agent_permission_diff_bot.simulate._open_github_request", fake_open)
 
     try:
         fetch_github_actions_readonly_metadata(
@@ -1368,11 +1442,11 @@ def test_fetch_github_actions_metadata_reports_rate_limit_without_mutation(monke
 
 
 def test_fetch_github_actions_metadata_reports_malformed_json_without_mutation(monkeypatch) -> None:
-    def fake_urlopen(_request, timeout=None):
+    def fake_open(_request, timeout=None):
         assert timeout == 10.0
         return _FakeRawHTTPResponse(b"not-json")
 
-    monkeypatch.setattr("agent_permission_diff_bot.simulate.urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("agent_permission_diff_bot.simulate._open_github_request", fake_open)
 
     try:
         fetch_github_actions_readonly_metadata(

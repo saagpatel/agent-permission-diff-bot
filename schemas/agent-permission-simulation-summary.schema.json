@@ -1,0 +1,262 @@
+{
+  "$id": "https://agent-permission-diff-bot.local/schemas/simulation-summary.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "capabilities": {
+      "additionalProperties": false,
+      "properties": {
+        "bypass": {
+          "additionalProperties": false,
+          "properties": {
+            "confidence": {
+              "type": "string"
+            },
+            "level": {
+              "enum": [
+                "yes",
+                "possible",
+                "unknown",
+                "no"
+              ]
+            }
+          },
+          "required": [
+            "level",
+            "confidence"
+          ],
+          "type": "object"
+        },
+        "deploy": {
+          "additionalProperties": false,
+          "properties": {
+            "confidence": {
+              "type": "string"
+            },
+            "level": {
+              "enum": [
+                "yes",
+                "possible",
+                "unknown",
+                "no"
+              ]
+            }
+          },
+          "required": [
+            "level",
+            "confidence"
+          ],
+          "type": "object"
+        },
+        "escalate": {
+          "additionalProperties": false,
+          "properties": {
+            "confidence": {
+              "type": "string"
+            },
+            "level": {
+              "enum": [
+                "yes",
+                "possible",
+                "unknown",
+                "no"
+              ]
+            }
+          },
+          "required": [
+            "level",
+            "confidence"
+          ],
+          "type": "object"
+        },
+        "read": {
+          "additionalProperties": false,
+          "properties": {
+            "confidence": {
+              "type": "string"
+            },
+            "level": {
+              "enum": [
+                "yes",
+                "possible",
+                "unknown",
+                "no"
+              ]
+            }
+          },
+          "required": [
+            "level",
+            "confidence"
+          ],
+          "type": "object"
+        },
+        "send": {
+          "additionalProperties": false,
+          "properties": {
+            "confidence": {
+              "type": "string"
+            },
+            "level": {
+              "enum": [
+                "yes",
+                "possible",
+                "unknown",
+                "no"
+              ]
+            }
+          },
+          "required": [
+            "level",
+            "confidence"
+          ],
+          "type": "object"
+        },
+        "write": {
+          "additionalProperties": false,
+          "properties": {
+            "confidence": {
+              "type": "string"
+            },
+            "level": {
+              "enum": [
+                "yes",
+                "possible",
+                "unknown",
+                "no"
+              ]
+            }
+          },
+          "required": [
+            "level",
+            "confidence"
+          ],
+          "type": "object"
+        }
+      },
+      "required": [
+        "read",
+        "write",
+        "send",
+        "deploy",
+        "bypass",
+        "escalate"
+      ],
+      "type": "object"
+    },
+    "input_count": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "inputs": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "enum": [
+              "command",
+              "workflow",
+              "mcp_config",
+              "mcpaudit_json",
+              "subagent",
+              "hook_policy",
+              "scenario",
+              "probe"
+            ]
+          },
+          "notes": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "source": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "source",
+          "status",
+          "notes"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "live_probe_needed": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "mode": {
+      "enum": [
+        "static/no-credential/no-network",
+        "live-read-only"
+      ]
+    },
+    "risk_facets": {
+      "additionalProperties": {
+        "additionalProperties": false,
+        "properties": {
+          "confidence": {
+            "type": "string"
+          },
+          "evidence_count": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "live_probe_needed_count": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "status": {
+            "enum": [
+              "detected",
+              "review_needed"
+            ]
+          }
+        },
+        "required": [
+          "status",
+          "confidence",
+          "evidence_count",
+          "live_probe_needed_count"
+        ],
+        "type": "object"
+      },
+      "propertyNames": {
+        "enum": [
+          "artifact_exposure",
+          "deployment_gate",
+          "pull_request_target_boundary",
+          "reusable_workflow_boundary",
+          "secret_exposure",
+          "token_inheritance"
+        ]
+      },
+      "type": "object"
+    },
+    "safety_boundary": {
+      "type": "string"
+    },
+    "schema_version": {
+      "const": "agent-permission-simulation.v1.summary.v1"
+    }
+  },
+  "required": [
+    "schema_version",
+    "mode",
+    "safety_boundary",
+    "input_count",
+    "inputs",
+    "capabilities",
+    "risk_facets",
+    "live_probe_needed"
+  ],
+  "title": "Agent Permission Simulation Summary",
+  "type": "object"
+}
