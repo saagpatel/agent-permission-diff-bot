@@ -155,6 +155,10 @@ def normalize_card(raw: RawServerCard) -> NormalizedServerCard:
         for required in ("name", "description", "version"):
             if not isinstance(card_payload.get(required), str) or not card_payload.get(required):
                 issues.append(f"Required Registry field is missing or invalid: {required}")
+    if any(
+        ".transport" in issue or ".variables" in issue or ".headers" in issue for issue in issues
+    ):
+        schema_status = "unknown"
     validity: Literal["valid", "partial", "invalid"] = "valid" if not issues else "partial"
     key = _card_key(card_payload, raw.provenance.path, family)
     return NormalizedServerCard(
@@ -204,7 +208,7 @@ def _schema_status(
     if schema_uri is None:
         return "absent"
     if not isinstance(schema_uri, str):
-        return "invalid"
+        return "unknown"
     if schema_uri == CURRENT_REGISTRY_SCHEMA or any(
         marker in schema_uri for marker in KNOWN_REGISTRY_SCHEMA_MARKERS
     ):
@@ -335,7 +339,7 @@ def _normalize_packages(builder: _FieldBuilder, packages: Any, issues: list[str]
             transports.append(transport_type)
             if isinstance(transport.get("url"), str):
                 endpoints.append(transport["url"])
-            _normalize_transport(builder, transport, f"packages[{item_key}].transport")
+            _normalize_transport(builder, transport, f"packages[{item_key}].transport", issues)
         elif transport is not None:
             issues.append(f"Package {item_key} transport must be an object")
         _normalize_inputs(
@@ -411,7 +415,7 @@ def _normalize_remotes(builder: _FieldBuilder, remotes: Any, issues: list[str]) 
         item_key = _item_key(transport_type, url)
         transports.append(transport_type)
         endpoints.append(url)
-        _normalize_transport(builder, remote, f"remotes[{item_key}]")
+        _normalize_transport(builder, remote, f"remotes[{item_key}]", issues)
         _unknown_mapping_fields(
             builder,
             remote,
@@ -454,7 +458,9 @@ def _normalize_remotes(builder: _FieldBuilder, remotes: Any, issues: list[str]) 
         )
 
 
-def _normalize_transport(builder: _FieldBuilder, transport: dict[str, Any], prefix: str) -> None:
+def _normalize_transport(
+    builder: _FieldBuilder, transport: dict[str, Any], prefix: str, issues: list[str]
+) -> None:
     for key, suffix, category in (
         ("type", "type", "transport"),
         ("url", "url", "endpoint"),
@@ -467,12 +473,16 @@ def _normalize_transport(builder: _FieldBuilder, transport: dict[str, Any], pref
                 contract="mcp_registry_server_json",
                 standard=True,
             )
-    _normalize_inputs(builder, transport.get("headers"), f"{prefix}.headers", [])
+    _normalize_inputs(builder, transport.get("headers"), f"{prefix}.headers", issues)
     variables = transport.get("variables")
-    if isinstance(variables, dict):
+    if variables is not None and not isinstance(variables, dict):
+        issues.append(f"{prefix}.variables must be an object")
+    elif isinstance(variables, dict):
         for name, value in sorted(variables.items()):
             if isinstance(value, dict):
                 _normalize_input(builder, value, f"{prefix}.variables[{name}]", name=name)
+            else:
+                issues.append(f"{prefix}.variables[{name}] must be an object")
 
 
 def _normalize_inputs(builder: _FieldBuilder, inputs: Any, prefix: str, issues: list[str]) -> None:
