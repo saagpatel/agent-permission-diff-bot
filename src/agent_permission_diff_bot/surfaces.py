@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from collections.abc import Mapping
@@ -133,8 +134,14 @@ def extract_atoms(path: str, text: str, cache: ConfigCache | None = None) -> lis
                         action="always_apply_rule",
                         verb="trust",
                         resource="alwaysApply",
-                        value=text,
+                        value=normalized,
                         path=normalized,
+                        scope=(
+                            "sha256:"
+                            + hashlib.sha256(
+                                text.encode("utf-8", errors="surrogateescape")
+                            ).hexdigest()
+                        ),
                         evidence=f"{normalized}: Cursor rule has alwaysApply: true",
                     )
                 )
@@ -151,9 +158,34 @@ def extract_atoms(path: str, text: str, cache: ConfigCache | None = None) -> lis
 
 
 def _extract_workflow_atoms(path: str, text: str) -> list[PermissionAtom]:
-    data = _load_yaml(text)
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return [
+            PermissionAtom(
+                surface="actions",
+                actor="workflow",
+                action="invalid_input",
+                verb="review",
+                resource="workflow",
+                value="parse_error",
+                path=path,
+                evidence=f"{path}: workflow YAML could not be parsed",
+            )
+        ]
     if not isinstance(data, Mapping):
-        return []
+        return [
+            PermissionAtom(
+                surface="actions",
+                actor="workflow",
+                action="invalid_input",
+                verb="review",
+                resource="workflow",
+                value="invalid_structure",
+                path=path,
+                evidence=f"{path}: workflow must contain a YAML mapping",
+            )
+        ]
 
     atoms: list[PermissionAtom] = []
     triggers = _workflow_triggers(_mapping_get(data, "on"))
@@ -162,6 +194,21 @@ def _extract_workflow_atoms(path: str, text: str) -> list[PermissionAtom]:
     atoms.extend(
         _permission_atoms(path, "workflow", data.get("permissions"), triggers, secret_refs)
     )
+    if data.get("permissions") is None:
+        atoms.append(
+            PermissionAtom(
+                surface="actions",
+                actor="workflow",
+                action="implicit_permissions",
+                verb="inherit",
+                resource="GITHUB_TOKEN",
+                value="implicit-default",
+                path=path,
+                trigger=",".join(triggers),
+                evidence="workflow omits permissions and inherits the repository default",
+                confidence="medium",
+            )
+        )
 
     jobs = data.get("jobs")
     if isinstance(jobs, Mapping):
@@ -172,6 +219,23 @@ def _extract_workflow_atoms(path: str, text: str) -> list[PermissionAtom]:
             atoms.extend(
                 _permission_atoms(path, actor, job.get("permissions"), triggers, secret_refs)
             )
+            if job.get("permissions") is None:
+                atoms.append(
+                    PermissionAtom(
+                        surface="actions",
+                        actor=actor,
+                        action="implicit_permissions",
+                        verb="inherit",
+                        resource="GITHUB_TOKEN",
+                        value="implicit-default",
+                        path=path,
+                        trigger=",".join(triggers),
+                        evidence=(
+                            f"job {job_id} omits permissions and inherits workflow permissions"
+                        ),
+                        confidence="medium",
+                    )
+                )
             atoms.extend(_runner_atoms(path, actor, job.get("runs-on"), triggers))
             atoms.extend(_environment_atoms(path, actor, job.get("environment"), triggers))
             atoms.extend(_step_atoms(path, actor, job.get("steps"), triggers, secret_refs))
@@ -333,9 +397,34 @@ def _step_atoms(
 
 
 def _extract_mcp_atoms(path: str, text: str) -> list[PermissionAtom]:
-    data = _load_json(text)
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        return [
+            PermissionAtom(
+                surface="mcp",
+                actor="mcp",
+                action="invalid_input",
+                verb="review",
+                resource="configuration",
+                value="parse_error",
+                path=path,
+                evidence=f"{path}: MCP JSON could not be parsed",
+            )
+        ]
     if not isinstance(data, Mapping):
-        return []
+        return [
+            PermissionAtom(
+                surface="mcp",
+                actor="mcp",
+                action="invalid_input",
+                verb="review",
+                resource="configuration",
+                value="invalid_structure",
+                path=path,
+                evidence=f"{path}: MCP configuration must contain a JSON object",
+            )
+        ]
     servers = data.get("mcpServers") or data.get("servers")
     if not isinstance(servers, Mapping):
         return []
@@ -362,13 +451,15 @@ def _extract_mcp_atoms(path: str, text: str) -> list[PermissionAtom]:
                     verb="connect",
                     resource="url",
                     value=url,
+                    scope=f"sha256:{hashlib.sha256(url.encode()).hexdigest()}",
                     path=path,
                     credential_keys=credential_keys,
                     egress_hosts=hosts,
-                    evidence=f"MCP server URL {url}",
+                    evidence=f"MCP server URL {_redact_url(url)}",
                 )
             )
         if command or args:
+            launch_value = _compact(f"{command} {args}".strip())
             atoms.append(
                 PermissionAtom(
                     surface="mcp",
@@ -376,11 +467,12 @@ def _extract_mcp_atoms(path: str, text: str) -> list[PermissionAtom]:
                     action="launch",
                     verb="execute",
                     resource="command",
-                    value=_compact(f"{command} {args}".strip()),
+                    value=launch_value,
+                    scope=f"sha256:{hashlib.sha256(launch_value.encode()).hexdigest()}",
                     path=path,
                     credential_keys=credential_keys,
                     egress_hosts=hosts,
-                    evidence=f"MCP launch {command} {args}".strip(),
+                    evidence=f"MCP launch {_redact_text(_compact(f'{command} {args}'.strip()))}",
                 )
             )
         for key in credential_keys:
@@ -494,6 +586,7 @@ def _extract_instruction_atoms(path: str, text: str) -> list[PermissionAtom]:
         action = "instruction_weakening"
         evidence = "instruction mentions bypassing tests/review/approval/policy-like controls"
         confidence = "high"
+    digest = hashlib.sha256(text.encode("utf-8", errors="surrogateescape")).hexdigest()
     return [
         PermissionAtom(
             surface="instructions",
@@ -503,10 +596,43 @@ def _extract_instruction_atoms(path: str, text: str) -> list[PermissionAtom]:
             resource="agent_instructions",
             value=path,
             path=path,
+            scope=f"sha256:{digest}",
             confidence=confidence,
             evidence=evidence,
         )
     ]
+
+
+def _redact_url(value: str) -> str:
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+
+    try:
+        parts = urlsplit(value)
+        query = urlencode(
+            [
+                (
+                    key,
+                    "[REDACTED]"
+                    if re.search(r"token|secret|key|password|auth", key, re.I)
+                    else val,
+                )
+                for key, val in parse_qsl(parts.query, keep_blank_values=True)
+            ]
+        )
+        host = parts.hostname or ""
+        if parts.port:
+            host = f"{host}:{parts.port}"
+        return urlunsplit((parts.scheme, host, parts.path, query, parts.fragment))
+    except ValueError:
+        return "[REDACTED URL]"
+
+
+def _redact_text(value: str) -> str:
+    value = re.sub(r"(?i)(https?://)[^/@\s]+@", r"\1[REDACTED]@", value)
+    value = re.sub(
+        r"(?i)(--?(?:token|password|secret|api-key|auth)(?:=|\s+))\S+", r"\1[REDACTED]", value
+    )
+    return re.sub(r"https?://[^\s]+", lambda match: _redact_url(match.group(0)), value)
 
 
 def _workflow_triggers(value: object) -> tuple[str, ...]:
