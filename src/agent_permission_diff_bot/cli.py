@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -60,12 +61,17 @@ from agent_permission_diff_bot.sources import (
 def main(argv: list[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
-    if args.command == "diff":
-        return _run_diff(args)
-    if args.command == "simulate":
-        return _run_simulate(args)
-    if args.command in {"server-card-diff", "mcp-server-card-diff"}:
-        return _run_server_card_diff(args)
+    try:
+        if args.command == "diff":
+            return _run_diff(args)
+        if args.command == "simulate":
+            return _run_simulate(args)
+        if args.command in {"server-card-diff", "mcp-server-card-diff"}:
+            return _run_server_card_diff(args)
+    except (OSError, subprocess.CalledProcessError) as exc:
+        detail = exc.strerror or str(exc) if isinstance(exc, OSError) else "Git operation failed"
+        print(f"agent-permission-diff: {detail or 'input/output error'}", file=sys.stderr)
+        return 2
     parser.print_help()
     return 1
 
@@ -122,7 +128,8 @@ def _run_diff(args: argparse.Namespace) -> int:
         try:
             apply_policy_file(report, Path(args.policy))
         except PolicyError as exc:
-            raise SystemExit(str(exc)) from exc
+            print(f"agent-permission-diff: {exc}", file=sys.stderr)
+            return 2
     threshold = Severity.parse(args.fail_on)
     report.gate = evaluate_gate(report, args.mode, threshold)
     if args.json:
@@ -156,7 +163,18 @@ def _run_simulate(args: argparse.Namespace) -> int:
         print(json.dumps(simulation_json_schema(args.json_schema), indent=2, sort_keys=True))
         return 0
     if args.validate_json:
-        payload = json.loads(_read_optional_text(args.validate_json) or "null")
+        try:
+            payload = json.loads(_read_optional_text(args.validate_json) or "null")
+        except json.JSONDecodeError as exc:
+            print(
+                json.dumps(
+                    {
+                        "valid": False,
+                        "errors": [f"Malformed JSON at line {exc.lineno}, column {exc.colno}."],
+                    }
+                )
+            )
+            return 2
         result = validate_simulation_json(payload, args.schema)
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0 if result["valid"] else 2
@@ -191,7 +209,18 @@ def _run_server_card_diff(args: argparse.Namespace) -> int:
         print(json.dumps(server_card_json_schema(args.json_schema), indent=2, sort_keys=True))
         return 0
     if args.validate_json:
-        payload = json.loads(_read_optional_text(args.validate_json) or "null")
+        try:
+            payload = json.loads(_read_optional_text(args.validate_json) or "null")
+        except json.JSONDecodeError as exc:
+            print(
+                json.dumps(
+                    {
+                        "valid": False,
+                        "errors": [f"Malformed JSON at line {exc.lineno}, column {exc.colno}."],
+                    }
+                )
+            )
+            return 2
         result = validate_server_card_json(payload, args.schema)
         print(json.dumps(result, indent=2, sort_keys=True))
         return 0 if result["valid"] else 2

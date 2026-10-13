@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from agent_permission_diff_bot.atomic import atomic_write_text
 from agent_permission_diff_bot.server_card_diff import RULES
 from agent_permission_diff_bot.server_card_model import ServerCardDriftReport
 
@@ -175,11 +176,11 @@ def write_server_card_json(report: ServerCardDriftReport, path: Path) -> None:
 
 
 def write_server_card_human(report: ServerCardDriftReport, path: Path) -> None:
-    path.write_text(render_server_card_human(report), encoding="utf-8")
+    atomic_write_text(path, render_server_card_human(report))
 
 
 def write_server_card_markdown(report: ServerCardDriftReport, path: Path) -> None:
-    path.write_text(render_server_card_markdown(report), encoding="utf-8")
+    atomic_write_text(path, render_server_card_markdown(report))
 
 
 def write_server_card_sarif(report: ServerCardDriftReport, path: Path) -> None:
@@ -187,7 +188,7 @@ def write_server_card_sarif(report: ServerCardDriftReport, path: Path) -> None:
 
 
 def _write_json(payload: dict[str, Any], path: Path) -> None:
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
 
 
 def _escape_table(value: str) -> str:

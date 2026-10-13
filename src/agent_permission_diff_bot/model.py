@@ -4,6 +4,8 @@ from dataclasses import asdict, dataclass, field
 from enum import IntEnum
 from typing import Any, Literal
 
+from agent_permission_diff_bot.redaction import redact_text
+
 DiffKind = Literal["added", "removed", "unchanged"]
 GateMode = Literal["observe", "warn", "enforce"]
 GateStatus = Literal["observe", "pass", "warn", "fail"]
@@ -49,7 +51,7 @@ class PermissionAtom:
     confidence: str = "high"
     evidence: str = ""
 
-    def key(self) -> tuple[str, str, str, str, str, str, str]:
+    def key(self) -> tuple[str, str, str, str, str, str, str, str, str]:
         return (
             self.surface,
             self.actor,
@@ -58,10 +60,15 @@ class PermissionAtom:
             self.resource,
             self.scope,
             self.value,
+            self.path,
+            self.trigger,
         )
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        payload["value"] = redact_text(self.value)
+        payload["evidence"] = redact_text(self.evidence)
+        return payload
 
 
 @dataclass(frozen=True)
@@ -110,8 +117,8 @@ class Finding:
             "rule_id": self.rule_id,
             "title": self.title,
             "severity": self.severity.label(),
-            "summary": self.summary,
-            "evidence": self.evidence,
+            "summary": redact_text(self.summary),
+            "evidence": [redact_text(item) for item in self.evidence],
             "changes": [change.to_dict() for change in self.changes],
             "confidence": self.confidence,
             "reviewer_decision": self.reviewer_decision,

@@ -1,0 +1,74 @@
+{
+  "$id": "https://agent-permission-diff-bot.local/schemas/simulation-contract.v1.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "capabilities": {
+      "items": {
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "default_mode": {
+      "type": "string"
+    },
+    "input_kinds": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "live_probe_boundary": {
+      "type": "string"
+    },
+    "live_probe_default": {
+      "const": "disabled"
+    },
+    "probes": {
+      "items": {
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "report_schema_version": {
+      "const": "agent-permission-simulation.v1"
+    },
+    "risk_facets": {
+      "items": {
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "safety_boundary": {
+      "type": "string"
+    },
+    "scenarios": {
+      "items": {
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "schema_version": {
+      "const": "agent-permission-simulation.contract.v1"
+    },
+    "summary_schema_version": {
+      "const": "agent-permission-simulation.v1.summary.v1"
+    }
+  },
+  "required": [
+    "schema_version",
+    "report_schema_version",
+    "summary_schema_version",
+    "default_mode",
+    "safety_boundary",
+    "capabilities",
+    "risk_facets",
+    "input_kinds",
+    "scenarios",
+    "probes",
+    "live_probe_default",
+    "live_probe_boundary"
+  ],
+  "title": "Agent Permission Simulation Contract Metadata",
+  "type": "object"
+}

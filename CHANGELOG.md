@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Fixed permission identity, incomplete scan reporting, probe boundary truthfulness, URL and
+  argument redaction, CLI validation, atomic report writes, and malformed server-card handling.
+- Pinned the development toolchain and CI actions, added mypy and aggregate `make` checks, and
+  expanded CI coverage through Python 3.14.
 - Added `server-card-diff`, an offline MCP Registry metadata and server-card examiner with
   file, directory, and local Git-ref inputs.
 - Added provenance-preserving normalization, explicit ABSENT/UNKNOWN and

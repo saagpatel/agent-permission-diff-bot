@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import subprocess
 from collections.abc import Iterable
 from pathlib import Path
@@ -11,6 +12,13 @@ from agent_permission_diff_bot.persistence import (
 )
 from agent_permission_diff_bot.surfaces import is_interesting_path
 
+MAX_INPUT_BYTES = 2 * 1024 * 1024
+INCOMPLETE_PREFIX = ".agent-permission-diff-incomplete/"
+
+
+class InputTooLargeError(ValueError):
+    pass
+
 
 def read_dir_snapshot(
     root: Path,
@@ -18,6 +26,10 @@ def read_dir_snapshot(
     config_cache: ConfigCache | None = None,
 ) -> tuple[str, dict[str, str]]:
     root = root.resolve()
+    if not root.is_dir():
+        raise FileNotFoundError(
+            f"scan root does not exist or is not a directory: {root.name or '.'}"
+        )
     files: dict[str, str] = {}
     available: dict[str, Path] = {}
     for path in root.rglob("*"):
@@ -30,9 +42,13 @@ def read_dir_snapshot(
         if project_config_kind(rel) is None and not is_interesting_path(rel):
             continue
         try:
-            files[rel] = path.read_bytes().decode("utf-8", errors="surrogateescape")
+            content = _read_bounded(path)
+            if content is None:
+                _mark_incomplete(files, rel, "input exceeds 2 MiB")
+            else:
+                files[rel] = content
         except OSError:
-            continue
+            _mark_incomplete(files, rel, "input is unreadable")
     explicit_references = set(referenced)
     references = snapshot_hook_references(files, config_cache) | explicit_references
     for rel in sorted(references):
@@ -40,11 +56,15 @@ def read_dir_snapshot(
             reference_path = available.get(rel) or _safe_reference(root, rel)
             if reference_path is not None:
                 try:
-                    files[rel] = reference_path.read_bytes().decode(
-                        "utf-8", errors="surrogateescape"
-                    )
+                    content = _read_bounded(reference_path)
+                    if content is None:
+                        _mark_incomplete(files, rel, "referenced input exceeds 2 MiB")
+                    else:
+                        files[rel] = content
                 except OSError:
-                    continue
+                    _mark_incomplete(files, rel, "referenced input is unreadable")
+            else:
+                _mark_incomplete(files, rel, "referenced input is absent")
     return str(root), files
 
 
@@ -66,15 +86,32 @@ def read_git_snapshot(
             project_config_kind(path) is None and not is_interesting_path(path)
         ):
             continue
-        content = _git_show(repo, ref, path)
+        if path not in tree_paths:
+            continue
+        try:
+            content = _git_show(repo, ref, path)
+        except InputTooLargeError:
+            _mark_incomplete(files, path, "input exceeds 2 MiB")
+            continue
         if content is not None:
             files[path] = content
+        else:
+            _mark_incomplete(files, path, "input is unreadable in the selected Git tree")
     references = snapshot_hook_references(files, config_cache) | set(referenced)
     for path in sorted(references):
         if path not in files and ".git" not in {part.lower() for part in path.split("/")}:
-            content = _git_show(repo, ref, path)
+            try:
+                content = _git_show(repo, ref, path)
+            except InputTooLargeError:
+                _mark_incomplete(files, path, "referenced input exceeds 2 MiB")
+                continue
             if content is not None:
                 files[path] = content
+            else:
+                reason = "referenced input is absent from the selected Git tree"
+                if path in tree_paths:
+                    reason = "referenced input is unreadable in the selected Git tree"
+                _mark_incomplete(files, path, reason)
     return ref, files
 
 
@@ -89,18 +126,24 @@ def _git_files(repo: Path, ref: str) -> list[str]:
 
 
 def _git_show(repo: Path, ref: str, path: str) -> str | None:
-    result = subprocess.run(
+    process = subprocess.Popen(
         ["git", "-C", str(repo), "show", f"{ref}:{path}"],
-        check=False,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
     )
-    if result.returncode != 0:
+    if process.stdout is None:
+        process.kill()
+        process.wait()
         return None
-    if isinstance(result.stdout, str):
-        # Keep compatibility with simple subprocess fakes; production subprocess
-        # calls return bytes so newline sequences and invalid UTF-8 survive intact.
-        return result.stdout
-    return result.stdout.decode("utf-8", errors="surrogateescape")
+    content = process.stdout.read(MAX_INPUT_BYTES + 1)
+    if len(content) > MAX_INPUT_BYTES:
+        process.kill()
+        process.stdout.close()
+        process.wait()
+        raise InputTooLargeError("input exceeds 2 MiB")
+    if process.wait() != 0:
+        return None
+    return content.decode("utf-8", errors="surrogateescape")
 
 
 def _run_git(repo: Path, args: list[str]) -> str:
@@ -137,3 +180,16 @@ def _safe_reference(root: Path, rel: str) -> Path | None:
         return candidate if candidate.is_file() else None
     except OSError:
         return None
+
+
+def _read_bounded(path: Path) -> str | None:
+    with path.open("rb") as stream:
+        content = stream.read(MAX_INPUT_BYTES + 1)
+    if len(content) > MAX_INPUT_BYTES:
+        return None
+    return content.decode("utf-8", errors="surrogateescape")
+
+
+def _mark_incomplete(files: dict[str, str], path: str, reason: str) -> None:
+    key = INCOMPLETE_PREFIX + hashlib.sha256(path.encode()).hexdigest()
+    files[key] = f"{path}: {reason}"

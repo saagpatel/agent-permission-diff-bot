@@ -35,7 +35,7 @@ with a composite GitHub Action for pull request scanning.
   files; analysis is static only. Startup config paths match case-insensitively, including
   nested project directories.
 
-`APD105` reports critical worm-shaped persistence when an auto-start trigger (`SessionStart`,
+`APD105` (unreleased) reports critical worm-shaped persistence when an auto-start trigger (`SessionStart`,
 VS Code `folderOpen`, Claude `statusLine`, or a Claude credential helper) newly references an
 existing executable, its referenced executable is newly added, or an existing referenced
 executable is modified and the new content carries a payload smell. Git-ref scans read startup
@@ -62,16 +62,12 @@ in config files are checked on command strings rather than unrelated settings ke
 
 **Python >= 3.11 required.**
 
-Install directly from GitHub (no PyPI release yet):
+Pin a source install to an immutable commit. The SHA below is the task's base revision; replace it
+with the full SHA for the revision you reviewed. Unreleased features are available only after that
+revision includes them:
 
 ```bash
-pip install git+https://github.com/saagpatel/agent-permission-diff-bot.git@v0.5.0
-```
-
-Or pin to a specific tag for reproducible installs:
-
-```bash
-pip install "git+https://github.com/saagpatel/agent-permission-diff-bot.git@v0.5.0"
+pip install "git+https://github.com/saagpatel/agent-permission-diff-bot.git@d778c6f711d6b77399ef29430a0e06b067c0c7f5"
 ```
 
 ## Usage
@@ -82,10 +78,10 @@ Compare two Git refs:
 agent-permission-diff diff --repo . --base-ref origin/main --head-ref HEAD
 ```
 
-Compare two directories:
+Compare two relative directories:
 
 ```bash
-agent-permission-diff diff --base-dir /tmp/base --head-dir /tmp/head --markdown report.md
+agent-permission-diff diff --base-dir base --head-dir head --markdown report.md
 ```
 
 Emit machine-readable output:
@@ -110,7 +106,7 @@ agent-permission-diff server-card-diff \
   --sarif server-card-drift.sarif
 ```
 
-The examiner also accepts directories or local Git refs, distinguishes `ABSENT` from
+The unreleased examiner also accepts directories or local Git refs, distinguishes `ABSENT` from
 `UNKNOWN`, preserves Registry/protocol/vendor provenance, and never treats declared
 metadata as observed runtime behavior. Use `server-card-diff --explain-schema` or
 `--json-schema report` for the versioned contract. See
@@ -131,11 +127,12 @@ agent-permission-diff simulate \
   --markdown simulation.md
 ```
 
-`simulate` accepts supplied static evidence only: a proposed command string, a GitHub
+By default, `simulate` accepts supplied static evidence only: a proposed command string, a GitHub
 Actions workflow snapshot, MCP config JSON, MCPAudit JSON, Claude subagent frontmatter,
-Codex/Claude hook-policy snapshot, and built-in static scenario fixtures. It does not read
-credentials, launch MCP servers, contact network endpoints, dispatch workflows, deploy, or
-run destructive probes. The JSON and Markdown outputs summarize `read`, `write`, `send`,
+Codex/Claude hook-policy snapshot, and built-in static scenario fixtures. Unless the explicit
+live GitHub Actions probe is requested, it does not read credentials or contact network endpoints.
+It never launches MCP servers, dispatches workflows, deploys, or runs destructive probes. The
+JSON and Markdown outputs summarize `read`, `write`, `send`,
 `deploy`, `bypass`, and `escalate` capabilities, confidence, deterministic evidence,
 live-probe-needed gaps, structured `risk_facets`, and the active safety boundary.
 
@@ -293,11 +290,11 @@ permissions:
   security-events: write # only needed when upload-sarif is true
 
 steps:
-  - uses: actions/checkout@v7
+  - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
     with:
       fetch-depth: 0
 
-  - uses: saagpatel/agent-permission-diff-bot@v0.5.0
+  - uses: saagpatel/agent-permission-diff-bot@d778c6f711d6b77399ef29430a0e06b067c0c7f5
     with:
       mode: observe
       upload-sarif: "false"
@@ -313,11 +310,11 @@ permissions:
   pull-requests: write # needed by some PR comment runs
 
 steps:
-  - uses: actions/checkout@v7
+  - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
     with:
       fetch-depth: 0
 
-  - uses: saagpatel/agent-permission-diff-bot@v0.5.0
+  - uses: saagpatel/agent-permission-diff-bot@d778c6f711d6b77399ef29430a0e06b067c0c7f5
     with:
       mode: observe
       comment: "true"
@@ -356,3 +353,26 @@ warning instead of masking the permission-diff result.
 | `findings-count` | Number of findings from the JSON report. |
 | `gate-status` | Gate decision status: `observe`, `pass`, `warn`, or `fail`. |
 | `gate-threshold-met` | Whether the maximum finding severity met the `fail-on` threshold. |
+
+## Status
+
+### Stack
+
+- Python 3.11 and newer; Python 3.14.8 is the pinned local development interpreter.
+- uv 0.13.0, Ruff, mypy, and pytest are pinned through `pyproject.toml` and `uv.lock`.
+
+### Known risks
+
+- Simulator inputs and reports are static unless the explicit GitHub Actions live probe is
+  requested. A live probe reads GitHub metadata and cannot prove repository policy, required
+  reviewers, secret availability, or deployment behavior.
+- Server-card reports compare declared metadata and do not establish runtime behavior.
+- CI covers Python 3.11 through 3.14; setup-python does not yet provide Python 3.15.
+- Features listed under `Unreleased` in [CHANGELOG.md](CHANGELOG.md) are not part of a
+  published release.
+
+### Next steps
+
+- Run `make setup`, `make check`, and `make build` before proposing changes.
+- Review generated JSON, SARIF, and Markdown when changing analyzer behavior or output
+  contracts.

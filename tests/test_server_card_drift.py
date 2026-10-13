@@ -11,6 +11,11 @@ import pytest
 from agent_permission_diff_bot.cli import main
 from agent_permission_diff_bot.model import Severity
 from agent_permission_diff_bot.server_card_diff import build_server_card_report
+from agent_permission_diff_bot.server_card_model import (
+    RawServerCard,
+    SourceProvenance,
+    SourceSnapshot,
+)
 from agent_permission_diff_bot.server_card_normalize import normalize_snapshot
 from agent_permission_diff_bot.server_card_reporting import (
     render_server_card_human,
@@ -136,6 +141,38 @@ def test_secret_values_never_render_in_any_output() -> None:
         assert "base-private-extension-value" not in payload
         assert "head-private-extension-value" not in payload
     assert any("[REDACTED]" in payload for payload in payloads)
+
+
+def test_non_string_schema_and_malformed_transport_are_unknown() -> None:
+    payload = {
+        "$schema": {"uri": "https://schema.example.test/server.json"},
+        "name": "io.example/server",
+        "description": "test",
+        "version": "1.0.0",
+        "remotes": [
+            {
+                "type": "streamable-http",
+                "url": "https://example.test",
+                "variables": {"token": "bad"},
+            }
+        ],
+    }
+    snapshot = SourceSnapshot(
+        label="input",
+        kind="file",
+        cards=(
+            RawServerCard(
+                provenance=SourceProvenance(
+                    kind="file", label="input", path="server.json", sha256="synthetic"
+                ),
+                text=json.dumps(payload),
+            ),
+        ),
+    )
+    card = normalize_snapshot(snapshot)[0]
+    assert card.schema_status == "unknown"
+    assert any("Unrecognized declared schema URI" in issue for issue in card.issues)
+    assert any("variables[token] must be an object" in issue for issue in card.issues)
 
 
 def test_standard_url_display_redacts_userinfo_and_query_values(tmp_path: Path) -> None:

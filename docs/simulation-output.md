@@ -5,7 +5,13 @@
 - `--json` writes the full simulation report, including capability evidence, deterministic evidence, live probe evidence, live-probe-needed gaps, and `risk_facets` with indexes back into those evidence arrays.
 - `--json-summary` writes a compact automation contract with capability levels, risk facet statuses/counts, inputs, and live-probe-needed gaps, while omitting the full evidence arrays.
 
-Both modes are static/no-credential/no-network unless an explicit live read-only probe flag is supplied.
+Both output shapes include `mode` and `safety_boundary`. When no live probe is requested,
+`mode` is `static/no-credential/no-network` and the boundary states that no credentials or
+network are used. When the explicit live GitHub Actions probe is requested, including when
+validation, token lookup, or the HTTP request fails, `mode` is `live-read-only` and the boundary
+states that a named token environment variable may be read and GET requests may be sent to
+`api.github.com`. The live probe does not mutate GitHub state, dispatch workflows, deploy, or run
+destructive probes. Supplied probe snapshots remain static inputs and do not change the mode.
 
 ## Full JSON
 
@@ -41,6 +47,7 @@ Excerpt:
 {
   "schema_version": "agent-permission-simulation.v1",
   "mode": "static/no-credential/no-network",
+  "safety_boundary": "Static simulation only: no credentials read, no network calls, no MCP server launches, no workflow dispatches, no deploys, and no destructive probes.",
   "capabilities": {
     "deploy": {
       "confidence": "medium",

@@ -17,6 +17,7 @@ from agent_permission_diff_bot.persistence import (
     persistence_findings,
     snapshot_hook_references,
 )
+from agent_permission_diff_bot.sources import INCOMPLETE_PREFIX
 from agent_permission_diff_bot.surfaces import extract_atoms
 
 
@@ -33,6 +34,8 @@ def build_report(
     head_atoms = _extract_snapshot_atoms(head_files, head_cache)
     changes = diff_atoms(base_atoms, head_atoms)
     findings = correlate(changes, head_atoms=head_atoms)
+    findings.extend(_input_quality_findings(base_atoms))
+    findings = _dedupe_findings(findings)
     return PermissionDiffReport(
         base=base_label, head=head_label, changes=changes, findings=findings
     )
@@ -41,15 +44,19 @@ def build_report(
 def diff_atoms(
     base_atoms: list[PermissionAtom], head_atoms: list[PermissionAtom]
 ) -> list[PermissionChange]:
-    base_by_key = {atom.key(): atom for atom in base_atoms}
-    head_by_key = {atom.key(): atom for atom in head_atoms}
+    base_by_key: dict[tuple[str, ...], list[PermissionAtom]] = defaultdict(list)
+    head_by_key: dict[tuple[str, ...], list[PermissionAtom]] = defaultdict(list)
+    for atom in base_atoms:
+        base_by_key[atom.key()].append(atom)
+    for atom in head_atoms:
+        head_by_key[atom.key()].append(atom)
 
     changes: list[PermissionChange] = []
-    for key, atom in sorted(head_by_key.items()):
-        if key not in base_by_key:
+    for key in sorted(set(base_by_key) | set(head_by_key)):
+        before, after = base_by_key.get(key, []), head_by_key.get(key, [])
+        for atom in after[len(before) :]:
             changes.append(PermissionChange(kind="added", atom=atom))
-    for key, atom in sorted(base_by_key.items()):
-        if key not in head_by_key:
+        for atom in before[len(after) :]:
             changes.append(PermissionChange(kind="removed", atom=atom))
     return changes
 
@@ -61,6 +68,7 @@ def correlate(
     findings: list[Finding] = []
 
     findings.extend(_single_surface_findings(added))
+    findings.extend(_input_quality_findings(head_atoms or []))
     findings.extend(_composition_findings(added))
     findings.extend(persistence_findings(changes, head_atoms=head_atoms))
     return _dedupe_findings(findings)
@@ -73,6 +81,22 @@ def _extract_snapshot_atoms(
         cache = {}
     atoms: list[PermissionAtom] = []
     for path, text in files.items():
+        if path.startswith(INCOMPLETE_PREFIX):
+            reported_path = text.split(":", 1)[0]
+            atoms.append(
+                PermissionAtom(
+                    surface="scan",
+                    actor="scanner",
+                    action="incomplete_scan",
+                    verb="review",
+                    resource="input",
+                    value=text,
+                    path=reported_path,
+                    confidence="low",
+                    evidence=f"Incomplete scan coverage: {text}",
+                )
+            )
+            continue
         atoms.extend(extract_atoms(path, text, cache))
     triggers = [atom for atom in atoms if atom.action in {"auto_hook", "folder_open_task"}]
     references = snapshot_hook_references(files, cache)
@@ -109,7 +133,25 @@ def _single_surface_findings(changes: list[PermissionChange]) -> list[Finding]:
     findings: list[Finding] = []
     for change in changes:
         atom = change.atom
-        if atom.surface == "actions" and atom.resource == "self_hosted_runner":
+        if atom.surface == "actions" and atom.action == "implicit_permissions":
+            findings.append(
+                Finding(
+                    rule_id="APD014",
+                    title="Workflow token permissions became inherited",
+                    severity=Severity.HIGH,
+                    summary=(
+                        "A workflow or job now inherits GITHUB_TOKEN permissions from its "
+                        "parent or repository defaults."
+                    ),
+                    evidence=[atom.evidence],
+                    changes=[change],
+                    confidence="medium",
+                    reviewer_decision=(
+                        "Confirm the effective repository, workflow, and job token permissions."
+                    ),
+                )
+            )
+        elif atom.surface == "actions" and atom.resource == "self_hosted_runner":
             fork_reachable = (
                 "pull_request" in atom.trigger and "pull_request.head.repo.fork" not in atom.value
             )
@@ -221,6 +263,32 @@ def _single_surface_findings(changes: list[PermissionChange]) -> list[Finding]:
                     ),
                 )
             )
+    return findings
+
+
+def _input_quality_findings(atoms: list[PermissionAtom]) -> list[Finding]:
+    findings: list[Finding] = []
+    for atom in atoms:
+        if atom.action not in {"invalid_input", "incomplete_scan"}:
+            continue
+        change = PermissionChange(kind="added", atom=atom)
+        findings.append(
+            Finding(
+                rule_id="APD013",
+                title="Permission input could not be analyzed",
+                severity=Severity.HIGH,
+                summary=(
+                    "A supported permission input is malformed or unreadable, or scan "
+                    "coverage is incomplete."
+                ),
+                evidence=[atom.evidence],
+                changes=[change],
+                confidence="low",
+                reviewer_decision=(
+                    "Repair the input and rerun the scan before relying on its gate result."
+                ),
+            )
+        )
     return findings
 
 
