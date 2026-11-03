@@ -16,7 +16,7 @@ def test_ci_workflow_runs_package_validation_matrix() -> None:
     assert '"3.13"' in text
     assert '"3.14"' in text
     assert "paths:" not in text
-    assert "astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884" in text
+    assert re.search(r"astral-sh/setup-uv@[0-9a-f]{40} # v\d+\.\d+\.\d+", text)
     assert 'version: "0.13.0"' in text
     assert "run: make check" in text
     assert "run: make build" in text
