@@ -20,7 +20,12 @@ from agent_permission_diff_bot.persistence import (
     resolve_case_insensitive_path,
     snapshot_hook_references,
 )
-from agent_permission_diff_bot.sources import INCOMPLETE_PREFIX
+from agent_permission_diff_bot.sources import (
+    INCOMPLETE_PREFIX,
+    SOURCE_STATE_COVERAGE_KEY,
+    SOURCE_STATE_DIGEST_KEY,
+    SOURCE_STATE_PREFIX,
+)
 from agent_permission_diff_bot.surfaces import extract_atoms
 
 
@@ -38,6 +43,15 @@ def build_report(
     changes = diff_atoms(base_atoms, head_atoms)
     snapshot_changed = any(
         base_files.get(path) != head_files.get(path) for path in set(base_files) | set(head_files)
+    )
+    source_coverage_incomplete = (
+        base_files.get(SOURCE_STATE_COVERAGE_KEY) == "incomplete"
+        or head_files.get(SOURCE_STATE_COVERAGE_KEY) == "incomplete"
+    )
+    snapshot_changed = (
+        snapshot_changed
+        or source_coverage_incomplete
+        or (base_files.get(SOURCE_STATE_DIGEST_KEY) != head_files.get(SOURCE_STATE_DIGEST_KEY))
     )
     findings = correlate(changes, head_atoms=head_atoms, snapshot_changed=snapshot_changed)
     findings.extend(_input_quality_findings(base_atoms))
@@ -92,6 +106,8 @@ def _extract_snapshot_atoms(
         cache = {}
     atoms: list[PermissionAtom] = []
     for path, text in files.items():
+        if path.startswith(SOURCE_STATE_PREFIX):
+            continue
         if path.startswith(INCOMPLETE_PREFIX):
             reported_path = text.split(":", 1)[0]
             atoms.append(

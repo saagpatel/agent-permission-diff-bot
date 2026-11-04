@@ -598,6 +598,18 @@ ROOT_VARIABLES = (
     "$PWD",
 )
 ROOT_MARKER = "/__apd_repo_root__"
+SENSITIVE_PATH_PARTS = {".git", ".ssh", ".aws"}
+SENSITIVE_FILE_NAMES = {".env", ".npmrc", ".netrc", ".pypirc"}
+
+
+def is_sensitive_path(path: str) -> bool:
+    """Identify credential-bearing paths before any target is matched or read."""
+    parts = PurePosixPath(path.replace("\\", "/")).parts
+    lowered = [part.casefold() for part in parts]
+    if any(part in SENSITIVE_PATH_PARTS for part in lowered):
+        return True
+    basename = lowered[-1] if lowered else ""
+    return basename in SENSITIVE_FILE_NAMES or basename.startswith(".env.")
 
 
 def referenced_paths(command: str, *, _depth: int = 0, _cwd: str = "") -> set[str]:
@@ -640,14 +652,7 @@ def referenced_paths(command: str, *, _depth: int = 0, _cwd: str = "") -> set[st
             return None
         base = cwd if working_dir is None else working_dir
         normalized = posixpath.normpath(posixpath.join("" if anchored else base or "", token))
-        candidate = PurePosixPath(normalized)
-        if (
-            normalized == ".."
-            or normalized.startswith("../")
-            or any(part.lower() in {".git", ".ssh", ".aws"} for part in candidate.parts)
-            or candidate.name in {".npmrc", ".netrc", ".pypirc", ".env"}
-            or candidate.name.startswith(".env.")
-        ):
+        if normalized == ".." or normalized.startswith("../") or is_sensitive_path(normalized):
             return None
         return normalized
 
@@ -801,7 +806,7 @@ def referenced_paths(command: str, *, _depth: int = 0, _cwd: str = "") -> set[st
         is_python = bool(re.fullmatch(r"python(?:\d+(?:\.\d+)?)?", name))
         if name not in interpreters and not is_python:
             if "/" in executable:
-                add_literal(executable)
+                add_literal(executable, segment_cwd)
             continue
         if name in {"bun", "deno"} and arguments[:1] == ["run"]:
             arguments = arguments[1:]
@@ -1013,9 +1018,11 @@ def atom_references(atom: PermissionAtom, files: Mapping[str, str] | None = None
 
 def resolve_case_insensitive_path(target: str, available_paths: Iterable[str]) -> str | None:
     """Resolve a literal target exactly or by unique casefold match."""
+    if is_sensitive_path(target):
+        return None
     available = set(available_paths)
     matches = [path for path in available if path.casefold() == target.casefold()]
-    return matches[0] if len(matches) == 1 else None
+    return matches[0] if len(matches) == 1 and not is_sensitive_path(matches[0]) else None
 
 
 def snapshot_hook_references(

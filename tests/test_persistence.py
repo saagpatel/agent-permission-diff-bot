@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 import subprocess
 from io import BytesIO
@@ -13,7 +14,13 @@ from agent_permission_diff_bot.engine import build_report
 from agent_permission_diff_bot.model import Severity
 from agent_permission_diff_bot.persistence import PROJECT_CONFIGS, referenced_paths
 from agent_permission_diff_bot.reporting import render_markdown, render_sarif
-from agent_permission_diff_bot.sources import read_dir_snapshot, read_git_snapshot
+from agent_permission_diff_bot.sources import (
+    SOURCE_STATE_COVERAGE_KEY,
+    SOURCE_STATE_DIGEST_KEY,
+    SOURCE_STATE_PREFIX,
+    read_dir_snapshot,
+    read_git_snapshot,
+)
 from agent_permission_diff_bot.surfaces import extract_atoms, is_interesting_path
 
 CASES = json.loads((Path(__file__).parent / "fixtures/persistence/cases.json").read_text())
@@ -447,7 +454,264 @@ def test_fully_mapped_mixed_hook_segments_do_not_raise_unresolved_target() -> No
     report = build_report("base", base, "head", head)
     assert any(f.rule_id == "APD007" for f in report.findings)
     assert not any(f.rule_id == "APD015" for f in report.findings)
-    assert not build_report("head", head, "head", head).findings
+
+
+def test_directory_cli_keeps_opaque_hook_visible_for_payload_only_change(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_permission_diff_bot import sources
+
+    base, head = tmp_path / "base", tmp_path / "head"
+    config = hook("npm run setup")
+    write_files(base, {".claude/settings.json": config, "other.js": "console.log('same')"})
+    write_files(head, {".claude/settings.json": config, "other.js": "console.log('same')"})
+    # Different mtimes must not make otherwise identical, fully covered trees look changed.
+    os.utime(base / "other.js", ns=(1_000_000_000, 1_000_000_000))
+    os.utime(head / "other.js", ns=(2_000_000_000, 2_000_000_000))
+    output = tmp_path / "noop.json"
+    sarif = tmp_path / "report.sarif"
+    markdown = tmp_path / "report.md"
+    args = [
+        "diff",
+        "--base-dir",
+        str(base),
+        "--head-dir",
+        str(head),
+        "--json",
+        str(output),
+        "--sarif",
+        str(sarif),
+        "--markdown",
+        str(markdown),
+    ]
+    assert main(args) == 0
+    no_op = json.loads(output.read_text())
+    assert not any(item["rule_id"] == "APD015" for item in no_op["findings"])
+    assert SOURCE_STATE_PREFIX not in output.read_text()
+
+    (head / "other.js").write_text("console.log('changed')", encoding="utf-8")
+    assert main(args) == 0
+    changed = json.loads(output.read_text())
+    assert any(item["rule_id"] == "APD015" for item in changed["findings"])
+    public_outputs = output.read_text() + sarif.read_text() + markdown.read_text()
+    assert SOURCE_STATE_PREFIX not in public_outputs
+    for snapshot_root in (base, head):
+        marker = read_dir_snapshot(snapshot_root)[1][SOURCE_STATE_DIGEST_KEY]
+        assert marker not in public_outputs
+
+    # Incomplete census coverage must fail closed even when its bounded evidence is
+    # identical at both ends; it must not silently certify an opaque startup command.
+    monkeypatch.setattr(sources, "MAX_SOURCE_STATE_BYTES", 4)
+    coverage = read_dir_snapshot(base)[1]
+    assert coverage[SOURCE_STATE_COVERAGE_KEY] == "incomplete"
+    assert (
+        main(["diff", "--base-dir", str(base), "--head-dir", str(base), "--json", str(output)]) == 0
+    )
+    incomplete = json.loads(output.read_text())
+    assert any(item["rule_id"] == "APD015" for item in incomplete["findings"])
+    assert SOURCE_STATE_PREFIX not in output.read_text()
+
+
+def test_git_cli_keeps_opaque_hook_visible_for_payload_only_change(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+
+    def git(*args: str) -> str:
+        result = subprocess.run(
+            ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True
+        )
+        return result.stdout.strip()
+
+    git("init", "-q")
+    git("config", "user.email", "test@example.invalid")
+    git("config", "user.name", "Synthetic Test")
+    (repo / ".claude").mkdir()
+    (repo / ".claude/settings.json").write_text(hook("npm run setup"), encoding="utf-8")
+    (repo / "other.js").write_text("console.log('before')", encoding="utf-8")
+    git("add", ".")
+    git("commit", "-qm", "initial synthetic files")
+    base_ref = git("rev-parse", "HEAD")
+    (repo / "other.js").write_text("console.log('after')", encoding="utf-8")
+    git("add", "other.js")
+    git("commit", "-qm", "synthetic payload update")
+    head_ref = git("rev-parse", "HEAD")
+
+    output = tmp_path / "git-report.json"
+    assert (
+        main(
+            [
+                "diff",
+                "--repo",
+                str(repo),
+                "--base-ref",
+                base_ref,
+                "--head-ref",
+                head_ref,
+                "--json",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    report = json.loads(output.read_text())
+    assert any(item["rule_id"] == "APD015" for item in report["findings"])
+    assert SOURCE_STATE_PREFIX not in output.read_text()
+
+    assert (
+        main(
+            [
+                "diff",
+                "--repo",
+                str(repo),
+                "--base-ref",
+                head_ref,
+                "--head-ref",
+                head_ref,
+                "--json",
+                str(output),
+            ]
+        )
+        == 0
+    )
+    no_op = json.loads(output.read_text())
+    assert not no_op["findings"]
+
+
+def test_casefold_dot_env_target_never_loads_synthetic_credential_file(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    sentinel = "SYNTHETIC_CREDENTIAL_SENTINEL_77d3"
+    write_files(root, {".claude/settings.json": hook("node ./.ENV"), ".env": sentinel})
+    _, snapshot = read_dir_snapshot(root)
+    assert ".env" not in snapshot
+    assert sentinel not in "\n".join(snapshot.values())
+    output = tmp_path / "credential-report.json"
+    assert (
+        main(["diff", "--base-dir", str(root), "--head-dir", str(root), "--json", str(output)]) == 0
+    )
+    assert sentinel not in output.read_text()
+
+    repo = tmp_path / "git-repo"
+    repo.mkdir()
+
+    def git(*args: str) -> str:
+        result = subprocess.run(
+            ["git", "-C", str(repo), *args], check=True, capture_output=True, text=True
+        )
+        return result.stdout.strip()
+
+    git("init", "-q")
+    git("config", "user.email", "test@example.invalid")
+    git("config", "user.name", "Synthetic Test")
+    (repo / ".claude").mkdir()
+    (repo / ".claude/settings.json").write_text(hook("node ./.ENV"), encoding="utf-8")
+    (repo / ".env").write_text(sentinel, encoding="utf-8")
+    git("add", ".")
+    git("commit", "-qm", "synthetic credential fixture")
+    _, git_snapshot = read_git_snapshot(repo, "HEAD")
+    assert ".env" not in git_snapshot
+    assert sentinel not in "\n".join(git_snapshot.values())
+    git_output = tmp_path / "git-credential-report.json"
+    ref = git("rev-parse", "HEAD")
+    assert (
+        main(
+            [
+                "diff",
+                "--repo",
+                str(repo),
+                "--base-ref",
+                ref,
+                "--head-ref",
+                ref,
+                "--json",
+                str(git_output),
+            ]
+        )
+        == 0
+    )
+    assert sentinel not in git_output.read_text()
+
+
+def test_unreadable_symlink_coverage_keeps_opaque_hook_visible_without_following(
+    tmp_path: Path,
+) -> None:
+    base, head = tmp_path / "base", tmp_path / "head"
+    config = hook("npm run setup")
+    write_files(base, {".claude/settings.json": config})
+    write_files(head, {".claude/settings.json": config})
+    outside = tmp_path / "outside.js"
+    sentinel = "SYNTHETIC_OUTSIDE_SENTINEL_94a1"
+    outside.write_text(sentinel, encoding="utf-8")
+    (head / "other.js").symlink_to(outside)
+
+    _, snapshot = read_dir_snapshot(head)
+    assert "other.js" not in snapshot
+    assert snapshot[SOURCE_STATE_COVERAGE_KEY] == "incomplete"
+    output = tmp_path / "symlink-report.json"
+    assert (
+        main(["diff", "--base-dir", str(base), "--head-dir", str(head), "--json", str(output)]) == 0
+    )
+    report_text = output.read_text()
+    report = json.loads(report_text)
+    assert any(item["rule_id"] == "APD015" for item in report["findings"])
+    assert sentinel not in report_text
+
+
+def test_directory_reader_rejects_file_swapped_to_external_symlink(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_permission_diff_bot import sources
+
+    root = tmp_path / "root"
+    config_path = root / ".claude/settings.json"
+    write_files(root, {".claude/settings.json": hook("npm run setup")})
+    outside = tmp_path / "outside.json"
+    sentinel = "SYNTHETIC_RACE_SENTINEL_319c"
+    outside.write_text(sentinel, encoding="utf-8")
+    read_bounded = sources._read_bounded
+    swapped = False
+
+    def swap_then_read(path: Path, *args: object, **kwargs: object) -> str | None:
+        nonlocal swapped
+        if path == config_path and not swapped:
+            path.unlink()
+            path.symlink_to(outside)
+            swapped = True
+        return read_bounded(path, *args, **kwargs)
+
+    monkeypatch.setattr(sources, "_read_bounded", swap_then_read)
+    _, snapshot = read_dir_snapshot(root)
+    assert swapped
+    assert config_path.as_posix() not in snapshot
+    assert sentinel not in "\n".join(snapshot.values())
+
+
+def test_env_chdir_direct_script_resolves_child_directory_in_public_reader(tmp_path: Path) -> None:
+    base, head = tmp_path / "base", tmp_path / "head"
+    config = hook("env -C sub ./setup.sh")
+    write_files(
+        base, {".claude/settings.json": config, "setup.sh": "root decoy", "sub/setup.sh": "before"}
+    )
+    write_files(
+        head, {".claude/settings.json": config, "setup.sh": "root decoy", "sub/setup.sh": "after"}
+    )
+    _, snapshot = read_dir_snapshot(head)
+    assert "sub/setup.sh" in snapshot
+    output = tmp_path / "env-c-report.json"
+    assert (
+        main(["diff", "--base-dir", str(base), "--head-dir", str(head), "--json", str(output)]) == 0
+    )
+    report = json.loads(output.read_text())
+    assert any(item["rule_id"] == "APD012" for item in report["findings"])
+    executable = next(
+        change["atom"]
+        for change in report["changes"]
+        if change["atom"]["action"] == "hook_executable"
+    )
+    assert executable["path"] == "sub/setup.sh"
+    assert (
+        main(["diff", "--base-dir", str(head), "--head-dir", str(head), "--json", str(output)]) == 0
+    )
+    assert not json.loads(output.read_text())["findings"]
 
 
 @pytest.mark.parametrize("unresolved", ["command", "missing-target"])
@@ -667,7 +931,11 @@ def test_directory_snapshot_does_not_dereference_credential_files(tmp_path: Path
         },
     )
     files = read_dir_snapshot(root)[1]
-    assert set(files) == {".claude/settings.json"}
+    assert set(files) == {
+        ".claude/settings.json",
+        f"{SOURCE_STATE_PREFIX}digest",
+        f"{SOURCE_STATE_PREFIX}coverage",
+    }
     assert any(f.rule_id == "APD011" for f in build_report("base", {}, "head", files).findings)
 
 
@@ -703,6 +971,9 @@ def test_git_snapshot_reads_referenced_payload_using_only_read_commands(
         calls.append(args)
         if args[3] == "ls-tree":
             return subprocess.CompletedProcess(args, 0, "\n".join(files), "")
+        if len(args) > 4 and args[4] == "ls-tree":
+            response = b"100644 blob " + b"a" * 40 + b"\t.claude/settings.json\0"
+            return subprocess.CompletedProcess(args, 0, response, b"")
         raise AssertionError("git show must use bounded Popen streaming")
 
     class FakeProcess:
@@ -720,8 +991,11 @@ def test_git_snapshot_reads_referenced_payload_using_only_read_commands(
 
     monkeypatch.setattr(subprocess, "run", run)
     monkeypatch.setattr(subprocess, "Popen", FakeProcess)
-    assert read_git_snapshot(Path("."), "head", [".claude/settings.json"])[1] == files
-    assert len(calls) == 3
+    snapshot = read_git_snapshot(Path("."), "head", iter([".claude/settings.json"]))[1]
+    assert all(snapshot[path] == content for path, content in files.items())
+    assert SOURCE_STATE_PREFIX + "digest" in snapshot
+    assert SOURCE_STATE_PREFIX + "coverage" in snapshot
+    assert len(calls) == 4
 
 
 def test_hook_plus_folder_open_task_correlates_without_new_script() -> None:

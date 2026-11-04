@@ -53,7 +53,14 @@ interpreter options, and clear shell wrappers including `env`, `sudo`, `cd` comm
 shell stdin scripts. VS Code `windows`/`osx`/`linux` overrides and bounded `dependsOn` task chains
 are analyzed as possible startup paths. Unique case-only target matches are correlated; collisions
 remain unresolved. Dynamic shell expansion remains unresolved and is reported as HIGH `APD015`
-whenever the snapshot changes; identical base/head snapshots remain quiet.
+when source snapshots change; complete identical base/head snapshots remain quiet. Directory and
+Git readers also compare a private bounded source-state census so payload-only changes to otherwise
+uninteresting files can keep opaque startup commands visible. The census excludes credentials and
+vendor trees, considers at most 50,000 paths and 64 MiB of directory file content (2 MiB per file),
+and never publishes its digests. Oversized, unreadable, raced, or unsafe non-vendor entries leave
+coverage incomplete; unresolved startup commands may therefore retain `APD015` even when the
+visible file snapshots are identical. This is a conservative coverage warning, not evidence that
+an excluded file was read or that an opaque command executed.
 Explicit targets can be read from vendor directories, but `.git`, credential paths, external
 paths and symlinks are excluded. Startup configs accept a leading BOM and JSONC comments and
 trailing commas. Unparseable configs produce HIGH findings; a raw `folderOpen` marker in an
