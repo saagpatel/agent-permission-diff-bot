@@ -49,13 +49,26 @@ new or modified executable produce HIGH `APD012`, without critical `APD105` unle
 `folderOpen`. Adding a formatter hook alone therefore does not fail the default critical gate.
 
 Target resolution handles literal command/args paths, known project-root variables, common
-interpreter options, and clear shell wrappers; dynamic shell expansion remains unresolved.
+interpreter options, and clear shell wrappers including `env`, `sudo`, `cd` command chains, and
+shell stdin scripts. VS Code `windows`/`osx`/`linux` overrides and bounded `dependsOn` task chains
+are analyzed as possible startup paths. Unique case-only target matches are correlated; collisions
+remain unresolved. Dynamic shell expansion remains unresolved and is reported as HIGH `APD015`
+when source snapshots change; complete identical base/head snapshots remain quiet. Directory and
+Git readers also compare a private bounded source-state census so payload-only changes to otherwise
+uninteresting files can keep opaque startup commands visible. The census excludes credentials and
+vendor trees, considers at most 50,000 paths and 64 MiB of directory file content (2 MiB per file),
+and never publishes its digests. Oversized, unreadable, raced, or unsafe non-vendor entries leave
+coverage incomplete; unresolved startup commands may therefore retain `APD015` even when the
+visible file snapshots are identical. This is a conservative coverage warning, not evidence that
+an excluded file was read or that an opaque command executed.
 Explicit targets can be read from vendor directories, but `.git`, credential paths, external
 paths and symlinks are excluded. Startup configs accept a leading BOM and JSONC comments and
-trailing commas. Unparseable or oversized configs produce HIGH findings; a raw `folderOpen`
-marker in an unparseable task config also preserves the automatic-task finding. Parsing is
-cached per snapshot, limited to 2 MiB per config, and inline executable-load analysis is capped
-at 64 KiB. Hidden Unicode is checked across all supported instruction files. Payload smells
+trailing commas. Unparseable configs produce HIGH findings; a raw `folderOpen` marker in an
+unparseable task config also preserves the automatic-task finding. Parsing is cached per
+snapshot; startup configs are limited to 32 MiB, and larger ones produce CRITICAL
+`APD013` findings. A raw `folderOpen` marker is searched across the full accepted config. Other
+inputs remain limited to 2 MiB, and inline executable-load analysis is capped at 64 KiB. Hidden
+Unicode is checked across all supported instruction files. Payload smells
 in config files are checked on command strings rather than unrelated settings keys or values.
 
 ## Installation

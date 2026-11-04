@@ -9,7 +9,7 @@ import posixpath
 import re
 import shlex
 import tomllib
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import replace
 from itertools import pairwise
 from pathlib import PurePosixPath
@@ -50,7 +50,7 @@ PAYLOAD_PATTERNS = {
         f"|\u200d(?![{_EMOJI}])"
     ),
 }
-MAX_CONFIG_BYTES = 2 * 1024 * 1024
+MAX_CONFIG_BYTES = 32 * 1024 * 1024
 MAX_INLINE_BYTES = 64 * 1024
 FOLDER_OPEN_RAW = re.compile(r'"runOn"\s*:\s*"folderopen"', re.I)
 JS_TOKEN = re.compile(
@@ -147,7 +147,7 @@ def load_project_config(path: str, text: str, cache: ConfigCache | None = None) 
 
 def _parse_project_config(path: str, text: str) -> ProjectConfig:
     if len(text.encode("utf-8", errors="surrogateescape")) > MAX_CONFIG_BYTES:
-        return ProjectConfig(error="startup config exceeds 2 MB size limit")
+        return ProjectConfig(error="startup config exceeds 32 MiB size limit")
     text = text.removeprefix("\ufeff")
     try:
         if path.lower().endswith(".toml"):
@@ -241,8 +241,13 @@ def extract_project_atoms(
     data = load_project_config(path, text, cache)
     if data.error:
         digest = hashlib.sha256(text.encode("utf-8", errors="surrogateescape")).hexdigest()
-        atoms = [_atom(path, "unparseable_config", "startup config", data.error, scope=digest)]
-        if is_task_config(path) and FOLDER_OPEN_RAW.search(text[:MAX_CONFIG_BYTES]):
+        action = (
+            "oversized_startup_config"
+            if data.error == "startup config exceeds 32 MiB size limit"
+            else "unparseable_config"
+        )
+        atoms = [_atom(path, action, "startup config", data.error, scope=digest)]
+        if is_task_config(path) and FOLDER_OPEN_RAW.search(text):
             atoms.append(
                 _atom(
                     path,
@@ -282,6 +287,75 @@ def task_command(task: Mapping) -> str:
         # Shell task commands may already contain executable and options; only quote args.
         command += " " + shlex.join(str(arg) for arg in args if isinstance(arg, (str, int)))
     return command
+
+
+def _task_command_variants(task: Mapping) -> set[str]:
+    """Return base and platform-specific command forms without running them."""
+    base_command = task_command(task)
+    variants = {base_command} if base_command else set()
+    base_args = task.get("args", [])
+    for platform in ("windows", "osx", "linux"):
+        override = task.get(platform)
+        if not isinstance(override, Mapping):
+            continue
+        command = override.get("command", task.get("command", ""))
+        if not isinstance(command, str) or not command:
+            continue
+        args = override.get("args", base_args)
+        if isinstance(args, list):
+            command += " " + shlex.join(str(arg) for arg in args if isinstance(arg, (str, int)))
+        variants.add(command)
+    return variants
+
+
+def _task_dependency_commands(path: str, data: Mapping, task: Mapping) -> tuple[set[str], bool]:
+    """Collect bounded task commands, reporting cycles or incomplete dependencies."""
+    tasks = config_tasks(path, data)
+    by_label: dict[str, Mapping] = {}
+    duplicate_labels: set[str] = set()
+    for item in tasks:
+        if not isinstance(item, Mapping):
+            continue
+        label = item.get("label")
+        if isinstance(label, str) and label:
+            if label in by_label:
+                duplicate_labels.add(label)
+            else:
+                by_label[label] = item
+    commands: set[str] = set()
+    pending: list[tuple[Mapping, frozenset[str]]] = [(task, frozenset())]
+    visited: set[int] = set()
+    incomplete = False
+    while pending:
+        if len(visited) >= 64:
+            incomplete = True
+            break
+        current, parents = pending.pop()
+        if id(current) in visited:
+            continue
+        visited.add(id(current))
+        if not isinstance(current, Mapping):
+            continue
+        commands.update(_task_command_variants(current))
+        current_label = current.get("label")
+        ancestry = parents | ({current_label} if isinstance(current_label, str) else set())
+        dependencies = current.get("dependsOn", [])
+        if isinstance(dependencies, str):
+            dependencies = [dependencies]
+        if not isinstance(dependencies, list):
+            continue
+        for label in dependencies:
+            if (
+                not isinstance(label, str)
+                or not label
+                or label in ancestry
+                or label in duplicate_labels
+                or label not in by_label
+            ):
+                incomplete = True
+            else:
+                pending.append((by_label[label], frozenset(ancestry)))
+    return commands, incomplete
 
 
 def _project_section_atoms(path: str, data: Mapping) -> list[PermissionAtom]:
@@ -347,9 +421,13 @@ def _project_section_atoms(path: str, data: Mapping) -> list[PermissionAtom]:
 def project_command_strings(path: str, data: Mapping, atoms: list[PermissionAtom]) -> list[str]:
     commands = [atom.value for atom in atoms if atom.action == "auto_hook"]
     for _, section in project_config_sections(path, data):
-        commands.extend(
-            task_command(task) for task in config_tasks(path, section) if isinstance(task, Mapping)
-        )
+        for task in config_tasks(path, section):
+            if not isinstance(task, Mapping):
+                continue
+            options = task.get("runOptions")
+            if isinstance(options, Mapping) and str(options.get("runOn")).lower() == "folderopen":
+                variants, _ = _task_dependency_commands(path, section, task)
+                commands.extend(variants)
     return commands
 
 
@@ -520,6 +598,18 @@ ROOT_VARIABLES = (
     "$PWD",
 )
 ROOT_MARKER = "/__apd_repo_root__"
+SENSITIVE_PATH_PARTS = {".git", ".ssh", ".aws"}
+SENSITIVE_FILE_NAMES = {".env", ".npmrc", ".netrc", ".pypirc"}
+
+
+def is_sensitive_path(path: str) -> bool:
+    """Identify credential-bearing paths before any target is matched or read."""
+    parts = PurePosixPath(path.replace("\\", "/")).parts
+    lowered = [part.casefold() for part in parts]
+    if any(part in SENSITIVE_PATH_PARTS for part in lowered):
+        return True
+    basename = lowered[-1] if lowered else ""
+    return basename in SENSITIVE_FILE_NAMES or basename.startswith(".env.")
 
 
 def referenced_paths(command: str, *, _depth: int = 0, _cwd: str = "") -> set[str]:
@@ -546,7 +636,7 @@ def referenced_paths(command: str, *, _depth: int = 0, _cwd: str = "") -> set[st
     paths: set[str] = set()
     cwd: str | None = _cwd
 
-    def literal(token: str) -> str | None:
+    def literal(token: str, working_dir: str | None = None) -> str | None:
         anchored = token == ROOT_MARKER or token.startswith(ROOT_MARKER + "/")
         if anchored:
             token = token[len(ROOT_MARKER) :].lstrip("/") or "."
@@ -557,23 +647,17 @@ def referenced_paths(command: str, *, _depth: int = 0, _cwd: str = "") -> set[st
             or any(char in token for char in "$|;&<>*?\n")
             or ":" in token
             or PurePosixPath(token).is_absolute()
-            or (cwd is None and not anchored)
+            or ((cwd if working_dir is None else working_dir) is None and not anchored)
         ):
             return None
-        normalized = posixpath.normpath(posixpath.join("" if anchored else cwd or "", token))
-        candidate = PurePosixPath(normalized)
-        if (
-            normalized == ".."
-            or normalized.startswith("../")
-            or any(part.lower() in {".git", ".ssh", ".aws"} for part in candidate.parts)
-            or candidate.name in {".npmrc", ".netrc", ".pypirc", ".env"}
-            or candidate.name.startswith(".env.")
-        ):
+        base = cwd if working_dir is None else working_dir
+        normalized = posixpath.normpath(posixpath.join("" if anchored else base or "", token))
+        if normalized == ".." or normalized.startswith("../") or is_sensitive_path(normalized):
             return None
         return normalized
 
-    def add_literal(token: str) -> None:
-        target = literal(token)
+    def add_literal(token: str, working_dir: str | None = None) -> None:
+        target = literal(token, working_dir)
         if target and ("/" in token or PurePosixPath(token).suffix):
             paths.add(target)
 
@@ -603,8 +687,87 @@ def referenced_paths(command: str, *, _depth: int = 0, _cwd: str = "") -> set[st
         "powershell",
     }
     for segment, connector in segments:
-        while segment and ("=" in segment[0] or segment[0] in {"env", "exec", "command", "nohup"}):
-            segment = segment[1:]
+        segment_cwd = cwd
+        segment_cwd_valid = True
+        while segment:
+            wrapper = segment[0]
+            if "=" in wrapper and not wrapper.startswith("-"):
+                segment = segment[1:]
+                continue
+            if wrapper in {"exec", "command", "nohup"}:
+                segment = segment[1:]
+                continue
+            if wrapper == "env":
+                index = 1
+                while index < len(segment):
+                    option = segment[index]
+                    if option in {"-i", "--ignore-environment", "-0", "--null"}:
+                        index += 1
+                    elif option in {"-u", "--unset", "-C", "--chdir"}:
+                        if option in {"-C", "--chdir"} and index + 1 < len(segment):
+                            candidate_cwd = literal(segment[index + 1], cwd)
+                            if candidate_cwd is not None:
+                                segment_cwd = candidate_cwd
+                            else:
+                                segment_cwd_valid = False
+                        index += 2
+                    elif option.startswith(("--unset=", "--chdir=")):
+                        if option.startswith("--chdir="):
+                            candidate_cwd = literal(option.split("=", 1)[1], cwd)
+                            if candidate_cwd is not None:
+                                segment_cwd = candidate_cwd
+                            else:
+                                segment_cwd_valid = False
+                        index += 1
+                    elif "=" in option and not option.startswith("-"):
+                        index += 1
+                    else:
+                        break
+                segment = segment[index:]
+                continue
+            if wrapper == "sudo":
+                index = 1
+                value_options = {
+                    "-u",
+                    "--user",
+                    "-g",
+                    "--group",
+                    "-h",
+                    "--host",
+                    "-p",
+                    "--prompt",
+                    "-C",
+                    "--close-from",
+                }
+                flag_options = {
+                    "-n",
+                    "--non-interactive",
+                    "-E",
+                    "--preserve-env",
+                    "-H",
+                    "--set-home",
+                    "-S",
+                    "--stdin",
+                    "-b",
+                    "--background",
+                    "-P",
+                    "--login",
+                }
+                while index < len(segment):
+                    option = segment[index]
+                    if option in flag_options:
+                        index += 1
+                    elif option in value_options:
+                        index += 2
+                    elif option.startswith(
+                        ("--user=", "--group=", "--host=", "--prompt=", "--preserve-env=")
+                    ):
+                        index += 1
+                    else:
+                        break
+                segment = segment[index:]
+                continue
+            break
         if len(segment) >= 2 and segment[:2] in (["uv", "run"], ["poetry", "run"]):
             segment = segment[2:]
         if (
@@ -621,19 +784,29 @@ def referenced_paths(command: str, *, _depth: int = 0, _cwd: str = "") -> set[st
                 continue
         if not segment:
             continue
+        if not segment_cwd_valid:
+            continue
         executable, *arguments = segment
         name = executable if executable == "." else PurePosixPath(executable).name
         if name == "cd":
-            cwd = literal(arguments[0]) if len(arguments) == 1 and connector == "&&" else None
+            cwd = (
+                literal(arguments[0], cwd)
+                if len(arguments) == 1 and connector in {"&&", ";"}
+                else None
+            )
             continue
         if name in {"source", "."}:
             if arguments:
-                add_literal(arguments[0])
+                add_literal(arguments[0], segment_cwd)
             continue
+        if name in {"sh", "bash", "zsh", "dash"}:
+            for index, token in enumerate(arguments[:-1]):
+                if token == "<":
+                    add_literal(arguments[index + 1], segment_cwd)
         is_python = bool(re.fullmatch(r"python(?:\d+(?:\.\d+)?)?", name))
         if name not in interpreters and not is_python:
             if "/" in executable:
-                add_literal(executable)
+                add_literal(executable, segment_cwd)
             continue
         if name in {"bun", "deno"} and arguments[:1] == ["run"]:
             arguments = arguments[1:]
@@ -641,19 +814,21 @@ def referenced_paths(command: str, *, _depth: int = 0, _cwd: str = "") -> set[st
         while index < len(arguments):
             token = arguments[index]
             if token in {"-c", "-lc", "-ic"} and name in {"sh", "bash", "zsh", "dash"}:
-                if _depth < 3 and index + 1 < len(arguments) and cwd is not None:
+                if _depth < 3 and index + 1 < len(arguments) and segment_cwd is not None:
                     paths.update(
-                        referenced_paths(arguments[index + 1], _depth=_depth + 1, _cwd=cwd)
+                        referenced_paths(
+                            arguments[index + 1], _depth=_depth + 1, _cwd=segment_cwd or ""
+                        )
                     )
                 break
             if token in {"-e", "--eval", "-c"}:
                 if index + 1 < len(arguments):
                     for target in _inline_file_loads(name, arguments[index + 1]):
-                        add_literal(target)
+                        add_literal(target, segment_cwd)
                 break
             if token.startswith("--eval="):
                 for target in _inline_file_loads(name, token.split("=", 1)[1]):
-                    add_literal(target)
+                    add_literal(target, segment_cwd)
                 break
             if token == "-m" and is_python:
                 break  # Module resolution is runtime-dependent.
@@ -665,7 +840,7 @@ def referenced_paths(command: str, *, _depth: int = 0, _cwd: str = "") -> set[st
                     else (arguments[index + 1] if index + 1 < len(arguments) else "")
                 )
                 if option in NODE_LOAD_OPTIONS:
-                    add_literal(value)
+                    add_literal(value, segment_cwd)
                 index += 1 if "=" in token else 2
                 continue
             if (is_python and token in PYTHON_VALUE_OPTIONS) or token.lower() == "-executionpolicy":
@@ -674,7 +849,7 @@ def referenced_paths(command: str, *, _depth: int = 0, _cwd: str = "") -> set[st
             if token.startswith("-"):
                 index += 1
                 continue
-            add_literal(token)
+            add_literal(token, segment_cwd)
             break
     return paths
 
@@ -688,32 +863,181 @@ def _config_root(path: str) -> str:
     return "" if parent == "." else parent
 
 
-def atom_references(atom: PermissionAtom) -> set[str]:
+def _has_unresolved_command_segment(command: str, *, _cwd: str = "", _depth: int = 0) -> bool:
+    """Conservatively flag any executable shell segment with no static file target."""
+    if "\n" in command:
+        return True
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
+    except ValueError:
+        return True
+    segments: list[tuple[list[str], str]] = []
+    current: list[str] = []
+    for token in tokens:
+        if token in {";", "&&", "||", "|", "&", "(", ")"}:
+            segments.append((current, token))
+            current = []
+        else:
+            current.append(token)
+    segments.append((current, ""))
+    cwd: str | None = _cwd
+    for segment, connector in segments:
+        if not segment:
+            continue
+        if segment[0] == "cd":
+            if len(segment) == 2 and connector in {";", "&&"}:
+                target = segment[1]
+                root_target = next(
+                    (
+                        ROOT_MARKER + target[len(root) :]
+                        for root in ROOT_VARIABLES
+                        if target == root or target.startswith(root + "/")
+                    ),
+                    target,
+                )
+                if root_target == ROOT_MARKER:
+                    cwd = ""
+                elif root_target.startswith(ROOT_MARKER + "/"):
+                    cwd = posixpath.normpath(root_target[len(ROOT_MARKER) + 1 :])
+                elif (
+                    target
+                    and not target.startswith(("-", "~", "$"))
+                    and not PurePosixPath(target).is_absolute()
+                    and ":" not in target
+                ):
+                    candidate = posixpath.normpath(posixpath.join(cwd or "", target))
+                    cwd = None if candidate == ".." or candidate.startswith("../") else candidate
+                else:
+                    return True
+            else:
+                return True
+            continue
+        segment_command = shlex.join(segment)
+        references = referenced_paths(segment_command, _cwd=cwd or "") if cwd is not None else set()
+        if segment[0] in {"echo", "printf", "true", "false", "pwd", ":"} and not any(
+            any(marker in token for marker in ("$", "`", "|", ";", "<", ">"))
+            for token in segment[1:]
+        ):
+            continue
+        if _depth < 3:
+            shells = {"sh", "bash", "zsh", "dash"}
+            for index in range(len(segment) - 2):
+                if (
+                    PurePosixPath(segment[index]).name in shells
+                    and segment[index + 1]
+                    in {
+                        "-c",
+                        "-lc",
+                        "-ic",
+                    }
+                    and _has_unresolved_command_segment(
+                        segment[index + 2], _cwd=cwd or "", _depth=_depth + 1
+                    )
+                ):
+                    return True
+        if not references:
+            return True
+    return False
+
+
+def atom_reference_resolution(
+    atom: PermissionAtom, files: Mapping[str, str], cache: ConfigCache | None = None
+) -> tuple[set[str], bool]:
     if atom.action == "auto_hook":
-        command = atom.value
+        return (
+            referenced_paths(atom.value, _cwd=_config_root(atom.path)),
+            _has_unresolved_command_segment(atom.value, _cwd=_config_root(atom.path)),
+        )
     elif atom.action == "folder_open_task":
         try:
             task = json.loads(atom.value)
         except ValueError:
-            return set()
+            return set(), True
         if not isinstance(task, Mapping):
-            return set()
-        command = task_command(task)
-        options = task.get("options")
-        if isinstance(options, Mapping) and isinstance(options.get("cwd"), str):
-            command = "cd " + shlex.quote(options["cwd"]) + " && " + command
+            return set(), True
+        config_text = files.get(atom.path)
+        if config_text is None:
+            return set(), True
+        config = load_project_config(atom.path, config_text, cache)
+        if config.error:
+            return set(), True
+        _, incomplete = _task_dependency_commands(atom.path, config, task)
+        paths: set[str] = set()
+        for current in _task_closure(atom.path, config, task):
+            options = current.get("options")
+            cwd = options.get("cwd") if isinstance(options, Mapping) else None
+            for command in _task_command_variants(current):
+                if isinstance(cwd, str) and cwd:
+                    command = "cd " + shlex.quote(cwd) + " && " + command
+                command_root = _config_root(atom.path)
+                paths.update(referenced_paths(command, _cwd=command_root))
+                incomplete = incomplete or _has_unresolved_command_segment(
+                    command, _cwd=command_root
+                )
+        return paths, incomplete
     else:
-        return set()
-    return referenced_paths(command, _cwd=_config_root(atom.path))
+        return set(), False
 
 
-def snapshot_hook_references(files: dict[str, str], cache: ConfigCache | None = None) -> set[str]:
+def _task_closure(path: str, data: Mapping, task: Mapping) -> list[Mapping]:
+    """Return a bounded list of tasks reachable from task, excluding cycles."""
+    tasks = config_tasks(path, data)
+    by_label: dict[str, Mapping] = {}
+    for item in tasks:
+        if isinstance(item, Mapping) and isinstance(item.get("label"), str):
+            by_label.setdefault(item["label"], item)
+    result: list[Mapping] = []
+    pending: list[tuple[Mapping, frozenset[str]]] = [(task, frozenset())]
+    visited: set[int] = set()
+    while pending and len(visited) < 64:
+        current, parents = pending.pop()
+        if id(current) in visited:
+            continue
+        visited.add(id(current))
+        result.append(current)
+        label = current.get("label")
+        ancestry = parents | ({label} if isinstance(label, str) else set())
+        dependencies = current.get("dependsOn", [])
+        if isinstance(dependencies, str):
+            dependencies = [dependencies]
+        if not isinstance(dependencies, list):
+            continue
+        for dependency in dependencies:
+            child = by_label.get(dependency) if isinstance(dependency, str) else None
+            if child is not None and dependency not in ancestry:
+                pending.append((child, frozenset(ancestry)))
+    return result
+
+
+def atom_references(atom: PermissionAtom, files: Mapping[str, str] | None = None) -> set[str]:
+    return atom_reference_resolution(atom, files or {})[0]
+
+
+def resolve_case_insensitive_path(target: str, available_paths: Iterable[str]) -> str | None:
+    """Resolve a literal target exactly or by unique casefold match."""
+    if is_sensitive_path(target):
+        return None
+    available = set(available_paths)
+    matches = [path for path in available if path.casefold() == target.casefold()]
+    return matches[0] if len(matches) == 1 and not is_sensitive_path(matches[0]) else None
+
+
+def snapshot_hook_references(
+    files: dict[str, str],
+    cache: ConfigCache | None = None,
+    available_paths: Iterable[str] | None = None,
+) -> set[str]:
+    available = files.keys() if available_paths is None else available_paths
     return {
-        target
+        resolved
         for path, text in files.items()
         if project_config_kind(path)
         for atom in extract_project_atoms(path, text, cache)
-        for target in atom_references(atom)
+        for target in atom_references(atom, files)
+        if (resolved := resolve_case_insensitive_path(target, available)) is not None
     }
 
 
@@ -754,7 +1078,10 @@ def is_auto_start(trigger: str) -> bool:
 
 
 def persistence_findings(
-    changes: list[PermissionChange], *, head_atoms: list[PermissionAtom] | None = None
+    changes: list[PermissionChange],
+    *,
+    head_atoms: list[PermissionAtom] | None = None,
+    snapshot_changed: bool = False,
 ) -> list[Finding]:
     findings: list[Finding] = []
     for change in changes:
@@ -846,9 +1173,16 @@ def persistence_findings(
                 continue
             rule, title = "APD012", "New or modified executable referenced by an agent hook or task"
             severity = Severity.HIGH
+        elif atom.action == "unresolved_startup_target":
+            # Persistent context below warns on changed snapshots without adding
+            # findings to base==head no-op comparisons.
+            continue
         elif atom.action == "unparseable_config":
             rule, title = "APD008", "Unparseable startup config"
             severity = Severity.HIGH if added else Severity.LOW
+        elif atom.action == "oversized_startup_config":
+            rule, title = "APD013", "Startup config exceeds safe analysis size"
+            severity = Severity.CRITICAL if added else Severity.LOW
         else:
             continue
         findings.append(
@@ -920,4 +1254,26 @@ def persistence_findings(
                 ),
             )
         )
+    if changes or snapshot_changed:
+        for atom in head:
+            if atom.action != "unresolved_startup_target":
+                continue
+            findings.append(
+                Finding(
+                    rule_id="APD015",
+                    title="Unresolved startup target",
+                    severity=Severity.HIGH,
+                    summary=(
+                        f"The {atom.trigger} startup command in `{atom.path}` could not be "
+                        "fully mapped to repository files."
+                    ),
+                    evidence=[atom.evidence],
+                    changes=[PermissionChange(kind="unchanged", atom=atom)],
+                    confidence=atom.confidence,
+                    reviewer_decision=(
+                        "Review the startup command and ensure its executed target is included "
+                        "in the analyzed snapshot."
+                    ),
+                )
+            )
     return findings

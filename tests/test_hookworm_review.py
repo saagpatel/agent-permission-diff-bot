@@ -527,7 +527,13 @@ def test_jsonc_linear_parser_handles_comments_trailing_commas_and_caps_size() ->
 
     oversized = '{"tasks":[],"note":"' + ("x" * (2 * 1024 * 1024)) + '"}'
     report = build_report("base", {}, "head", {".vscode/tasks.json": oversized})
-    assert any(f.severity == Severity.HIGH for f in report.findings)
+    assert not report.findings
+
+
+def test_raw_folder_open_marker_after_two_mib_is_preserved() -> None:
+    text = '{"padding":"' + ("x" * (2 * 1024 * 1024 + 64)) + '","runOn":"folderOpen"'
+    report = build_report("base", {}, "head", {".vscode/tasks.json": text})
+    assert any(f.rule_id == "APD009" for f in report.findings)
 
 
 def test_inline_parser_limits_large_code_and_contains_memory_or_recursion_failures(
