@@ -906,10 +906,8 @@ def _has_unresolved_command_segment(command: str, *, _cwd: str = "", _depth: int
                     candidate = posixpath.normpath(posixpath.join(cwd or "", target))
                     cwd = None if candidate == ".." or candidate.startswith("../") else candidate
                 else:
-                    cwd = None
                     return True
             else:
-                cwd = None
                 return True
             continue
         segment_command = shlex.join(segment)
