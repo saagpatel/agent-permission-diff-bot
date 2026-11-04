@@ -351,6 +351,10 @@ def test_shell_wrapped_hook_references_are_correlated(command: str) -> None:
     ("command", "expected"),
     [
         ("cd .claude; node setup.mjs", {".claude/setup.mjs"}),
+        (
+            "cd ${CLAUDE_PROJECT_DIR}/.claude; node setup.mjs",
+            {".claude/setup.mjs"},
+        ),
         ("env -i node .claude/setup.mjs", {".claude/setup.mjs"}),
         ("env --ignore-environment node .claude/setup.mjs", {".claude/setup.mjs"}),
         ("sudo -n node .claude/setup.mjs", {".claude/setup.mjs"}),
@@ -371,6 +375,110 @@ def test_unresolved_startup_context_survives_payload_only_swap_but_not_noop() ->
     trigger = hook("npm run setup")
     base = {config: trigger, "scripts/setup.mjs": "// old setup"}
     head = {config: trigger, "scripts/setup.mjs": "// swapped setup"}
+    report = build_report("base", base, "head", head)
+    assert any(f.rule_id == "APD015" for f in report.findings)
+    assert not build_report("head", head, "head", head).findings
+
+
+def test_mixed_hook_commands_keep_unsupported_segment_visible() -> None:
+    config = ".claude/settings.json"
+    trigger = hook("node .claude/known.js; npm run setup")
+    base = {
+        config: trigger,
+        ".claude/known.js": "// unchanged known target",
+        "other.js": "console.log('before')",
+    }
+    head = {**base, "other.js": "console.log('after')"}
+    report = build_report("base", base, "head", head)
+    assert any(f.rule_id == "APD015" for f in report.findings)
+    assert not build_report("head", head, "head", head).findings
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "env -i sh -c 'node .claude/known.js; npm run setup'",
+        "node .claude/known.js\nnpm run setup",
+    ],
+)
+def test_wrapped_or_newline_mixed_hook_commands_remain_visible(command: str) -> None:
+    config = ".claude/settings.json"
+    trigger = hook(command)
+    base = {
+        config: trigger,
+        ".claude/known.js": "// unchanged known target",
+        "other.js": "console.log('before')",
+    }
+    head = {**base, "other.js": "console.log('after')"}
+    report = build_report("base", base, "head", head)
+    assert any(f.rule_id == "APD015" for f in report.findings)
+    assert not build_report("head", head, "head", head).findings
+
+
+def test_fully_mapped_mixed_hook_segments_do_not_raise_unresolved_target() -> None:
+    config = ".claude/settings.json"
+    base = {
+        config: json.dumps(
+            {
+                "hooks": {
+                    "SessionStart": [
+                        {"hooks": [{"type": "command", "command": "node a.js; node b.js"}]}
+                    ],
+                    "PostToolUse": [{"hooks": [{"type": "command", "command": "black src"}]}],
+                }
+            }
+        ),
+        "a.js": "// startup a",
+        "b.js": "// startup b",
+    }
+    head = {
+        **base,
+        config: json.dumps(
+            {
+                "hooks": {
+                    "SessionStart": [
+                        {"hooks": [{"type": "command", "command": "node a.js; node b.js"}]}
+                    ],
+                    "PostToolUse": [{"hooks": [{"type": "command", "command": "ruff format src"}]}],
+                }
+            }
+        ),
+    }
+    report = build_report("base", base, "head", head)
+    assert any(f.rule_id == "APD007" for f in report.findings)
+    assert not any(f.rule_id == "APD015" for f in report.findings)
+    assert not build_report("head", head, "head", head).findings
+
+
+@pytest.mark.parametrize("unresolved", ["command", "missing-target"])
+def test_mixed_folder_open_dependency_coverage_remains_visible(unresolved: str) -> None:
+    path = ".vscode/tasks.json"
+    unresolved_task = (
+        {"label": "opaque", "command": "npm run setup"}
+        if unresolved == "command"
+        else {"label": "opaque", "command": "node scripts/missing.js"}
+    )
+    config = json.dumps(
+        {
+            "tasks": [
+                {
+                    "label": "open",
+                    "command": "node scripts/open.js",
+                    "runOptions": {"runOn": "folderOpen"},
+                    "dependsOn": ["known", "opaque"],
+                },
+                {"label": "known", "command": "node scripts/known.js"},
+                unresolved_task,
+            ]
+        }
+    )
+    base = {
+        path: config,
+        "scripts/open.js": "// known folder-open target",
+        "scripts/known.js": "// unchanged known target",
+        "other.js": "console.log('before')",
+    }
+    head = {**base, "other.js": "console.log('after')"}
     report = build_report("base", base, "head", head)
     assert any(f.rule_id == "APD015" for f in report.findings)
     assert not build_report("head", head, "head", head).findings
@@ -574,7 +682,9 @@ def test_existing_binary_payload_change_is_correlated(tmp_path: Path) -> None:
     assert (
         main(["diff", "--base-dir", str(base), "--head-dir", str(head), "--json", str(output)]) == 0
     )
-    assert any(f["rule_id"] == "APD105" for f in json.loads(output.read_text())["findings"])
+    output_findings = json.loads(output.read_text())["findings"]
+    assert any(f["rule_id"] == "APD105" for f in output_findings)
+    assert not any(f["rule_id"] == "APD015" for f in output_findings)
     executable = next(
         c
         for c in json.loads(output.read_text())["changes"]

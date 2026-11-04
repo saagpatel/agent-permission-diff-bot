@@ -858,11 +858,96 @@ def _config_root(path: str) -> str:
     return "" if parent == "." else parent
 
 
+def _has_unresolved_command_segment(command: str, *, _cwd: str = "", _depth: int = 0) -> bool:
+    """Conservatively flag any executable shell segment with no static file target."""
+    if "\n" in command:
+        return True
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        tokens = list(lexer)
+    except ValueError:
+        return True
+    segments: list[tuple[list[str], str]] = []
+    current: list[str] = []
+    for token in tokens:
+        if token in {";", "&&", "||", "|", "&", "(", ")"}:
+            segments.append((current, token))
+            current = []
+        else:
+            current.append(token)
+    segments.append((current, ""))
+    cwd: str | None = _cwd
+    for segment, connector in segments:
+        if not segment:
+            continue
+        if segment[0] == "cd":
+            if len(segment) == 2 and connector in {";", "&&"}:
+                target = segment[1]
+                root_target = next(
+                    (
+                        ROOT_MARKER + target[len(root) :]
+                        for root in ROOT_VARIABLES
+                        if target == root or target.startswith(root + "/")
+                    ),
+                    target,
+                )
+                if root_target == ROOT_MARKER:
+                    cwd = ""
+                elif root_target.startswith(ROOT_MARKER + "/"):
+                    cwd = posixpath.normpath(root_target[len(ROOT_MARKER) + 1 :])
+                elif (
+                    target
+                    and not target.startswith(("-", "~", "$"))
+                    and not PurePosixPath(target).is_absolute()
+                    and ":" not in target
+                ):
+                    candidate = posixpath.normpath(posixpath.join(cwd or "", target))
+                    cwd = None if candidate == ".." or candidate.startswith("../") else candidate
+                else:
+                    cwd = None
+                    return True
+            else:
+                cwd = None
+                return True
+            continue
+        segment_command = shlex.join(segment)
+        references = referenced_paths(segment_command, _cwd=cwd or "") if cwd is not None else set()
+        if segment[0] in {"echo", "printf", "true", "false", "pwd", ":"} and not any(
+            any(marker in token for marker in ("$", "`", "|", ";", "<", ">"))
+            for token in segment[1:]
+        ):
+            continue
+        if _depth < 3:
+            shells = {"sh", "bash", "zsh", "dash"}
+            for index in range(len(segment) - 2):
+                if (
+                    PurePosixPath(segment[index]).name in shells
+                    and segment[index + 1]
+                    in {
+                        "-c",
+                        "-lc",
+                        "-ic",
+                    }
+                    and _has_unresolved_command_segment(
+                        segment[index + 2], _cwd=cwd or "", _depth=_depth + 1
+                    )
+                ):
+                    return True
+        if not references:
+            return True
+    return False
+
+
 def atom_reference_resolution(
     atom: PermissionAtom, files: Mapping[str, str], cache: ConfigCache | None = None
 ) -> tuple[set[str], bool]:
     if atom.action == "auto_hook":
-        return referenced_paths(atom.value, _cwd=_config_root(atom.path)), False
+        return (
+            referenced_paths(atom.value, _cwd=_config_root(atom.path)),
+            _has_unresolved_command_segment(atom.value, _cwd=_config_root(atom.path)),
+        )
     elif atom.action == "folder_open_task":
         try:
             task = json.loads(atom.value)
@@ -884,7 +969,11 @@ def atom_reference_resolution(
             for command in _task_command_variants(current):
                 if isinstance(cwd, str) and cwd:
                     command = "cd " + shlex.quote(cwd) + " && " + command
-                paths.update(referenced_paths(command, _cwd=_config_root(atom.path)))
+                command_root = _config_root(atom.path)
+                paths.update(referenced_paths(command, _cwd=command_root))
+                incomplete = incomplete or _has_unresolved_command_segment(
+                    command, _cwd=command_root
+                )
         return paths, incomplete
     else:
         return set(), False

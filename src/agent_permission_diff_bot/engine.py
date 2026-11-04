@@ -113,6 +113,9 @@ def _extract_snapshot_atoms(
     references = snapshot_hook_references(files, cache, files.keys())
     for trigger in triggers:
         trigger_references, incomplete = atom_reference_resolution(trigger, files, cache)
+        unresolved_references = any(
+            resolve_case_insensitive_path(target, files) is None for target in trigger_references
+        )
         resolved_targets = {
             resolved
             for target in trigger_references
@@ -139,7 +142,7 @@ def _extract_snapshot_atoms(
                 )
             )
         if (trigger.action == "folder_open_task" or is_auto_start(trigger.trigger)) and (
-            incomplete or not resolved_targets
+            incomplete or unresolved_references or not resolved_targets
         ):
             atoms.append(
                 PermissionAtom(
