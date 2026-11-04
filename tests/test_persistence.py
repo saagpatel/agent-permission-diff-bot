@@ -168,6 +168,7 @@ def test_claude_optins_env_helpers_plugins_marketplaces() -> None:
         "environment",
         "plugin",
         "auto_hook",
+        "unresolved_startup_target",
     }
     assert "do-not-copy-secret" not in json.dumps(report.to_dict())
     assert all(f.severity >= Severity.MEDIUM for f in report.findings)
@@ -344,6 +345,163 @@ def test_inline_reads_and_json_data_loads_are_not_executable_references() -> Non
 def test_shell_wrapped_hook_references_are_correlated(command: str) -> None:
     head = {".claude/settings.json": hook(command), ".claude/setup.mjs": "// inert"}
     assert any(f.rule_id == "APD105" for f in build_report("base", {}, "head", head).findings)
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("cd .claude; node setup.mjs", {".claude/setup.mjs"}),
+        ("env -i node .claude/setup.mjs", {".claude/setup.mjs"}),
+        ("env --ignore-environment node .claude/setup.mjs", {".claude/setup.mjs"}),
+        ("sudo -n node .claude/setup.mjs", {".claude/setup.mjs"}),
+        ("sh < .claude/setup.mjs", {".claude/setup.mjs"}),
+        ("env -C sub node a.js; node b.js", {"sub/a.js", "b.js"}),
+    ],
+)
+def test_remaining_shell_startup_forms_resolve_literally(command: str, expected: set[str]) -> None:
+    assert referenced_paths(command) == expected
+
+
+def test_dynamic_env_chdir_remains_unresolved() -> None:
+    assert not referenced_paths("env -C $STARTUP_DIR node setup.mjs")
+
+
+def test_unresolved_startup_context_survives_payload_only_swap_but_not_noop() -> None:
+    config = ".claude/settings.json"
+    trigger = hook("npm run setup")
+    base = {config: trigger, "scripts/setup.mjs": "// old setup"}
+    head = {config: trigger, "scripts/setup.mjs": "// swapped setup"}
+    report = build_report("base", base, "head", head)
+    assert any(f.rule_id == "APD015" for f in report.findings)
+    assert not build_report("head", head, "head", head).findings
+
+
+def test_unambiguous_case_only_target_is_correlated() -> None:
+    head = {
+        ".claude/settings.json": hook("node .claude/Setup.mjs"),
+        ".CLAUDE/setup.mjs": "// inert",
+    }
+    report = build_report("base", {}, "head", head)
+    assert any(f.rule_id == "APD105" for f in report.findings)
+
+
+def test_ambiguous_casefold_target_keeps_unresolved_finding() -> None:
+    head = {
+        ".claude/settings.json": hook("node .claude/Setup.mjs"),
+        ".CLAUDE/setup.mjs": "// inert upper",
+        ".Claude/setup.mjs": "// inert mixed",
+    }
+    report = build_report("base", {}, "head", head)
+    assert any(f.rule_id == "APD015" for f in report.findings)
+    assert not any(f.rule_id == "APD105" for f in report.findings)
+
+
+def test_exact_target_with_casefold_collision_is_still_ambiguous() -> None:
+    head = {
+        ".claude/settings.json": hook("node .claude/setup.mjs"),
+        ".claude/setup.mjs": "// exact spelling",
+        ".CLAUDE/setup.mjs": "// colliding case variant",
+    }
+    report = build_report("base", {}, "head", head)
+    assert any(f.rule_id == "APD015" for f in report.findings)
+    assert not any(f.rule_id == "APD105" for f in report.findings)
+
+
+def test_folder_open_platform_override_and_dependency_payload_swap_correlate() -> None:
+    config = ".vscode/tasks.json"
+    tasks = {
+        "version": "2.0.0",
+        "tasks": [
+            {
+                "label": "open",
+                "type": "shell",
+                "command": "echo ready",
+                "runOptions": {"runOn": "folderOpen"},
+                "dependsOn": ["bootstrap"],
+            },
+            {
+                "label": "bootstrap",
+                "type": "process",
+                "command": "node",
+                "args": ["scripts/base.mjs"],
+                "linux": {"args": ["scripts/linux.mjs"]},
+                "osx": {"command": "node scripts/mac.mjs"},
+            },
+        ],
+    }
+    serialized = json.dumps(tasks)
+    base = {
+        config: serialized,
+        "scripts/base.mjs": "// base before",
+        "scripts/linux.mjs": "// linux before",
+        "scripts/mac.mjs": "// mac before",
+    }
+    head = {
+        config: serialized,
+        "scripts/base.mjs": "// base after",
+        "scripts/linux.mjs": "// linux after",
+        "scripts/mac.mjs": "// mac after",
+    }
+    report = build_report("base", base, "head", head)
+    assert any(f.rule_id == "APD012" for f in report.findings)
+    paths = {
+        change.atom.path
+        for change in report.changes
+        if change.atom.action == "hook_executable" and change.kind == "added"
+    }
+    assert paths == {"scripts/base.mjs", "scripts/linux.mjs", "scripts/mac.mjs"}
+
+
+@pytest.mark.parametrize("dependency_mode", ["cycle", "missing", "limit"])
+def test_folder_open_dependency_gaps_are_visible_and_bounded(dependency_mode: str) -> None:
+    tasks = [{"label": "open", "command": "echo ready", "runOptions": {"runOn": "folderOpen"}}]
+    if dependency_mode == "cycle":
+        tasks[0]["dependsOn"] = ["child"]
+        tasks.append({"label": "child", "command": "echo child", "dependsOn": ["open"]})
+    elif dependency_mode == "missing":
+        tasks[0]["dependsOn"] = ["not-present"]
+    else:
+        tasks[0]["dependsOn"] = [f"task-{index}" for index in range(65)]
+        tasks.extend({"label": f"task-{index}", "command": "echo task"} for index in range(65))
+    path = ".vscode/tasks.json"
+    config = json.dumps({"version": "2.0.0", "tasks": tasks})
+    report = build_report("base", {}, "head", {path: config})
+    assert any(f.rule_id == "APD015" for f in report.findings)
+
+
+def test_large_startup_config_and_late_raw_folder_open_marker_are_analyzed(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "head"
+    root.mkdir()
+    padding = "x" * (2 * 1024 * 1024 + 128)
+    task_config = (
+        '{"padding":"' + padding + '","tasks":[{"label":"open","command":"node setup.js",'
+        '"runOptions":{"runOn":"folderOpen"}}]}'
+    )
+    (root / ".vscode").mkdir()
+    (root / ".vscode/tasks.json").write_text(task_config)
+    (root / "setup.js").write_text("// inert")
+    files = read_dir_snapshot(root)[1]
+    assert ".vscode/tasks.json" in files
+    report = build_report("base", {}, "head", files)
+    assert any(f.rule_id == "APD009" for f in report.findings)
+    assert any(f.rule_id == "APD105" for f in report.findings)
+
+
+def test_oversized_startup_config_is_critical_and_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from agent_permission_diff_bot import sources
+
+    monkeypatch.setattr(sources, "MAX_CONFIG_INPUT_BYTES", 32)
+    root = tmp_path / "head"
+    root.mkdir()
+    (root / ".vscode").mkdir()
+    (root / ".vscode/tasks.json").write_text('{"tasks":[]}' + " " * 64)
+    files = read_dir_snapshot(root)[1]
+    report = build_report("base", {}, "head", files)
+    assert any(f.rule_id == "APD013" and f.severity == Severity.CRITICAL for f in report.findings)
 
 
 def write_files(root: Path, files: dict[str, str]) -> None:

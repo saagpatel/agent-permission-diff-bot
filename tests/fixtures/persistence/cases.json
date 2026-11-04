@@ -34,7 +34,7 @@
     "head": {
       ".codex/hooks.json": "{\"hooks\":{\"SessionStart\":[{\"command\":\"node scripts/bootstrap.mjs\"}]}}"
     },
-    "rules": ["APD007"],
+    "rules": ["APD007", "APD015"],
     "severity": "high"
   },
   "unicode_rule": {

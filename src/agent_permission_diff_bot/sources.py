@@ -8,11 +8,13 @@ from pathlib import Path
 from agent_permission_diff_bot.persistence import (
     ConfigCache,
     project_config_kind,
+    resolve_case_insensitive_path,
     snapshot_hook_references,
 )
 from agent_permission_diff_bot.surfaces import is_interesting_path
 
 MAX_INPUT_BYTES = 2 * 1024 * 1024
+MAX_CONFIG_INPUT_BYTES = 32 * 1024 * 1024
 INCOMPLETE_PREFIX = ".agent-permission-diff-incomplete/"
 
 
@@ -36,35 +38,43 @@ def read_dir_snapshot(
         if not path.is_file() or path.is_symlink() or not path.resolve().is_relative_to(root):
             continue
         rel = path.relative_to(root).as_posix()
-        if _is_vendor_path(rel) or ".git" in {part.lower() for part in rel.split("/")}:
+        if ".git" in {part.lower() for part in rel.split("/")}:
             continue
         available[rel] = path
+        if _is_vendor_path(rel):
+            continue
         if project_config_kind(rel) is None and not is_interesting_path(rel):
             continue
         try:
-            content = _read_bounded(path)
+            limit = MAX_CONFIG_INPUT_BYTES if project_config_kind(rel) else MAX_INPUT_BYTES
+            content = _read_bounded(path, limit)
             if content is None:
-                _mark_incomplete(files, rel, "input exceeds 2 MiB")
+                _mark_incomplete(files, rel, _too_large_reason(limit))
             else:
                 files[rel] = content
         except OSError:
             _mark_incomplete(files, rel, "input is unreadable")
     explicit_references = set(referenced)
-    references = snapshot_hook_references(files, config_cache) | explicit_references
+    references = (
+        snapshot_hook_references(files, config_cache, available.keys()) | explicit_references
+    )
     for rel in sorted(references):
         if rel not in files and ".git" not in {part.lower() for part in rel.split("/")}:
-            reference_path = available.get(rel) or _safe_reference(root, rel)
+            actual_rel = resolve_case_insensitive_path(rel, available)
+            reference_path = available.get(actual_rel) if actual_rel is not None else None
+            reference_path = reference_path or _safe_reference(root, rel)
+            snapshot_rel = actual_rel or rel
             if reference_path is not None:
                 try:
-                    content = _read_bounded(reference_path)
+                    content = _read_bounded(reference_path, MAX_INPUT_BYTES)
                     if content is None:
-                        _mark_incomplete(files, rel, "referenced input exceeds 2 MiB")
+                        _mark_incomplete(files, snapshot_rel, "referenced input exceeds 2 MiB")
                     else:
-                        files[rel] = content
+                        files[snapshot_rel] = content
                 except OSError:
-                    _mark_incomplete(files, rel, "referenced input is unreadable")
+                    _mark_incomplete(files, snapshot_rel, "referenced input is unreadable")
             else:
-                _mark_incomplete(files, rel, "referenced input is absent")
+                _mark_incomplete(files, snapshot_rel, "referenced input is absent")
     return str(root), files
 
 
@@ -89,19 +99,20 @@ def read_git_snapshot(
         if path not in tree_paths:
             continue
         try:
-            content = _git_show(repo, ref, path)
+            limit = MAX_CONFIG_INPUT_BYTES if project_config_kind(path) else MAX_INPUT_BYTES
+            content = _git_show(repo, ref, path, limit)
         except InputTooLargeError:
-            _mark_incomplete(files, path, "input exceeds 2 MiB")
+            _mark_incomplete(files, path, _too_large_reason(limit))
             continue
         if content is not None:
             files[path] = content
         else:
             _mark_incomplete(files, path, "input is unreadable in the selected Git tree")
-    references = snapshot_hook_references(files, config_cache) | set(referenced)
+    references = snapshot_hook_references(files, config_cache, tree_paths) | set(referenced)
     for path in sorted(references):
         if path not in files and ".git" not in {part.lower() for part in path.split("/")}:
             try:
-                content = _git_show(repo, ref, path)
+                content = _git_show(repo, ref, path, MAX_INPUT_BYTES)
             except InputTooLargeError:
                 _mark_incomplete(files, path, "referenced input exceeds 2 MiB")
                 continue
@@ -125,7 +136,7 @@ def _git_files(repo: Path, ref: str) -> list[str]:
     return [line.strip() for line in output.splitlines() if line.strip()]
 
 
-def _git_show(repo: Path, ref: str, path: str) -> str | None:
+def _git_show(repo: Path, ref: str, path: str, max_bytes: int = MAX_INPUT_BYTES) -> str | None:
     process = subprocess.Popen(
         ["git", "-C", str(repo), "show", f"{ref}:{path}"],
         stdout=subprocess.PIPE,
@@ -135,12 +146,12 @@ def _git_show(repo: Path, ref: str, path: str) -> str | None:
         process.kill()
         process.wait()
         return None
-    content = process.stdout.read(MAX_INPUT_BYTES + 1)
-    if len(content) > MAX_INPUT_BYTES:
+    content = process.stdout.read(max_bytes + 1)
+    if len(content) > max_bytes:
         process.kill()
         process.stdout.close()
         process.wait()
-        raise InputTooLargeError("input exceeds 2 MiB")
+        raise InputTooLargeError(_too_large_reason(max_bytes))
     if process.wait() != 0:
         return None
     return content.decode("utf-8", errors="surrogateescape")
@@ -182,10 +193,10 @@ def _safe_reference(root: Path, rel: str) -> Path | None:
         return None
 
 
-def _read_bounded(path: Path) -> str | None:
+def _read_bounded(path: Path, max_bytes: int = MAX_INPUT_BYTES) -> str | None:
     with path.open("rb") as stream:
-        content = stream.read(MAX_INPUT_BYTES + 1)
-    if len(content) > MAX_INPUT_BYTES:
+        content = stream.read(max_bytes + 1)
+    if len(content) > max_bytes:
         return None
     return content.decode("utf-8", errors="surrogateescape")
 
@@ -193,3 +204,7 @@ def _read_bounded(path: Path) -> str | None:
 def _mark_incomplete(files: dict[str, str], path: str, reason: str) -> None:
     key = INCOMPLETE_PREFIX + hashlib.sha256(path.encode()).hexdigest()
     files[key] = f"{path}: {reason}"
+
+
+def _too_large_reason(limit: int) -> str:
+    return "input exceeds 32 MiB" if limit == MAX_CONFIG_INPUT_BYTES else "input exceeds 2 MiB"

@@ -12,9 +12,12 @@ from agent_permission_diff_bot.model import (
 )
 from agent_permission_diff_bot.persistence import (
     ConfigCache,
-    atom_references,
+    atom_reference_resolution,
     extract_payload_atoms,
+    is_auto_start,
     persistence_findings,
+    project_config_kind,
+    resolve_case_insensitive_path,
     snapshot_hook_references,
 )
 from agent_permission_diff_bot.sources import INCOMPLETE_PREFIX
@@ -33,7 +36,10 @@ def build_report(
     base_atoms = _extract_snapshot_atoms(base_files, base_cache)
     head_atoms = _extract_snapshot_atoms(head_files, head_cache)
     changes = diff_atoms(base_atoms, head_atoms)
-    findings = correlate(changes, head_atoms=head_atoms)
+    snapshot_changed = any(
+        base_files.get(path) != head_files.get(path) for path in set(base_files) | set(head_files)
+    )
+    findings = correlate(changes, head_atoms=head_atoms, snapshot_changed=snapshot_changed)
     findings.extend(_input_quality_findings(base_atoms))
     findings = _dedupe_findings(findings)
     return PermissionDiffReport(
@@ -62,7 +68,10 @@ def diff_atoms(
 
 
 def correlate(
-    changes: list[PermissionChange], *, head_atoms: list[PermissionAtom] | None = None
+    changes: list[PermissionChange],
+    *,
+    head_atoms: list[PermissionAtom] | None = None,
+    snapshot_changed: bool = False,
 ) -> list[Finding]:
     added = [change for change in changes if change.kind == "added"]
     findings: list[Finding] = []
@@ -70,7 +79,9 @@ def correlate(
     findings.extend(_single_surface_findings(added))
     findings.extend(_input_quality_findings(head_atoms or []))
     findings.extend(_composition_findings(added))
-    findings.extend(persistence_findings(changes, head_atoms=head_atoms))
+    findings.extend(
+        persistence_findings(changes, head_atoms=head_atoms, snapshot_changed=snapshot_changed)
+    )
     return _dedupe_findings(findings)
 
 
@@ -99,11 +110,15 @@ def _extract_snapshot_atoms(
             continue
         atoms.extend(extract_atoms(path, text, cache))
     triggers = [atom for atom in atoms if atom.action in {"auto_hook", "folder_open_task"}]
-    references = snapshot_hook_references(files, cache)
+    references = snapshot_hook_references(files, cache, files.keys())
     for trigger in triggers:
-        for target in sorted(atom_references(trigger) & references):
-            if target not in files:
-                continue
+        trigger_references, incomplete = atom_reference_resolution(trigger, files, cache)
+        resolved_targets = {
+            resolved
+            for target in trigger_references
+            if (resolved := resolve_case_insensitive_path(target, files)) is not None
+        }
+        for target in sorted(resolved_targets & references):
             payload = files[target]
             digest = hashlib.sha256(payload.encode("utf-8", errors="surrogateescape")).hexdigest()
             atoms.append(
@@ -120,6 +135,26 @@ def _extract_snapshot_atoms(
                     evidence=(
                         f"{trigger.path}: {target} is referenced by {trigger.trigger}: "
                         f"{trigger.value} (sha256:{digest})"
+                    ),
+                )
+            )
+        if (trigger.action == "folder_open_task" or is_auto_start(trigger.trigger)) and (
+            incomplete or not resolved_targets
+        ):
+            atoms.append(
+                PermissionAtom(
+                    surface=trigger.surface,
+                    actor=trigger.actor,
+                    action="unresolved_startup_target",
+                    verb="review",
+                    resource="startup target",
+                    value=trigger.value,
+                    path=trigger.path,
+                    trigger=trigger.trigger,
+                    confidence="medium",
+                    evidence=(
+                        f"{trigger.path}: {trigger.trigger} startup command has no fully "
+                        "resolved static target"
                     ),
                 )
             )
@@ -272,13 +307,21 @@ def _input_quality_findings(atoms: list[PermissionAtom]) -> list[Finding]:
         if atom.action not in {"invalid_input", "incomplete_scan"}:
             continue
         change = PermissionChange(kind="added", atom=atom)
+        oversized_startup_config = (
+            atom.action == "incomplete_scan"
+            and "exceeds 32 MiB" in atom.value
+            and project_config_kind(atom.path) is not None
+        )
         findings.append(
             Finding(
                 rule_id="APD013",
                 title="Permission input could not be analyzed",
-                severity=Severity.HIGH,
+                severity=Severity.CRITICAL if oversized_startup_config else Severity.HIGH,
                 summary=(
-                    "A supported permission input is malformed or unreadable, or scan "
+                    "A startup configuration exceeds the safe analysis size and may hide "
+                    "automatic execution."
+                    if oversized_startup_config
+                    else "A supported permission input is malformed or unreadable, or scan "
                     "coverage is incomplete."
                 ),
                 evidence=[atom.evidence],
