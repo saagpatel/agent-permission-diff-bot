@@ -72,7 +72,7 @@ pasted anywhere else.
    - Where can this GitHub App be installed: **Only on this account**.
    - Click **Create GitHub App** and note the **App ID** at the top of the next page.
 
-4. **Generate a private key** on the same page (Private keys → Generate a private key).
+4. **Generate a private key** in the App's settings: **Credentials** → **Key pairs** → **New key**.
    Move the downloaded `.pem` next to the secret and lock it down:
 
    ```bash
