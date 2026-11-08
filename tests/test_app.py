@@ -250,16 +250,28 @@ def test_padding_a_pr_with_agent_files_cannot_hide_a_settings_change() -> None:
     assert "Bash(git *)" in body
 
 
-def test_a_crashed_check_never_reads_as_all_clear(monkeypatch: pytest.MonkeyPatch) -> None:
-    def boom(*args: object) -> object:
-        raise RuntimeError("synthetic crash")
+def test_an_analysis_that_exceeds_its_limits_never_reads_as_all_clear() -> None:
+    from agent_permission_diff_bot.app.analysis import AnalysisLimits
 
-    monkeypatch.setattr("agent_permission_diff_bot.app.pipeline.run_config_guard", boom)
-    replayer = run("clean")
+    replayer = Replayer(Recording.load(FIXTURES / "clean"), limits=AnalysisLimits(timeout_s=0.001))
+    assert replayer.send() == 202
     assert conclusions(replayer)["Agent Config Guard"] == "failure"
     [body] = bot_comments(replayer)
     assert "did not finish" in body
     assert "No new agent permission widening" not in body
+
+
+def test_analysis_results_survive_the_round_trip_through_the_child() -> None:
+    from agent_permission_diff_bot.app.analysis import AnalysisLimits, run_analysis
+    from agent_permission_diff_bot.app.snapshot import PullInputs
+    from agent_permission_diff_bot.checks.config_guard import run_config_guard
+
+    base = {".claude/settings.json": json.dumps({"permissions": {"allow": []}})}
+    head = {".claude/settings.json": json.dumps({"permissions": {"allow": ["Bash(git *)"]}})}
+    inputs = PullInputs(base_files=base, head_files=head, swallowed_files=[])
+    [guard, swallowed] = run_analysis(inputs, AnalysisLimits())
+    assert guard.findings == run_config_guard(base, head).findings
+    assert swallowed.check == "swallowed" and not swallowed.crashed
 
 
 def test_an_older_push_finishing_late_does_not_overwrite_the_comment() -> None:

@@ -19,6 +19,7 @@ import httpx
 from fastapi import BackgroundTasks, FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
+from agent_permission_diff_bot.app.analysis import AnalysisLimits
 from agent_permission_diff_bot.app.github import AppAuth, RepoClient, make_http
 from agent_permission_diff_bot.app.pipeline import (
     PayloadError,
@@ -116,6 +117,10 @@ def create_app(settings: AppSettings, transport: httpx.BaseTransport | None = No
                 app_id=settings.app_id,
                 guard_fail_on=settings.guard_fail_on,
                 swallowed_fail_on=settings.swallowed_fail_on,
+                limits=AnalysisLimits(
+                    timeout_s=settings.analysis_timeout_s,
+                    memory_bytes=settings.analysis_memory_mb * 1024 * 1024,
+                ),
             )
             log.info(
                 "Checked %s/%s#%s at %s: %s, comment %s",

@@ -18,6 +18,9 @@ each push. Findings are ranked, and each one comes with a suggested fix.
   escaped so it cannot hide or restyle the comment.
 - It edits only a comment that carries its marker **and** was created by this App, so a
   copied marker in someone else's comment is left alone.
+- Both checks run in a separate, time- and memory-limited process (`run_limited`). A pull
+  request that makes the analysis run too long or use too much memory exhausts only that
+  process, and both checks report "did not finish" (Config Guard as `failure`).
 - If reading the pull request fails, Config Guard reports `failure` ("did not finish")
   rather than passing; Swallowed reports `neutral`. The comment says so too, and never shows
   the all-clear line when a check crashed or read the pull request only partly.
@@ -120,6 +123,8 @@ pasted anywhere else.
 | `APDB_GUARD_FAIL_ON` | `critical`, `high` (default), `medium`, `low` or `never`. |
 | `APDB_SWALLOWED_FAIL_ON` | Same values; default `never` (advisory). |
 | `APDB_GITHUB_API_URL` | API base URL; default `https://api.github.com`. |
+| `APDB_ANALYSIS_TIMEOUT_S` | Deadline for one pull request's analysis; default 60. |
+| `APDB_ANALYSIS_MEMORY_MB` | Memory cap for the analysis process (enforced on Linux); default 1024. |
 
 ## Prove it locally without registering anything
 
