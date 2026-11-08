@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sys
 import textwrap
 
 import pytest
@@ -333,3 +334,13 @@ def test_wrapped_and_private_flag_targets_still_swallow(target: str) -> None:
     handler = f"try {{ f(); }} catch (e) {{ {target} = true; }}"
     source = f"class A {{ #failed = false; m() {{ {handler} }} }}\n"
     assert len(scan("web/x.ts", source)) == 1
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="3.11 gives the overflow no message")
+def test_python_nested_too_deeply_to_parse_is_refused_not_unfinished() -> None:
+    from agent_permission_diff_bot.checks.swallowed import ChangedFile, scan_swallowed
+
+    text = "x = " + "-" * 200_000 + "1\ntry:\n    a()\nexcept Exception:\n    pass\n"
+    result = scan_swallowed([ChangedFile("deep.py", text, frozenset(range(1, 6)))])
+    assert not result.crashed and result.findings == []
+    assert any("not scanned" in note for note in result.notes)
