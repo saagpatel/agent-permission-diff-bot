@@ -215,3 +215,59 @@ def test_cli_probe_refuses_non_utf8(tmp_path: Path) -> None:
         [*command, str(target), "--line", "1"], capture_output=True, text=True, check=False
     )
     assert done.returncode == 2 and "not UTF-8" in done.stderr
+
+
+@pytest.mark.parametrize(
+    ("source", "line"),
+    [
+        # a builtin that the function binds later is local, so unbound in the handler
+        (
+            "def f():\n    try:\n        a()\n    except Exception:\n        return len\n"
+            "    len = 1\n",
+            4,
+        ),
+        # `del` unbinds a name bound earlier
+        (
+            "def f():\n    cached = 1\n    del cached\n    try:\n        a()\n"
+            "    except Exception:\n        return cached\n",
+            6,
+        ),
+        # a parameter deleted inside the protected body
+        (
+            "def f(cached):\n    try:\n        del cached\n        a()\n"
+            "    except Exception:\n        return cached\n",
+            5,
+        ),
+        # an earlier `except ... as err` unbinds `err` when that handler ends
+        (
+            "def f():\n    err = None\n    try:\n        a()\n    except Exception as err:\n"
+            "        pass\n    try:\n        b()\n    except Exception:\n        return err\n",
+            9,
+        ),
+        # `global` names are not established by this scope
+        (
+            "def f():\n    global cached\n    cached = 1\n    try:\n        a()\n"
+            "    except Exception:\n        return cached\n",
+            6,
+        ),
+    ],
+)
+def test_names_that_can_be_unbound_are_not_probed(source: str, line: int) -> None:
+    outcome, _, detail = _probe(source, line)
+    assert outcome == "not-probed" and "maybe unbound" in detail
+
+
+def test_an_enclosing_with_is_not_probed() -> None:
+    source = (
+        "def f(db):\n    with db.transaction():\n        try:\n            a()\n"
+        "        except ValueError:\n            return None\n"
+    )
+    outcome, _, detail = _probe(source, 5)
+    assert outcome == "not-probed" and "finally" in detail
+
+
+def test_a_handlers_own_name_and_unshadowed_builtins_are_bound() -> None:
+    source = (
+        "def f():\n    try:\n        a()\n    except Exception:\n        return NotImplemented\n"
+    )
+    assert _probe(source, 4)[0] == "vanished"

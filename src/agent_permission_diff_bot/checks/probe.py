@@ -94,28 +94,45 @@ def probe_handler(
 
 
 _SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef, ast.Module)
-_ALWAYS_BOUND = frozenset(dir(builtins))
+# Builtins every interpreter has: no private names, and none that `site` adds.
+_ALWAYS_BOUND = frozenset(
+    name
+    for name in dir(builtins)
+    if not name.startswith("_")
+    and name not in {"exit", "quit", "help", "copyright", "credits", "license"}
+)
 
 
 def _inside_finally(node: ast.AST, parents: Mapping[ast.AST, ast.AST]) -> bool:
-    """Whether a ``try`` with ``finally`` encloses ``node`` within the same function."""
+    """Whether a ``try`` with ``finally``, or a ``with`` block, encloses ``node`` within the
+    same function: either runs after the handler and can raise over its result."""
     current = parents.get(node)
     while current is not None and not isinstance(current, _SCOPES):
         if isinstance(current, (ast.Try, ast.TryStar)) and current.finalbody:
+            return True
+        if isinstance(current, (ast.With, ast.AsyncWith)):
             return True
         current = parents.get(current)
     return False
 
 
 def _bound_before(statement: ast.AST, parents: Mapping[ast.AST, ast.AST]) -> set[str]:
-    """Names certainly bound when ``statement`` runs: builtins, the enclosing function's
-    parameters, and names its scope assigns in straight-line statements before it."""
-    bound = set(_ALWAYS_BOUND)
+    """Names certainly bound when ``statement`` runs.
+
+    Builtins (unless the enclosing function binds that name anywhere, which makes it local
+    for the whole function), the function's parameters, and names its scope assigns in
+    straight-line statements before it. A name that is deleted, used as an ``except ... as``
+    target (Python unbinds it when that handler ends) or declared ``global``/``nonlocal``
+    anywhere in the scope is never counted as certainly bound.
+    """
     child, scope = statement, parents.get(statement)
     while scope is not None and not isinstance(scope, _SCOPES):
         child, scope = scope, parents.get(scope)
     if scope is None or isinstance(scope, ast.Lambda):
-        return bound
+        return set(_ALWAYS_BOUND)
+    local, unbinding = _scope_names(scope)
+    function = isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef))
+    bound = set(_ALWAYS_BOUND - local) if function else set(_ALWAYS_BOUND)
     if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
         arguments = scope.args
         for arg in [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs]:
@@ -127,7 +144,36 @@ def _bound_before(statement: ast.AST, parents: Mapping[ast.AST, ast.AST]) -> set
         if earlier is child:
             break
         bound |= _binds(earlier)
-    return bound
+    return bound - unbinding
+
+
+_NESTED_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
+
+
+def _scope_names(scope: ast.AST) -> tuple[set[str], set[str]]:
+    """Names the scope binds anywhere, and names it may unbind, nested scopes excluded."""
+    local: set[str] = set()
+    unbinding: set[str] = set()
+    stack: list[ast.AST] = list(getattr(scope, "body", []))
+    while stack:
+        node = stack.pop()
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            local.add(node.id)
+            if isinstance(node.ctx, ast.Del):
+                unbinding.add(node.id)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            local.add(node.name)
+            unbinding.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            local |= {(a.asname or a.name).split(".")[0] for a in node.names if a.name != "*"}
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            unbinding |= set(node.names)
+        if isinstance(node, _NESTED_SCOPES):
+            if not isinstance(node, ast.Lambda):
+                local.add(node.name)
+            continue  # its own names belong to its own scope
+        stack.extend(ast.iter_child_nodes(node))
+    return local, unbinding
 
 
 def _binds(statement: ast.stmt) -> set[str]:
