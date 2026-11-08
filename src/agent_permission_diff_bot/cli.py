@@ -68,6 +68,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_simulate(args)
         if args.command in {"server-card-diff", "mcp-server-card-diff"}:
             return _run_server_card_diff(args)
+        if args.command == "probe-swallowed":
+            return _run_probe(args)
         if args.command == "app" and args.app_command:
             return _run_app(args)
     except (OSError, subprocess.CalledProcessError) as exc:
@@ -550,6 +552,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default="report",
         help="Schema used with --validate-json. Default: report.",
     )
+    probe = subparsers.add_parser(
+        "probe-swallowed",
+        help="inject the caught error into one Python handler and show what the caller gets",
+    )
+    probe.add_argument("file", help="Python source file")
+    probe.add_argument("--line", type=int, required=True, help="line of the except clause")
     app = subparsers.add_parser(
         "app", help="run the GitHub App (Config Guard and Swallowed); needs the app extra"
     )
@@ -593,6 +601,28 @@ def _run_app(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"agent-permission-diff: {exc}", file=sys.stderr)
         return 2
+
+
+def _run_probe(args: argparse.Namespace) -> int:
+    from agent_permission_diff_bot.checks.probe import probe_python_handler
+    from agent_permission_diff_bot.limited import LimitExceededError, run_limited
+
+    source = Path(args.file).read_text(encoding="utf-8")
+    try:
+        result = run_limited(probe_python_handler, source, args.line, timeout_s=10)
+    except (LimitExceededError, RuntimeError) as exc:
+        print(f"agent-permission-diff: the probe did not finish: {exc}", file=sys.stderr)
+        return 2
+    if result["outcome"] == "not-probed":
+        print(f"agent-permission-diff: not probed: {result['detail']}", file=sys.stderr)
+        return 2
+    sentence = (
+        f"Injecting `{result['injected']}` into the try left no trace; {result['detail']}."
+        if result["outcome"] == "vanished"
+        else f"Injecting `{result['injected']}` escaped the handler ({result['detail']})."
+    )
+    print(f"{args.file}:{args.line}: {sentence}")
+    return 0
 
 
 if __name__ == "__main__":

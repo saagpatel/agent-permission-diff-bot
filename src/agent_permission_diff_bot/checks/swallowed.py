@@ -31,6 +31,7 @@ from agent_permission_diff_bot.checks.model import (
     DeliberateCatch,
     rank,
 )
+from agent_permission_diff_bot.checks.probe import probe_python_handler
 from agent_permission_diff_bot.model import Severity
 
 MAX_FILE_BYTES = 1024 * 1024
@@ -323,6 +324,10 @@ def _classify(
                 f"Probably deliberate: only `{catch.caught}` is dropped, and the protected code "
                 "does not write, authenticate or call the network."
             ]
+        if catch.language == "python" and not catch.caught.startswith("suppress("):
+            probe = probe_python_handler(changed.text, catch.line)
+            if probe.outcome != "not-probed":
+                allows.insert(1, probe.sentence())
         findings.append(
             CheckFinding(
                 check="swallowed",
