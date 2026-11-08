@@ -52,8 +52,8 @@ agent-permission-diff-bot = { workspace = true }
 [tool.ruff]
 line-length = 100
 target-version = "py311"
-# Vendored upstream code stays a plain copy; see its VENDORED.md.
-extend-exclude = ["src/agent_permission_diff_bot/_vendor"]
+# Vendored upstream code stays a plain copy (see its VENDORED.md); app fixtures are deliberately bad code.
+extend-exclude = ["src/agent_permission_diff_bot/_vendor", "tests/fixtures/app"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]

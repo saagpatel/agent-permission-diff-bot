@@ -1,0 +1,45 @@
+{
+  "event": "pull_request",
+  "payload": {
+    "action": "opened",
+    "number": 2,
+    "pull_request": {
+      "number": 2,
+      "state": "open",
+      "title": "Make order saving more robust",
+      "draft": false,
+      "base": {
+        "ref": "main",
+        "sha": "8aa235a0ab18dcc4f89ef59470fb5950431e5dac",
+        "repo": {
+          "full_name": "octo-demo/guard-demo"
+        }
+      },
+      "head": {
+        "ref": "risky-change",
+        "sha": "7c9018d409529379cdbb8926c1a18be7dcea1821",
+        "repo": {
+          "full_name": "octo-demo/guard-demo"
+        }
+      }
+    },
+    "repository": {
+      "id": 9001,
+      "name": "guard-demo",
+      "full_name": "octo-demo/guard-demo",
+      "private": true,
+      "owner": {
+        "login": "octo-demo",
+        "type": "Organization"
+      }
+    },
+    "installation": {
+      "id": 4242,
+      "node_id": "MDIzOkludGVncmF0aW9uSW5zdGFsbGF0aW9uNDI0Mg=="
+    },
+    "sender": {
+      "login": "demo-author",
+      "type": "User"
+    }
+  }
+}
