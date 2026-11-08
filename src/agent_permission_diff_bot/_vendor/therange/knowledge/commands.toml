@@ -1,0 +1,1153 @@
+# The Range knowledge base: commands whose subcommands or flags reach further
+# than their name suggests.
+#
+# Each [[capability]] hangs off a word path (the program plus any subcommand
+# words). `position` says where the trigger must appear:
+#   "after"            anywhere after the path words (subcommand options)
+#   "before-subcommand" directly after the path words, before any subcommand
+#                      (global options such as `git -c`)
+#   "subcommand"       the trigger is the verb right after the path words
+#                      (`launchctl submit`), so a rule pinned to another verb
+#                      cannot reach it
+# `kind` is "flag" when one of `triggers` must appear, or "any" when reaching
+# the path at all is the capability (an interpreter, a package-script runner).
+# `exact` controls exact-match rules (no wildcard) for kind "any":
+#   "applies"     the capability holds even for a fixed command
+#   "script-file" holds only when the fixed command runs a file (not inline code)
+# `claude_mitigated` names a built-in Claude Code safeguard that already stops a
+# prefix rule from approving the capability; Codex has no such safeguard.
+# Severity: critical = runs any program; high = writes outside the project,
+# publishes, deletes remote data or exposes credentials; medium = runs code the
+# project defines, or reaches the network on your account; low = narrow.
+# Every entry cites public documentation.
+
+# ---------------------------------------------------------------- git
+
+[[capability]]
+id = "git.global-config-override"
+paths = [["git"]]
+position = "before-subcommand"
+kind = "flag"
+triggers = ["-c", "--config-env"]
+effect = "exec"
+severity = "critical"
+title = "Inline config makes git run a program you name"
+explain = "`git -c name=value` sets any config key for one command. Keys such as core.pager, core.fsmonitor, core.sshCommand, diff.external or an alias starting with `!` make git run an arbitrary program."
+example = '''git -c alias.x='!touch /tmp/proof' x'''
+narrower = "Pin the subcommand (`git status *`, `git diff *`): `-c` only works before the subcommand, so a pinned rule cannot carry it."
+doc = "https://git-scm.com/docs/git"
+demo = "git-alias"
+
+[[capability]]
+id = "git.exec-path"
+paths = [["git"]]
+position = "before-subcommand"
+kind = "flag"
+triggers = ["--exec-path"]
+effect = "exec"
+severity = "critical"
+title = "`--exec-path` swaps in helper programs from any directory"
+explain = "`git --exec-path=<dir>` makes git look for its sub-programs in a directory you choose, so a planted `git-status` there runs instead of the real one."
+example = "git --exec-path=./bin status"
+narrower = "Pin the subcommand; global options cannot follow it."
+doc = "https://git-scm.com/docs/git"
+
+[[capability]]
+id = "git.other-repo"
+paths = [["git"]]
+position = "before-subcommand"
+kind = "flag"
+triggers = ["-C", "--git-dir", "--work-tree"]
+effect = "write"
+severity = "medium"
+title = "`-C` / `--git-dir` point git at another repository"
+explain = "Global location options run the command against any repository on disk, including that repository's hooks and config. They also let a command slip past deny and ask rules written for the plain form (`git -C . push` is not `git push`)."
+example = "git -C ~/other-repo status"
+narrower = "Pin the subcommand so global options cannot be added."
+doc = "https://git-scm.com/docs/git"
+
+[[capability]]
+id = "git.config-write"
+paths = [["git", "config"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "exec"
+severity = "critical"
+title = "`git config` writes settings that run programs later"
+explain = "Writing core.hooksPath, core.fsmonitor, core.pager or a `!` alias into repository or global config makes every later git command run a program you chose. With `--global` it writes outside the project."
+example = '''git config alias.st '!touch /tmp/proof' '''
+narrower = "Allow only reads: `git config --get *` and `git config --list *`."
+doc = "https://git-scm.com/docs/git-config"
+
+[[capability]]
+id = "git.hooks"
+paths = [["git", "commit"], ["git", "merge"], ["git", "rebase"], ["git", "checkout"], ["git", "switch"], ["git", "am"], ["git", "push"], ["git", "pull"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "exec"
+severity = "medium"
+title = "Runs repository hook scripts"
+explain = "These subcommands run hook scripts from .git/hooks or core.hooksPath. Anything that can write a hook file can turn an allowed commit into arbitrary code."
+example = "git commit -m msg   # runs .git/hooks/pre-commit"
+narrower = "Keep the rule, but treat hook directories as code: no allow rule for writes to .git/hooks, and avoid allowing `git config` alongside it."
+doc = "https://git-scm.com/docs/githooks"
+
+[[capability]]
+id = "git.output-file"
+paths = [["git", "log"], ["git", "diff"], ["git", "show"], ["git", "format-patch"]]
+position = "after"
+kind = "flag"
+triggers = ["--output", "-o"]
+effect = "write"
+severity = "high"
+title = "`--output` writes a file anywhere"
+explain = "Diff-producing commands accept `--output=<file>` (format-patch takes `-o <dir>`), which writes to any path the user can write, outside the project included."
+example = "git log -1 --output=/tmp/elsewhere.txt"
+narrower = "Pinning the subcommand does not close this; add a deny rule such as `Bash(git log *--output*)` or check it in a PreToolUse hook."
+doc = "https://git-scm.com/docs/git-diff"
+demo = "git-output"
+
+[[capability]]
+id = "git.submodule-foreach"
+paths = [["git", "submodule"]]
+position = "subcommand"
+kind = "flag"
+triggers = ["foreach"]
+effect = "exec"
+severity = "critical"
+title = "`git submodule foreach` runs any shell command"
+explain = "`foreach` evaluates an arbitrary shell command in each submodule."
+example = "git submodule foreach 'touch /tmp/proof'"
+narrower = "Allow `git submodule status *` and `git submodule update *` instead of `git submodule *`."
+doc = "https://git-scm.com/docs/git-submodule"
+
+[[capability]]
+id = "git.bisect-run"
+paths = [["git", "bisect"]]
+position = "subcommand"
+kind = "flag"
+triggers = ["run"]
+effect = "exec"
+severity = "critical"
+title = "`git bisect run` runs any command"
+explain = "`bisect run <cmd>` executes the given command at every step."
+example = "git bisect run touch /tmp/proof"
+narrower = "Allow specific bisect verbs (`git bisect good *`, `git bisect bad *`, `git bisect log`)."
+doc = "https://git-scm.com/docs/git-bisect"
+
+[[capability]]
+id = "git.rebase-exec"
+paths = [["git", "rebase"]]
+position = "after"
+kind = "flag"
+triggers = ["--exec", "-x"]
+effect = "exec"
+severity = "critical"
+title = "`git rebase --exec` runs any shell command"
+explain = "`--exec <cmd>` appends an exec line after each commit, running the command in a shell."
+example = "git rebase --exec 'touch /tmp/proof' HEAD~1"
+narrower = "Deny `Bash(git rebase *--exec*)` and `Bash(git rebase *-x*)`, or leave rebase on prompt."
+doc = "https://git-scm.com/docs/git-rebase"
+
+[[capability]]
+id = "git.difftool-extcmd"
+paths = [["git", "difftool"], ["git", "mergetool"]]
+position = "after"
+kind = "flag"
+triggers = ["--extcmd", "-x", "--tool"]
+effect = "exec"
+severity = "critical"
+title = "difftool runs an external command"
+explain = "`git difftool --extcmd=<cmd>` (and configured tools) runs an external program on each file pair."
+example = "git difftool --extcmd=touch HEAD~1"
+narrower = "Do not allow difftool or mergetool; they exist to launch programs."
+doc = "https://git-scm.com/docs/git-difftool"
+
+[[capability]]
+id = "git.grep-pager"
+paths = [["git", "grep"]]
+position = "after"
+kind = "flag"
+triggers = ["--open-files-in-pager", "-O"]
+effect = "exec"
+severity = "critical"
+title = "`git grep -O<cmd>` opens matches with a program you name"
+explain = "`--open-files-in-pager=<pager>` runs the named program with the matching files as arguments."
+example = "git grep -Otouch pattern"
+narrower = "Deny `Bash(git grep *-O*)`, or use the built-in Grep tool instead of allowing `git grep *`."
+doc = "https://git-scm.com/docs/git-grep"
+
+[[capability]]
+id = "git.upload-pack"
+paths = [["git", "fetch"], ["git", "clone"], ["git", "ls-remote"], ["git", "pull"], ["git", "archive"]]
+position = "after"
+kind = "flag"
+triggers = ["--upload-pack", "-u", "--exec"]
+effect = "exec"
+severity = "critical"
+title = "`--upload-pack` names the program git runs for the remote side"
+explain = "For local or ssh remotes, `--upload-pack=<cmd>` (`--exec` for archive) chooses the program git executes."
+example = "git ls-remote --upload-pack='touch /tmp/proof;:' ."
+narrower = "Pinning to fetch/clone does not close this; deny `*--upload-pack*` or check in a hook."
+doc = "https://git-scm.com/docs/git-fetch"
+
+[[capability]]
+id = "git.receive-pack"
+paths = [["git", "push"]]
+position = "after"
+kind = "flag"
+triggers = ["--receive-pack", "--exec"]
+effect = "exec"
+severity = "critical"
+title = "`git push --receive-pack` names a program to run"
+explain = "`--receive-pack=<cmd>` chooses the program run for the remote side of a local or ssh push."
+example = "git push --receive-pack='touch /tmp/proof;:' ."
+narrower = "Leave push on prompt."
+doc = "https://git-scm.com/docs/git-push"
+
+[[capability]]
+id = "git.push"
+paths = [["git", "push"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "publish"
+severity = "high"
+title = "Publishes commits to a remote"
+explain = "Push sends local history to any configured or named remote, including force-pushes that rewrite shared branches."
+example = "git push --force origin main"
+narrower = "Leave push on prompt, or allow one exact form such as `Bash(git push origin HEAD)`."
+doc = "https://git-scm.com/docs/git-push"
+
+[[capability]]
+id = "git.filter-branch"
+paths = [["git", "filter-branch"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "exec"
+severity = "critical"
+title = "`git filter-branch` runs filter commands"
+explain = "Its --tree-filter, --index-filter and --msg-filter options are shell commands run per commit."
+example = "git filter-branch --tree-filter 'touch /tmp/proof' HEAD"
+narrower = "Do not allow filter-branch."
+doc = "https://git-scm.com/docs/git-filter-branch"
+
+[[capability]]
+id = "git.destructive"
+paths = [["git", "clean"], ["git", "reset"], ["git", "checkout"], ["git", "restore"], ["git", "stash"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "destructive"
+severity = "medium"
+title = "Can discard uncommitted work"
+explain = "`git clean -fdx`, `git reset --hard`, `git checkout -- .` and `git stash drop` delete work that git cannot recover."
+example = "git clean -fdx"
+narrower = "Allow the read forms only (`git stash list`), and keep destructive verbs on prompt."
+doc = "https://git-scm.com/docs/git-clean"
+
+# ---------------------------------------------------------------- GitHub CLI
+
+[[capability]]
+id = "gh.api"
+paths = [["gh", "api"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "publish"
+severity = "high"
+title = "`gh api` makes any authenticated API call"
+explain = "`gh api -X DELETE ...` or `-X POST` can create, change or delete anything your token reaches: repositories, releases, secrets, workflow runs. It also gets past ask rules written for specific gh subcommands."
+example = "gh api -X DELETE repos/OWNER/REPO/releases/ID"
+narrower = "Allow GET-only use through a hook, or specific read subcommands (`gh pr view *`, `gh run list *`)."
+doc = "https://cli.github.com/manual/gh_api"
+
+[[capability]]
+id = "gh.release-write"
+paths = [["gh", "release"]]
+position = "subcommand"
+kind = "flag"
+triggers = ["create", "upload", "delete", "delete-asset", "edit"]
+effect = "publish"
+severity = "high"
+title = "Creates, edits, uploads to or deletes GitHub releases"
+explain = "`gh release create|upload|edit|delete` publishes or removes releases and their assets on any repository the token can write. `-R owner/repo` may come before the verb, so `gh release -R owner/repo create` is not matched by an ask rule for `gh release create *`."
+example = "gh release -R OWNER/REPO create v9.9.9 --notes x"
+narrower = "Allow the read verbs only: `Bash(gh release list *)`, `Bash(gh release view *)`, `Bash(gh release download *)`."
+doc = "https://cli.github.com/manual/gh_release"
+
+[[capability]]
+id = "gh.release-download"
+paths = [["gh", "release", "download"]]
+position = "after"
+kind = "flag"
+triggers = ["--dir", "-D", "--output", "-O"]
+effect = "write"
+severity = "medium"
+title = "`gh release download --dir` writes anywhere"
+explain = "Download options choose the destination directory or file, which can be outside the project."
+example = "gh release download v1 -R OWNER/REPO --dir ~/Library/LaunchAgents"
+narrower = "Accept it, or pin `--dir` to a project path in an exact rule."
+doc = "https://cli.github.com/manual/gh_release_download"
+
+[[capability]]
+id = "gh.repo-select"
+paths = [["gh"]]
+position = "after"
+kind = "flag"
+triggers = ["-R", "--repo"]
+effect = "publish"
+severity = "low"
+title = "`-R` acts on any repository the token reaches"
+explain = "Most gh subcommands take `-R owner/repo`, so a rule scoped by subcommand is not scoped by repository."
+example = "gh pr list -R OWNER/OTHER-REPO"
+narrower = "Repository scoping needs a hook; rules cannot express it."
+doc = "https://cli.github.com/manual/gh_help_environment"
+
+[[capability]]
+id = "gh.extension"
+paths = [["gh", "extension"], ["gh", "ext"]]
+position = "subcommand"
+kind = "flag"
+triggers = ["install", "exec", "upgrade"]
+effect = "exec"
+severity = "critical"
+title = "Installs and runs gh extensions (downloaded programs)"
+explain = "`gh extension install owner/repo` downloads a program and `gh <name>` runs it."
+example = "gh extension install OWNER/gh-something"
+narrower = "Allow `gh extension list` only."
+doc = "https://cli.github.com/manual/gh_extension_install"
+
+[[capability]]
+id = "gh.alias-shell"
+paths = [["gh", "alias"]]
+position = "subcommand"
+kind = "flag"
+triggers = ["set", "import"]
+effect = "exec"
+severity = "critical"
+title = "`gh alias set --shell` defines a shell command"
+explain = "A shell alias runs through sh when invoked, so `gh alias set --shell x 'cmd'` followed by `gh x` runs any command."
+example = "gh alias set --shell x 'touch /tmp/proof'"
+narrower = "Allow `gh alias list` only."
+doc = "https://cli.github.com/manual/gh_alias_set"
+
+[[capability]]
+id = "gh.auth-token"
+paths = [["gh", "auth"]]
+position = "subcommand"
+kind = "flag"
+triggers = ["token", "refresh", "login", "logout", "setup-git"]
+effect = "secret"
+severity = "high"
+title = "Prints or changes GitHub credentials"
+explain = "`gh auth token` prints the OAuth token in clear text; login, refresh and setup-git change credential state."
+example = "gh auth token"
+narrower = "Allow `gh auth status *` only."
+doc = "https://cli.github.com/manual/gh_auth_token"
+
+[[capability]]
+id = "gh.repo-destructive"
+paths = [["gh", "repo"]]
+position = "subcommand"
+kind = "flag"
+triggers = ["delete", "archive", "rename", "edit", "create", "fork"]
+effect = "publish"
+severity = "high"
+title = "Creates, renames, edits or deletes repositories"
+explain = "`gh repo delete|archive|rename|edit|create` changes repositories on your account."
+example = "gh repo archive OWNER/REPO --yes"
+narrower = "Allow `gh repo view *` and `gh repo list *`."
+doc = "https://cli.github.com/manual/gh_repo"
+
+[[capability]]
+id = "gh.secret"
+paths = [["gh", "secret"], ["gh", "variable"]]
+position = "subcommand"
+kind = "flag"
+triggers = ["set", "delete", "remove"]
+effect = "secret"
+severity = "high"
+title = "Sets or deletes Actions secrets and variables"
+explain = "Changing secrets or variables changes what CI runs with."
+example = "gh secret set NAME --body value"
+narrower = "Allow `gh secret list *` only."
+doc = "https://cli.github.com/manual/gh_secret_set"
+
+[[capability]]
+id = "gh.workflow-run"
+paths = [["gh", "workflow"]]
+position = "subcommand"
+kind = "flag"
+triggers = ["run", "enable"]
+effect = "exec"
+severity = "medium"
+title = "Triggers CI workflows"
+explain = "`gh workflow run` starts a workflow with the repository's secrets and permissions."
+example = "gh workflow run deploy.yml"
+narrower = "Allow `gh workflow list *` and `gh workflow view *`."
+doc = "https://cli.github.com/manual/gh_workflow_run"
+
+[[capability]]
+id = "gh.pr-merge"
+paths = [["gh", "pr"]]
+position = "subcommand"
+kind = "flag"
+triggers = ["merge", "close", "create", "edit", "comment", "review"]
+effect = "publish"
+severity = "medium"
+title = "Merges, opens or comments on pull requests"
+explain = "These verbs act publicly on your account."
+example = "gh pr merge 12 --admin"
+narrower = "Allow `gh pr view *`, `gh pr list *`, `gh pr diff *`, `gh pr checks *`."
+doc = "https://cli.github.com/manual/gh_pr"
+
+# ---------------------------------------------------------------- package managers
+
+[[capability]]
+id = "npm.scripts"
+paths = [["npm", "run"], ["npm", "run-script"], ["npm", "test"], ["npm", "start"], ["npm", "t"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "exec"
+severity = "medium"
+title = "Runs package.json scripts"
+explain = "The script body is shell text in package.json. Whatever can edit that file decides what this allowed command runs."
+example = 'npm run build   # runs scripts.build from package.json'
+narrower = "Keep exact script names (`Bash(npm run build)`) and protect package.json edits."
+doc = "https://docs.npmjs.com/cli/commands/npm-run-script"
+
+[[capability]]
+id = "npm.script-shell"
+paths = [["npm"]]
+position = "after"
+kind = "flag"
+triggers = ["--script-shell"]
+effect = "exec"
+severity = "critical"
+title = "`--script-shell` picks the program that runs scripts"
+explain = "npm accepts any config key as a flag; `--script-shell=<path>` makes npm run scripts with any program."
+example = "npm run build --script-shell=/path/to/program"
+narrower = "Use exact rules with no wildcard, such as `Bash(npm run build)`."
+doc = "https://docs.npmjs.com/cli/using-npm/config"
+
+[[capability]]
+id = "npm.install-scripts"
+paths = [["npm", "install"], ["npm", "i"], ["npm", "ci"], ["npm", "add"], ["npm", "update"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "exec"
+severity = "high"
+title = "Installs run dependency lifecycle scripts"
+explain = "preinstall, install and postinstall scripts of every installed package run with your user's rights, and the package name can be anything."
+example = "npm install some-package   # runs its postinstall"
+narrower = "Allow `npm ci --ignore-scripts` exactly, or keep installs on prompt."
+doc = "https://docs.npmjs.com/cli/using-npm/scripts"
+
+[[capability]]
+id = "npm.exec"
+paths = [["npm", "exec"], ["npm", "x"], ["npx"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "exec"
+severity = "critical"
+title = "Downloads and runs any package binary"
+explain = "`npx <pkg>` / `npm exec` fetch a package from the registry if needed and run it."
+example = "npx some-package"
+narrower = "Allow exact tools, such as `Bash(npx tsc --noEmit)`."
+doc = "https://docs.npmjs.com/cli/commands/npm-exec"
+
+[[capability]]
+id = "npm.publish"
+paths = [["npm", "publish"], ["npm", "unpublish"], ["npm", "deprecate"], ["npm", "dist-tag"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "publish"
+severity = "high"
+title = "Publishes to the npm registry"
+explain = "Publishing is public and hard to undo."
+example = "npm publish"
+narrower = "Never allow; keep publishing on prompt."
+doc = "https://docs.npmjs.com/cli/commands/npm-publish"
+
+[[capability]]
+id = "pnpm.scripts"
+paths = [["pnpm", "run"], ["pnpm", "test"], ["pnpm", "start"], ["pnpm", "t"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "exec"
+severity = "medium"
+title = "Runs package.json scripts"
+explain = "pnpm runs the shell text in package.json scripts; editing package.json changes what the allowed command does. pnpm also runs a script for an unknown command name (`pnpm typecheck`)."
+example = 'pnpm test   # runs scripts.test from package.json'
+narrower = "Keep exact script names (`Bash(pnpm test)`) and protect package.json edits."
+doc = "https://pnpm.io/cli/run"
+# `pnpm <name>` runs the script <name> when <name> is not a built-in command.
+implicit_after = ["pnpm"]
+builtins = ["add", "install", "i", "update", "up", "upgrade", "remove", "rm", "uninstall", "un", "link", "ln", "unlink", "import", "rebuild", "rb", "prune", "fetch", "patch", "patch-commit", "patch-remove", "audit", "list", "ls", "outdated", "why", "licenses", "run", "run-script", "test", "t", "exec", "dlx", "create", "start", "publish", "pack", "recursive", "multi", "m", "server", "store", "root", "bin", "setup", "init", "deploy", "doctor", "config", "c", "env", "cache", "help", "self-update", "approve-builds", "ignored-builds", "cat-file", "cat-index", "find-hash", "sbom", "version", "login", "logout", "whoami", "dedupe", "catalogs", "self", "completion", "install-test", "it", "pkg"]
+
+[[capability]]
+id = "pnpm.exec"
+paths = [["pnpm", "exec"], ["pnpm", "dlx"], ["pnpx"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "exec"
+severity = "critical"
+title = "Runs any binary or downloaded package"
+explain = "`pnpm exec <cmd>` runs a command in the project environment; `pnpm dlx <pkg>` downloads and runs a package."
+example = "pnpm dlx some-package"
+narrower = "Allow exact commands only."
+doc = "https://pnpm.io/cli/dlx"
+
+[[capability]]
+id = "pnpm.install"
+paths = [["pnpm", "install"], ["pnpm", "i"], ["pnpm", "add"], ["pnpm", "update"], ["pnpm", "up"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "exec"
+severity = "medium"
+title = "Installs packages and may run build scripts"
+explain = "Recent pnpm versions run dependency build scripts only for packages listed in onlyBuiltDependencies, but the project's own lifecycle scripts still run, and `add` accepts any package."
+example = "pnpm add some-package"
+narrower = "Allow `pnpm install --frozen-lockfile` exactly."
+doc = "https://pnpm.io/cli/install"
+
+[[capability]]
+id = "yarn.run"
+paths = [["yarn"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "exec"
+severity = "high"
+title = "Runs package scripts, binaries and downloaded packages"
+explain = "`yarn <script>`, `yarn run`, `yarn exec` and `yarn dlx` all run code: script bodies from package.json or packages fetched on the spot."
+example = "yarn dlx some-package"
+narrower = "Allow exact script names, such as `Bash(yarn test)`."
+doc = "https://yarnpkg.com/cli/run"
+
+[[capability]]
+id = "bun.run"
+paths = [["bun"], ["bunx"]]
+position = "after"
+kind = "any"
+exact = "script-file"
+effect = "exec"
+severity = "critical"
+title = "Runs any script, file or downloaded package"
+explain = "`bun run`, `bun <file>`, `bun -e` and `bunx` run arbitrary JavaScript or packages."
+example = "bun -e 'require(\"fs\").writeFileSync(\"/tmp/proof\",\"\")'"
+narrower = "Allow exact commands, such as `Bash(bun test)`."
+doc = "https://bun.sh/docs/cli/run"
+
+[[capability]]
+id = "uv.run"
+paths = [["uv", "run"], ["uvx"], ["uv", "tool"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "exec"
+severity = "critical"
+title = "Runs any command in a managed environment"
+explain = "`uv run <cmd>` runs any command (not only Python), and `uvx` / `uv tool run` download and run a package."
+example = "uv run touch /tmp/proof"
+narrower = "Allow exact commands, such as `Bash(uv run pytest)` and `Bash(uv run pyright)`."
+doc = "https://docs.astral.sh/uv/reference/cli/"
+
+[[capability]]
+id = "pip.install"
+paths = [["pip", "install"], ["pip3", "install"], ["uv", "pip"], ["uv", "add"], ["uv", "sync"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "exec"
+severity = "high"
+title = "Installing Python packages can run build code"
+explain = "Source distributions run their build backend (setup.py and friends) at install time, and the package name can be anything."
+example = "pip install some-sdist-package"
+narrower = "Allow `uv sync --frozen` exactly."
+doc = "https://pip.pypa.io/en/stable/cli/pip_install/"
+
+[[capability]]
+id = "publish.python-rust"
+paths = [["uv", "publish"], ["twine", "upload"], ["cargo", "publish"], ["pnpm", "publish"], ["cargo", "yank"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "publish"
+severity = "high"
+title = "Publishes to a public registry"
+explain = "Registry uploads are public and effectively permanent."
+example = "cargo publish"
+narrower = "Never allow; keep publishing on prompt."
+doc = "https://doc.rust-lang.org/cargo/commands/cargo-publish.html"
+
+[[capability]]
+id = "cargo.build-scripts"
+paths = [["cargo", "build"], ["cargo", "test"], ["cargo", "check"], ["cargo", "clippy"], ["cargo", "run"], ["cargo", "bench"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "exec"
+severity = "medium"
+title = "Compiling runs build.rs and procedural macros"
+explain = "Cargo runs each package's build script and proc macros at compile time; `cargo run` and `cargo test` then run the built code."
+example = "cargo check   # runs build.rs of every dependency"
+narrower = "Accept for trusted projects; this is how Rust builds work."
+doc = "https://doc.rust-lang.org/cargo/reference/build-scripts.html"
+
+[[capability]]
+id = "cargo.install"
+paths = [["cargo", "install"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "exec"
+severity = "high"
+title = "Installs and builds any crate into ~/.cargo/bin"
+explain = "Downloads, builds (running build scripts) and installs a binary outside the project."
+example = "cargo install some-crate"
+narrower = "Keep on prompt."
+doc = "https://doc.rust-lang.org/cargo/commands/cargo-install.html"
+
+[[capability]]
+id = "go.run"
+paths = [["go", "run"], ["go", "generate"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "exec"
+severity = "critical"
+title = "Runs Go programs and //go:generate commands"
+explain = "`go run` compiles and runs any package or remote module; `go generate` runs the shell commands written in //go:generate comments."
+example = "go run example.com/tool@latest"
+narrower = "Allow exact commands only."
+doc = "https://pkg.go.dev/cmd/go"
+
+[[capability]]
+id = "go.exec-flags"
+paths = [["go", "test"], ["go", "build"], ["go", "vet"], ["go", "install"]]
+position = "after"
+kind = "flag"
+triggers = ["-exec", "-toolexec", "-vettool"]
+effect = "exec"
+severity = "critical"
+title = "`-exec` / `-toolexec` / `-vettool` run a program you name"
+explain = "`go test -exec prog` runs the test binary through any program; `-toolexec` wraps every compiler tool invocation; `-vettool` replaces the vet analyzer."
+example = "go test -exec touch ./..."
+narrower = "Deny `Bash(go * -exec*)`-style flags in a hook, or use exact rules."
+doc = "https://pkg.go.dev/cmd/go"
+
+[[capability]]
+id = "make.recipes"
+paths = [["make"], ["gmake"], ["just"], ["task"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "exec"
+severity = "high"
+title = "Runs recipes from a file the agent can edit"
+explain = "Make-style runners execute shell recipes from the Makefile (or justfile, Taskfile). `make -f other.mk` or `--eval` pick any recipes."
+example = "make --eval='x:;@touch /tmp/proof' x"
+narrower = "Allow exact targets, such as `Bash(make test)`."
+doc = "https://www.gnu.org/software/make/manual/make.html"
+
+# ---------------------------------------------------------------- interpreters and shells
+
+[[capability]]
+id = "interp.python"
+paths = [["python"], ["python3"]]
+position = "after"
+kind = "any"
+exact = "script-file"
+effect = "exec"
+severity = "critical"
+title = "Python interpreter: runs any code"
+explain = "`python -c`, `python -m` and `python file.py` run arbitrary code, including code that opens files a Read deny rule protects."
+example = "python3 -c 'open(\"/tmp/proof\",\"w\")'"
+narrower = "Allow exact script invocations with fixed arguments."
+doc = "https://docs.python.org/3/using/cmdline.html"
+
+[[capability]]
+id = "interp.node"
+paths = [["node"], ["deno"], ["tsx"], ["ts-node"]]
+position = "after"
+kind = "any"
+exact = "script-file"
+effect = "exec"
+severity = "critical"
+title = "JavaScript runtime: runs any code"
+explain = "`node -e` and `node file.js` run arbitrary code."
+example = "node -e 'require(\"fs\").writeFileSync(\"/tmp/proof\",\"\")'"
+narrower = "Allow exact script invocations."
+doc = "https://nodejs.org/api/cli.html"
+
+[[capability]]
+id = "interp.shell"
+paths = [["bash"], ["sh"], ["zsh"], ["dash"], ["fish"]]
+position = "after"
+kind = "any"
+exact = "script-file"
+effect = "exec"
+severity = "critical"
+title = "Shell: runs any command"
+explain = "`sh -c '...'` runs anything, and deny or ask rules do not look inside it."
+example = "sh -c 'touch /tmp/proof'"
+narrower = "Never allow a shell by prefix."
+doc = "https://www.gnu.org/software/bash/manual/bash.html#Invoking-Bash"
+
+[[capability]]
+id = "interp.other"
+paths = [["perl"], ["ruby"], ["php"], ["lua"], ["Rscript"], ["swift"]]
+position = "after"
+kind = "any"
+exact = "script-file"
+effect = "exec"
+severity = "critical"
+title = "Interpreter: runs any code"
+explain = "`-e` style flags and script files run arbitrary code."
+example = "perl -e 'open(F,\">/tmp/proof\")'"
+narrower = "Allow exact script invocations."
+doc = "https://perldoc.perl.org/perlrun"
+
+[[capability]]
+id = "interp.osascript"
+paths = [["osascript"]]
+position = "after"
+kind = "any"
+exact = "script-file"
+effect = "exec"
+severity = "critical"
+title = "AppleScript: runs shell commands and drives apps"
+explain = "`osascript -e 'do shell script \"...\"'` runs shell commands, and AppleScript can control any app you have granted automation to."
+example = "osascript -e 'do shell script \"touch /tmp/proof\"'"
+narrower = "Never allow by prefix."
+doc = "https://ss64.com/mac/osascript.html"
+
+[[capability]]
+id = "agent.cli"
+paths = [["claude"], ["codex"], ["cursor-agent"], ["gemini"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "exec"
+severity = "critical"
+title = "Starts another coding agent"
+explain = "`claude -p` or `codex exec` launches an agent with its own permission settings, which may be wider than this rule."
+example = "codex exec 'touch /tmp/proof'"
+narrower = "Keep agent launches on prompt."
+doc = "https://code.claude.com/docs/en/cli-reference"
+
+# ---------------------------------------------------------------- wrappers
+
+[[capability]]
+id = "wrap.env"
+paths = [["env"], ["sudo"], ["doas"], ["exec"], ["caffeinate"], ["arch"], ["script"], ["xcrun"], ["dotenv"], ["direnv"], ["mise"], ["devbox"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "exec"
+severity = "critical"
+title = "Wrapper that runs any program"
+explain = "These run their arguments as a command. Claude Code strips only timeout, time, nice, nohup, stdbuf, command, builtin, noglob and bare xargs before matching, so `env`, `caffeinate -i`, `arch -arm64`, `mise exec` and similar pass the inner command through unchecked."
+example = "env touch /tmp/proof"
+narrower = "Write the wrapper together with the inner command, such as `Bash(mise exec -- npm test)`."
+doc = "https://code.claude.com/docs/en/permissions#wrappers"
+
+[[capability]]
+id = "wrap.xargs"
+paths = [["xargs"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "exec"
+severity = "critical"
+title = "`xargs` with flags runs any command"
+explain = "Claude Code strips bare `xargs`, but `xargs -n1 cmd` is matched as an xargs command, so `Bash(xargs *)` approves any inner command."
+example = "echo x | xargs -n1 touch"
+narrower = "Do not allow xargs by prefix."
+doc = "https://www.gnu.org/software/findutils/manual/html_node/find_html/Invoking-xargs.html"
+
+[[capability]]
+id = "wrap.exec-wrappers"
+paths = [["watch"], ["setsid"], ["ionice"], ["flock"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "exec"
+severity = "critical"
+title = "Exec wrapper that runs any program"
+explain = "These run their arguments as a command."
+example = "watch -n1 touch /tmp/proof"
+narrower = "Do not allow by prefix."
+doc = "https://code.claude.com/docs/en/permissions#exec-wrappers-and-find-actions"
+claude_mitigated = "Claude Code refuses to auto-approve exec wrappers through a prefix rule."
+
+[[capability]]
+id = "find.exec"
+paths = [["find"], ["fd"]]
+position = "after"
+kind = "flag"
+triggers = ["-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprintf", "-fls", "--exec", "-x", "--exec-batch", "-X"]
+effect = "exec"
+severity = "critical"
+title = "`find -exec` runs a command; `-delete` and `-fprint` write"
+explain = "find actions run arbitrary commands per match, delete files, or write output files anywhere. fd's `--exec` does the same."
+example = "find . -maxdepth 0 -exec touch /tmp/proof ';'"
+narrower = "Use the Glob tool, or allow `find` only as an exact command."
+doc = "https://www.gnu.org/software/findutils/manual/html_node/find_html/Run-Commands.html"
+demo = "find-exec"
+claude_mitigated = "Claude Code refuses to auto-approve `find` with -exec, -delete, -fprint and similar through a prefix rule (fd is not covered)."
+
+# ---------------------------------------------------------------- text tools that execute or write
+
+[[capability]]
+id = "awk.system"
+paths = [["awk"], ["gawk"], ["nawk"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "exec"
+severity = "critical"
+title = "awk programs can run commands"
+explain = "awk's `system()` and `print | \"cmd\"` run shell commands, and `print > \"file\"` writes anywhere."
+example = "awk 'BEGIN{system(\"touch /tmp/proof\")}'"
+narrower = "Allow exact awk programs only."
+doc = "https://www.gnu.org/software/gawk/manual/gawk.html#I_002fO-Functions"
+demo = "awk-system"
+
+[[capability]]
+id = "sed.write"
+paths = [["sed"], ["gsed"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "write"
+severity = "high"
+title = "sed can edit in place and write files anywhere"
+explain = "`sed -i` edits files in place and the `w file` command writes to any path; GNU sed's `e` command also runs shell commands."
+example = "sed -n 'w /tmp/proof' /dev/null"
+narrower = "Use the Edit tool for edits; allow `sed -n` reads only through exact rules."
+doc = "https://www.gnu.org/software/sed/manual/sed.html"
+
+[[capability]]
+id = "tar.program"
+paths = [["tar"], ["bsdtar"], ["gtar"]]
+position = "after"
+kind = "flag"
+triggers = ["--use-compress-program", "-I", "--to-command", "--checkpoint-action", "--rsh-command", "-C", "--directory"]
+effect = "exec"
+severity = "critical"
+title = "tar can run a compression program and extract anywhere"
+explain = "`--use-compress-program=<prog>` (both bsdtar and GNU tar) runs any program; GNU tar adds --to-command and --checkpoint-action=exec. `-C <dir>` extracts anywhere."
+example = "tar -cf /dev/null --use-compress-program='touch /tmp/proof' /dev/null"
+narrower = "Allow `tar -tf *` (list) only."
+doc = "https://man.freebsd.org/cgi/man.cgi?query=bsdtar"
+
+[[capability]]
+id = "sqlite.shell"
+paths = [["sqlite3"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "exec"
+severity = "critical"
+title = "sqlite3 dot-commands run shell commands"
+explain = "The sqlite3 shell's `.shell` and `.system` commands run programs, and `.output` / `.once` write files anywhere."
+example = "sqlite3 :memory: '.shell touch /tmp/proof'"
+narrower = "Allow `sqlite3 -readonly <file> <query>` as exact rules, or use a hook."
+doc = "https://sqlite.org/cli.html"
+demo = "sqlite-shell"
+
+[[capability]]
+id = "jq.files"
+paths = [["jq"]]
+position = "after"
+kind = "flag"
+triggers = ["--rawfile", "--slurpfile", "-L"]
+effect = "secret"
+severity = "low"
+title = "jq can read other files into its output"
+explain = "`--rawfile name path` loads any readable file; Read deny rules do not see the path as a file argument."
+example = "jq -n --rawfile k ~/.npmrc '$k'"
+narrower = "Usually acceptable; deny --rawfile if credentials matter."
+doc = "https://jqlang.org/manual/"
+
+# ---------------------------------------------------------------- file writes outside the project
+
+[[capability]]
+id = "fs.write-anywhere"
+paths = [["cp"], ["mv"], ["ln"], ["install"], ["rsync"], ["ditto"], ["dd"], ["truncate"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "write"
+severity = "high"
+title = "Writes or replaces files outside the project"
+explain = "Targets can be any path: overwriting ~/.zshrc, a LaunchAgent plist or a git hook turns a file copy into code that runs later."
+example = "cp payload ~/.zshrc"
+narrower = "Use the Edit and Write tools (which honour Edit rules and protected paths), or exact rules with fixed targets."
+doc = "https://www.gnu.org/software/coreutils/manual/html_node/cp-invocation.html"
+
+[[capability]]
+id = "fs.rsync-shell"
+paths = [["rsync"]]
+position = "after"
+kind = "flag"
+triggers = ["-e", "--rsh", "--rsync-path"]
+effect = "exec"
+severity = "critical"
+title = "`rsync -e` names the remote-shell program"
+explain = "`-e <cmd>` and `--rsync-path` choose programs rsync executes."
+example = "rsync -e 'touch /tmp/proof;:' x host:y"
+narrower = "Use exact rules."
+doc = "https://download.samba.org/pub/rsync/rsync.1"
+
+[[capability]]
+id = "fs.delete"
+paths = [["rm"], ["rmdir"], ["shred"], ["unlink"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "destructive"
+severity = "high"
+title = "Deletes files anywhere"
+explain = "Prefix rules for rm cover any path. Claude Code still prompts for recognised critical-path removals, but not for other directories outside the project."
+example = "rm -rf ~/some-folder"
+narrower = "Allow exact paths, such as `Bash(rm -rf ./build)`."
+doc = "https://code.claude.com/docs/en/permission-modes"
+
+[[capability]]
+id = "fs.perms"
+paths = [["chmod"], ["chown"], ["chflags"], ["xattr"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "write"
+severity = "medium"
+title = "Changes permissions or attributes anywhere"
+explain = "Can make files world-writable, mark scripts executable, or strip the quarantine attribute from downloaded apps."
+example = "xattr -d com.apple.quarantine ~/Downloads/SomeApp.app"
+narrower = "Allow exact targets."
+doc = "https://ss64.com/mac/chmod.html"
+
+# ---------------------------------------------------------------- network
+
+[[capability]]
+id = "net.curl"
+paths = [["curl"], ["wget"], ["http"], ["xh"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "network"
+severity = "high"
+title = "Sends data anywhere and writes downloads anywhere"
+explain = "`curl -T file` / `--data @file` upload local files to any host, `-o` writes anywhere, and `-K` reads options from a file. Prefix rules that name a URL are easy to step around."
+example = "curl -sS --data-binary @somefile https://example.invalid"
+narrower = "Prefer the WebFetch tool with `WebFetch(domain:...)` rules; keep curl on prompt."
+doc = "https://curl.se/docs/manpage.html"
+
+[[capability]]
+id = "net.ssh"
+paths = [["ssh"], ["scp"], ["sftp"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "exec"
+severity = "critical"
+title = "Runs commands on other machines, and locally through options"
+explain = "ssh runs remote commands, and `-o ProxyCommand=...` / `LocalCommand` (or scp `-S prog`) run local programs."
+example = "ssh -o ProxyCommand='touch /tmp/proof' x"
+narrower = "Keep on prompt."
+doc = "https://man.openbsd.org/ssh_config"
+
+[[capability]]
+id = "docker.run"
+paths = [["docker", "run"], ["docker", "exec"], ["docker", "compose"], ["docker-compose"], ["podman", "run"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "exec"
+severity = "critical"
+title = "Starts containers that can mount the host"
+explain = "`docker run -v ~:/h` gives a container read-write access to your home; `docker exec` runs any command in a running container."
+example = "docker run --rm -v \"$HOME\":/h alpine touch /h/proof"
+narrower = "Allow `docker ps *`, `docker images *` and exact compose targets."
+doc = "https://docs.docker.com/reference/cli/docker/container/run/"
+
+# ---------------------------------------------------------------- macOS
+
+[[capability]]
+id = "mac.launchctl"
+paths = [["launchctl"]]
+position = "subcommand"
+kind = "flag"
+triggers = ["submit", "load", "bootstrap", "enable", "kickstart", "setenv", "unload", "bootout", "kill", "remove", "start", "stop"]
+effect = "exec"
+severity = "critical"
+title = "Loads, starts or submits background jobs"
+explain = "`launchctl submit -l x -- prog` runs any program as a job; `bootstrap`/`load` install persistent agents; `kickstart`, `kill` and `bootout` start or stop services."
+example = "launchctl submit -l proof -- /usr/bin/touch /tmp/proof"
+narrower = "Allow read verbs only: `Bash(launchctl print *)`, `Bash(launchctl list *)`."
+doc = "https://ss64.com/mac/launchctl.html"
+
+[[capability]]
+id = "mac.defaults"
+paths = [["defaults"]]
+position = "subcommand"
+kind = "flag"
+triggers = ["write", "delete", "import", "rename"]
+effect = "write"
+severity = "medium"
+title = "Writes app and system preferences"
+explain = "`defaults write` changes preferences for any app outside the project."
+example = "defaults write com.example.app key value"
+narrower = "Allow `defaults read *` only."
+doc = "https://ss64.com/mac/defaults.html"
+
+[[capability]]
+id = "mac.security"
+paths = [["security"]]
+position = "subcommand"
+kind = "flag"
+triggers = ["find-generic-password", "find-internet-password", "dump-keychain", "export", "add-generic-password", "delete-generic-password", "unlock-keychain"]
+effect = "secret"
+severity = "high"
+title = "Reads or changes Keychain secrets"
+explain = "`security find-generic-password -w` prints a stored password; other verbs export or change Keychain items."
+example = "security find-generic-password -s SERVICE -w"
+narrower = "Do not allow `security` by prefix."
+doc = "https://ss64.com/mac/security.html"
+
+[[capability]]
+id = "mac.open"
+paths = [["open"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "exec"
+severity = "medium"
+title = "Opens files, URLs and apps"
+explain = "`open` launches any app (`-a`), hands files to their default handler (which may run them), and opens URLs in your signed-in browser."
+example = "open -a Terminal ."
+narrower = "Allow exact files or URLs."
+doc = "https://ss64.com/mac/open.html"
+
+[[capability]]
+id = "sched.crontab"
+paths = [["crontab"], ["at"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "exec"
+severity = "critical"
+title = "Schedules commands to run later"
+explain = "A crontab entry or at job runs any command later, outside the agent session."
+example = "crontab some-file"
+narrower = "Allow `crontab -l` only."
+doc = "https://man.freebsd.org/cgi/man.cgi?query=crontab"
+
+[[capability]]
+id = "proc.kill"
+paths = [["kill"], ["pkill"], ["killall"]]
+position = "after"
+kind = "any"
+exact = "applies"
+effect = "destructive"
+severity = "medium"
+title = "Stops any of your processes"
+explain = "Signals any process your user owns, including other agents, editors and daemons."
+example = "pkill -f node"
+narrower = "Allow exact targets."
+doc = "https://ss64.com/mac/pkill.html"
+
+[[capability]]
+id = "brew.install"
+paths = [["brew"]]
+position = "subcommand"
+kind = "flag"
+triggers = ["install", "reinstall", "upgrade", "tap", "uninstall", "services", "bundle"]
+effect = "exec"
+severity = "high"
+title = "Installs software and runs formula code"
+explain = "Formula and cask installs run their install code and put programs on your PATH; `brew services` starts background services; `brew tap` adds a third-party source."
+example = "brew install some-formula"
+narrower = "Allow `brew list *`, `brew info *`, `brew outdated *`."
+doc = "https://docs.brew.sh/Manpage"
+
+# ---------------------------------------------------------------- pins
+# Narrower replacements, keyed by the fixed words of an over-broad rule.
+# The engine re-runs itself on these to show what they still let through.
+
+[pins]
+"git" = ["git status *", "git diff *", "git log *", "git show *", "git branch --list *", "git rev-parse *", "git add *", "git commit *"]
+"gh" = ["gh pr view *", "gh pr list *", "gh pr diff *", "gh pr checks *", "gh run list *", "gh run view *", "gh release list *", "gh release view *"]
+"gh release" = ["gh release list *", "gh release view *", "gh release download *"]
+"gh pr" = ["gh pr view *", "gh pr list *", "gh pr diff *", "gh pr checks *"]
+"npm" = ["npm test", "npm run build", "npm run lint", "npm ls *", "npm view *"]
+"pnpm" = ["pnpm test", "pnpm typecheck", "pnpm lint", "pnpm build"]
+"pnpm test" = ["pnpm test"]
+"pnpm typecheck" = ["pnpm typecheck"]
+"pnpm run" = ["pnpm run test", "pnpm run typecheck"]
+"pnpm run test" = ["pnpm run test"]
+"pnpm run typecheck" = ["pnpm run typecheck"]
+"uv" = ["uv run pytest", "uv run pyright", "uv sync --frozen"]
+"uv run" = ["uv run pytest", "uv run pyright"]
+"cargo" = ["cargo check *", "cargo test *", "cargo clippy *", "cargo fmt *"]
+"launchctl" = ["launchctl print *", "launchctl list *"]
+"brew" = ["brew list *", "brew info *", "brew outdated *"]
+"docker" = ["docker ps *", "docker images *", "docker logs *"]
+"defaults" = ["defaults read *"]
+"crontab" = ["crontab -l"]
+
+# ---------------------------------------------------------------- gate evasion
+# Flags that may sit between a program and its subcommand. An ask or deny rule
+# that names `<program> <subcommand>` does not match `<program> <flag> <subcommand>`.
+# `verified` records how the parse was checked (a --help call, never the real action).
+
+[interpose.git]
+flag = "-C ."
+doc = "https://code.claude.com/docs/en/permissions#what-a-bash-rule-doesnt-match"
+verified = "Documented by Claude Code: `git -C . push` is not matched by `Bash(git push *)`."
+
+[interpose.gh]
+flag = "-R OWNER/REPO"
+after_words = 2
+doc = "https://cli.github.com/manual/gh_release"
+verified = "Flag placement checked with `gh release -R cli/cli create --help` on gh 2.103 (help only)."
+only = ["gh release"]
+
+[interpose.npm]
+flag = "--loglevel=warn"
+doc = "https://docs.npmjs.com/cli/using-npm/config"
+verified = "Flag placement checked with `npm --loglevel=warn publish --help` (help only)."
+
+[interpose.pnpm]
+flag = "--silent"
+doc = "https://pnpm.io/cli/publish"
+verified = "Flag placement checked with `pnpm --silent publish --help` (help only)."
+
+[interpose.cargo]
+flag = "-q"
+doc = "https://doc.rust-lang.org/cargo/commands/cargo.html"
+verified = "Flag placement checked with `cargo -q publish --help` (help only)."
+
+[interpose.uv]
+flag = "-q"
+doc = "https://docs.astral.sh/uv/reference/cli/"
+verified = "Flag placement checked with `uv -q publish --help` (help only)."
+
+[interpose.twine]
+flag = "--no-color"
+doc = "https://twine.readthedocs.io/en/stable/"
+verified = "Flag placement checked with `twine --no-color upload --help` (help only)."
