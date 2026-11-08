@@ -65,6 +65,9 @@ class PullInputs:
     swallowed_files: list[ChangedFile]
     guard_notes: list[str] = field(default_factory=list)
     swallowed_notes: list[str] = field(default_factory=list)
+    # Why Config Guard's inputs are incomplete in a way no finding can stand for (a limited
+    # step was stopped); any entry makes Config Guard unfinished, whatever its threshold.
+    guard_unfinished: list[str] = field(default_factory=list)
 
 
 def collect_inputs(
@@ -96,8 +99,11 @@ def collect_inputs(
     if base_truncated or head_truncated:
         notes.append("GitHub truncated a repository tree; unlisted files are marked unread.")
     limits = limits or AnalysisLimits()
-    base_files = _snapshot(repo, base_tree, [*changed, *previous], base_truncated, {}, limits)
-    head_files = _snapshot(repo, head_tree, changed, head_truncated, head_blobs, limits)
+    unfinished: list[str] = []
+    base_files = _snapshot(
+        repo, base_tree, [*changed, *previous], base_truncated, {}, limits, unfinished
+    )
+    head_files = _snapshot(repo, head_tree, changed, head_truncated, head_blobs, limits, unfinished)
     # A truncated tree can hide a startup config nobody changed, so it never passes.
     for files, truncated in ((base_files, base_truncated), (head_files, head_truncated)):
         if truncated:
@@ -113,6 +119,7 @@ def collect_inputs(
         swallowed_files=_swallowed_files(repo, pull_files, head_tree, swallowed_notes),
         guard_notes=notes,
         swallowed_notes=swallowed_notes,
+        guard_unfinished=unfinished,
     )
 
 
@@ -123,6 +130,7 @@ def _snapshot(
     truncated: bool,
     known_blobs: Mapping[str, str],
     limits: AnalysisLimits,
+    unfinished: list[str],
 ) -> dict[str, str]:
     """Startup configs first, then changed agent-facing files.
 
@@ -153,7 +161,7 @@ def _snapshot(
         limit = MAX_CONFIG_INPUT_BYTES if project_config_kind(path) else MAX_INPUT_BYTES
         reads += 1
         _read(repo, entry, path, limit, files)
-    for path in _hook_references(files, sorted(tree), limits):
+    for path in _hook_references(files, sorted(tree), limits, unfinished):
         if path in files or is_sensitive_path(path):
             continue
         if ".git" in {part.casefold() for part in path.split("/")}:
@@ -179,7 +187,7 @@ def reference_targets(files: dict[str, str], available: list[str]) -> list[str]:
 
 
 def _hook_references(
-    files: dict[str, str], available: list[str], limits: AnalysisLimits
+    files: dict[str, str], available: list[str], limits: AnalysisLimits, unfinished: list[str]
 ) -> list[str]:
     try:
         targets = run_limited(
@@ -197,6 +205,7 @@ def _hook_references(
         _mark_incomplete(
             files, "(hook references)", "startup config references could not be resolved"
         )
+        unfinished.append(f"Scripts the startup configs refer to were not resolved: {exc}.")
         return []
 
 

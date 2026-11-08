@@ -56,7 +56,7 @@ class AppSettings:
             guard_fail_on=parse_fail_on(env.get("APDB_GUARD_FAIL_ON", "high")),
             swallowed_fail_on=parse_fail_on(env.get("APDB_SWALLOWED_FAIL_ON", "never")),
             analysis_timeout_s=_positive(env, "APDB_ANALYSIS_TIMEOUT_S", 60.0),
-            analysis_memory_mb=_whole(env, "APDB_ANALYSIS_MEMORY_MB", 1024, minimum=64),
+            analysis_memory_mb=_whole(env, "APDB_ANALYSIS_MEMORY_MB", 1024, minimum=256),
         )
 
 

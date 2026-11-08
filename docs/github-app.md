@@ -123,8 +123,8 @@ pasted anywhere else.
 | `APDB_GUARD_FAIL_ON` | `critical`, `high` (default), `medium`, `low` or `never`. |
 | `APDB_SWALLOWED_FAIL_ON` | Same values; default `never` (advisory). |
 | `APDB_GITHUB_API_URL` | API base URL; default `https://api.github.com`. |
-| `APDB_ANALYSIS_TIMEOUT_S` | Deadline for one pull request's analysis; default 60. |
-| `APDB_ANALYSIS_MEMORY_MB` | Memory cap for the analysis process (enforced on Linux); default 1024. |
+| `APDB_ANALYSIS_TIMEOUT_S` | Deadline for each limited analysis step, in seconds; default 60. A pull request runs up to three (hook references for the base and the head, then both checks). |
+| `APDB_ANALYSIS_MEMORY_MB` | Memory cap for each analysis process (enforced on Linux); default 1024, minimum 256. |
 
 ## Prove it locally without registering anything
 

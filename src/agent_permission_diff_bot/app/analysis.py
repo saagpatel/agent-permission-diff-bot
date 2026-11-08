@@ -60,6 +60,9 @@ def run_analysis(inputs: PullInputs, limits: AnalysisLimits) -> list[CheckResult
     except (RuntimeError, ValueError) as exc:
         log.exception("The analysis failed")
         results = _unfinished(f"The analysis failed ({type(exc).__name__}). Re-run to retry.")
+    if inputs.guard_unfinished:
+        results[0].crashed = True
+        results[0].notes[:0] = inputs.guard_unfinished
     results[0].notes[:0] = inputs.guard_notes
     results[1].notes[:0] = inputs.swallowed_notes
     return results
@@ -73,6 +76,10 @@ def _guarded(name: CheckName, run: Callable[[], CheckResult]) -> CheckResult:
     """Run one check; a crash becomes a visible result instead of silently passing."""
     try:
         return run()
+    except MemoryError:
+        # The child's memory cap, not a crash in one check: run_limited reports it, and
+        # both checks come back unfinished.
+        raise
     except Exception as exc:
         log.exception("The %s check crashed", name)
         result = CheckResult(check=name, crashed=True)

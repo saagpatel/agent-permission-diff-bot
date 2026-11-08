@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 import httpx
@@ -14,6 +15,7 @@ from agent_permission_diff_bot.app.pipeline import target_from_event
 from agent_permission_diff_bot.app.replay import Recording, Replayer
 from agent_permission_diff_bot.app.settings import AppSettings, SettingsError
 from agent_permission_diff_bot.checks.render import COMMENT_MARKER
+from agent_permission_diff_bot.model import Severity
 
 FIXTURES = Path(__file__).parent / "fixtures" / "app"
 
@@ -267,13 +269,21 @@ def test_analysis_results_survive_the_round_trip_through_the_child() -> None:
     from agent_permission_diff_bot.app.analysis import AnalysisLimits, run_analysis
     from agent_permission_diff_bot.app.snapshot import PullInputs
     from agent_permission_diff_bot.checks.config_guard import run_config_guard
+    from agent_permission_diff_bot.checks.swallowed import ChangedFile, scan_swallowed
 
     base = {".claude/settings.json": json.dumps({"permissions": {"allow": []}})}
     head = {".claude/settings.json": json.dumps({"permissions": {"allow": ["Bash(git *)"]}})}
-    inputs = PullInputs(base_files=base, head_files=head, swallowed_files=[])
+    source = (
+        "try:\n    db.commit()\nexcept Exception:  # swallowed: ok, retried by the job\n"
+        "    pass\ntry:\n    db.commit()\nexcept Exception:\n    pass\n"
+    )
+    changed = [ChangedFile("x.py", source, frozenset(range(1, 9)))]
+    inputs = PullInputs(base_files=base, head_files=head, swallowed_files=changed)
     [guard, swallowed] = run_analysis(inputs, AnalysisLimits())
-    assert guard.findings == run_config_guard(base, head).findings
-    assert swallowed.check == "swallowed" and not swallowed.crashed
+    direct_swallowed = scan_swallowed(changed)
+    assert direct_swallowed.deliberate and direct_swallowed.findings, "the input covers both"
+    assert asdict(guard) == asdict(run_config_guard(base, head))
+    assert asdict(swallowed) == asdict(direct_swallowed)
 
 
 def test_an_older_push_finishing_late_does_not_overwrite_the_comment() -> None:
@@ -802,6 +812,23 @@ def test_one_check_crashing_in_the_child_still_reports_the_other() -> None:
         {"check": "config-guard"},
         {"check": "config-guard", "findings": {}, "deliberate": [], "notes": [], "crashed": False},
         {"check": "config-guard", "findings": [], "deliberate": [], "notes": [], "crashed": []},
+        {
+            "check": "config-guard",
+            "findings": [
+                {
+                    "check": "swallowed",
+                    "rule_id": "CG001",
+                    "severity": 3,
+                    "title": "t",
+                    "path": "p",
+                    "allows": [],
+                    "fix": "f",
+                }
+            ],
+            "deliberate": [],
+            "notes": [],
+            "crashed": False,
+        },
     ],
 )
 def test_malformed_results_are_refused(data: dict[str, object]) -> None:
@@ -820,6 +847,7 @@ def test_malformed_results_are_refused(data: dict[str, object]) -> None:
         ("APDB_ANALYSIS_MEMORY_MB", "inf"),
         ("APDB_ANALYSIS_MEMORY_MB", "0.5"),
         ("APDB_ANALYSIS_MEMORY_MB", "32"),
+        ("APDB_ANALYSIS_MEMORY_MB", "128"),
     ],
 )
 def test_analysis_limits_must_be_sane(tmp_path: Path, name: str, value: str) -> None:
@@ -864,3 +892,58 @@ def test_hook_references_that_exceed_the_limits_fail_closed() -> None:
     )
     found = run_config_guard(inputs.base_files, inputs.head_files).findings
     assert any(f.rule_id == "APD013" for f in found)
+
+
+@pytest.mark.parametrize("fail_on", [Severity.CRITICAL, None])
+def test_unresolved_hook_references_fail_config_guard_whatever_the_threshold(
+    fail_on: Severity | None,
+) -> None:
+    from agent_permission_diff_bot.app.analysis import AnalysisLimits, run_analysis
+    from agent_permission_diff_bot.app.snapshot import PullInputs
+    from agent_permission_diff_bot.checks.render import conclusion
+
+    inputs = PullInputs(
+        base_files={},
+        head_files={},
+        swallowed_files=[],
+        guard_unfinished=["Scripts the startup configs refer to were not resolved: timed out."],
+    )
+    guard, swallowed = run_analysis(inputs, AnalysisLimits())
+    assert guard.crashed and "not resolved" in guard.notes[0]
+    assert conclusion(guard, fail_on) == "failure"
+    assert not swallowed.crashed
+
+
+def test_a_timed_out_hook_reference_step_marks_config_guard_unfinished() -> None:
+    from agent_permission_diff_bot.app.analysis import AnalysisLimits
+    from agent_permission_diff_bot.app.snapshot import collect_inputs
+
+    settings = json.dumps(
+        {"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "bash a.sh"}]}]}}
+    )
+
+    class Repo:
+        def tree(self, sha: str) -> tuple[dict[str, dict[str, object]], bool]:
+            return {".claude/settings.json": {"sha": "c", "mode": "100644", "size": 10}}, False
+
+        def blob_text(self, sha: str, max_bytes: int) -> str:
+            return settings
+
+    changed = [{"filename": ".claude/settings.json", "status": "modified", "sha": "c"}]
+    inputs = collect_inputs(
+        Repo(), "b" * 40, "h" * 40, changed, limits=AnalysisLimits(timeout_s=0.001)
+    )
+    assert inputs.guard_unfinished and "timed out" in inputs.guard_unfinished[0]
+
+
+def test_running_out_of_memory_in_one_check_is_not_a_single_check_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_permission_diff_bot.app import analysis
+
+    def exhausted(files: object) -> object:
+        raise MemoryError
+
+    monkeypatch.setattr(analysis, "scan_swallowed", exhausted)
+    with pytest.raises(MemoryError):
+        analysis.analyze({}, {}, [])

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, cast
 
 from agent_permission_diff_bot.model import Severity
 from agent_permission_diff_bot.redaction import redact_text
@@ -80,6 +80,12 @@ def md_code(value: str) -> str:
     return f"{fence}{pad}{value}{pad}{fence}"
 
 
+def _same_check(value: object, check: str) -> CheckName:
+    if value != check:
+        raise ValueError(f"finding belongs to {value!r}, not {check!r}")
+    return cast(CheckName, check)
+
+
 def result_from_dict(data: object) -> CheckResult:
     """Rebuild a ``CheckResult`` from its JSON form (as ``run_limited`` returns it).
 
@@ -94,7 +100,7 @@ def result_from_dict(data: object) -> CheckResult:
     try:
         findings = [
             CheckFinding(
-                check=item["check"],
+                check=_same_check(item["check"], data["check"]),
                 rule_id=str(item["rule_id"]),
                 severity=Severity(int(item["severity"])),
                 title=str(item["title"]),
