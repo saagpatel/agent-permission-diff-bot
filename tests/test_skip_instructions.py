@@ -23,6 +23,8 @@ def _found(line: str) -> int:
         "The release script skips the checks on tags.",
         "If lint does not pass skip the review and merge.",
         "Never skip, disable the hooks.",
+        "Run codex --dangerously-bypass-approvals-and-sandbox for speed.",
+        "Use --skip-hooks; never use --no-verify.",
     ],
 )
 def test_skip_instructions_are_reported(line: str) -> None:
@@ -37,6 +39,12 @@ def test_skip_instructions_are_reported(line: str) -> None:
         "Never skip, bypass, or disable hooks.",
         "Never skip or disable the tests.",
         "Skipped tests are listed in the report.",
+        "Never use --skip-hooks.",
+        "Don't pass --bypass-checks.",
+        "Never pass --no-verify or --skip-hooks.",
+        "Never use --dangerously-bypass-approvals-and-sandbox.",
+        "Never skip or bypass or disable the tests.",
+        "Never skip and bypass nor disable hooks.",
     ],
 )
 def test_negated_or_descriptive_lines_stay_quiet(line: str) -> None:

@@ -87,7 +87,7 @@ _SKIP_CHECK_RE = re.compile(
     r"\bnever\s+run\b|\bno need to (run|wait for)\b|\bwithout (running|waiting for)\b)"
     r"(?:[^.!?;\n]|\.(?=\S)){0,60}?\b(tests?|reviews?|approvals?|secrets?|permissions?|polic(y|ies)|"
     r"guard(rail)?s?|hooks?|checks?|lint\w*|ci|type.?check\w*|verification|pre-commit)\b"
-    r"|--no-verify\b|--dangerously-skip-permissions\b",
+    r"|--no-verify\b|--dangerously-skip-permissions\b|--dangerously-bypass-approvals-and-sandbox\b",
     re.IGNORECASE,
 )
 _ABSORBED_BY_HOOK = {"APD011", "APD012", "APD015", "APD105"}
@@ -644,9 +644,18 @@ def _negated(text: str, match: re.Match[str]) -> bool:
     """
     if not _SKIP_VERBS.match(match.group(0)):
         return False
-    before = text[_clause_start(text, match.start()) : match.start()]
-    negator = _FLAG_NEGATOR_RE if match.group(0).startswith("--") else _NEGATOR_RE
-    return bool(negator.search(before))
+    start = _token_start(text, match)
+    # A flag whose name holds the verb (`--skip-hooks`) is negated like `--no-verify`:
+    # `Never use --skip-hooks`. `Speed matters--skip the tests` has no negator either way.
+    flag = text.startswith("--", start)
+    before = text[_clause_start(text, start) : start]
+    return bool((_FLAG_NEGATOR_RE if flag else _NEGATOR_RE).search(before))
+
+
+def _token_start(text: str, match: re.Match[str]) -> int:
+    """Where the matched instruction starts: at the `--` of a flag such as `--skip-hooks`."""
+    start = match.start()
+    return start - 2 if text[max(0, start - 2) : start] == "--" else start
 
 
 def _clause_start(text: str, position: int) -> int:
@@ -654,14 +663,18 @@ def _clause_start(text: str, position: int) -> int:
     return max(text.rfind(mark, 0, position) for mark in ".!?;,:") + 1
 
 
-# `skip` inside `--dangerously-skip-permissions` belongs to that flag, which has its own
-# branch and is matched (and negated) as a whole. Any other flag holding a skip verb
-# (`--skip-hooks`, `--bypass-checks`) is read as the instruction it is.
+# A verb inside `--dangerously-skip-permissions` or `--dangerously-bypass-approvals-and-sandbox`
+# belongs to that flag, which has its own branch and is matched (and negated) as a whole. Any
+# other flag holding a skip verb (`--skip-hooks`, `--bypass-checks`) is read as the
+# instruction it is.
 _INSIDE_FLAG_RE = re.compile(r"--dangerously-$", re.IGNORECASE)
-# A negator covers a list of skip verbs that ends in a conjunction: `Never skip, bypass, or
-# disable hooks`. A comma alone does not make a list (`Never skip, disable the hooks`).
+# A negator covers a list of skip verbs joined by at least one conjunction: `Never skip,
+# bypass, or disable hooks`, `never skip or bypass or disable hooks`. A comma alone does not
+# make a list (`Never skip, disable the hooks`).
+# Flags count as items too: `Never pass --no-verify or --skip-hooks`.
+_LIST_ITEM = rf"(?:--[\w-]+|{_SKIP_WORD})"
 _VERB_LIST_RE = re.compile(
-    rf"{_SKIP_WORD}(?:(?:\s*,\s*{_SKIP_WORD})*\s*,?\s*(?:or|and|nor)\s+{_SKIP_WORD})?",
+    rf"{_LIST_ITEM}(?:(?:\s*,\s*{_LIST_ITEM})*(?:\s*,?\s*(?:or|and|nor)\s+{_LIST_ITEM})+)?",
     re.IGNORECASE,
 )
 
@@ -725,7 +738,7 @@ def _added_passages(lines: list[str], added: set[int]) -> Iterable[tuple[int, st
             if match.start() < negated_until:
                 continue  # a later verb in a negated list
             if _negated(searchable, match):
-                verbs = _VERB_LIST_RE.match(searchable, match.start())
+                verbs = _VERB_LIST_RE.match(searchable, _token_start(searchable, match))
                 negated_until = verbs.end() if verbs else match.start()
                 continue
             # A match touches an edit when its clause does, so removing a negator on the line
