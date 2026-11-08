@@ -42,6 +42,8 @@ def parse_rules_text(text: str, source: Source) -> list[Rule]:
         if decision is None or not isinstance(pattern, list) or not pattern:
             continue
         for words in expand_pattern(pattern):
+            if len(rules) >= MAX_RULES_PER_FILE:
+                raise RulesParseError(f"{source.label}: more than {MAX_RULES_PER_FILE} rules")
             rules.append(
                 Rule(
                     agent="codex",
@@ -56,14 +58,26 @@ def parse_rules_text(text: str, source: Source) -> list[Rule]:
     return rules
 
 
+# Local patch: untrusted rules files (pull requests) must not be able to ask for an
+# exponential expansion. Past these limits the file is refused, never partly expanded.
+MAX_EXPANSIONS_PER_PATTERN = 256
+MAX_RULES_PER_FILE = 2000
+
+
 def expand_pattern(pattern: list[object]) -> list[tuple[str, ...]]:
     """Expand union elements (``["view", "list"]``) into one word tuple each."""
     choices: list[list[str]] = []
+    total = 1
     for element in pattern:
         if isinstance(element, (list, tuple)):
             choices.append([str(e) for e in element])
         else:
             choices.append([str(element)])
+        total *= max(len(choices[-1]), 1)
+        if total > MAX_EXPANSIONS_PER_PATTERN:
+            raise RulesParseError(
+                f"a pattern expands to more than {MAX_EXPANSIONS_PER_PATTERN} commands"
+            )
     return [tuple(combo) for combo in itertools.product(*choices)]
 
 
