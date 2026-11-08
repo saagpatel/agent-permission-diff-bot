@@ -43,13 +43,63 @@ def test_a_constant_return_shows_what_the_caller_gets() -> None:
 
 
 def test_a_returned_name_is_described_and_assignments_are_followed() -> None:
-    source = "def f():\n    try:\n        a()\n    except Exception:\n        return cached\n"
+    source = "def f(cached):\n    try:\n        a()\n    except Exception:\n        return cached\n"
     assert _probe(source, 4)[2] == "the caller gets the value of `cached` instead of an error"
     chained = (
-        "def f():\n    try:\n        a()\n    except Exception:\n"
+        "def f():\n    result = 1\n    try:\n        a()\n    except Exception:\n"
         "        previous = result\n        result = None\n        return previous\n"
     )
-    assert _probe(chained, 4)[2] == "the caller gets the value of `result` instead of an error"
+    assert _probe(chained, 5)[2] == "the caller gets the value of `result` instead of an error"
+
+
+@pytest.mark.parametrize(
+    ("source", "line"),
+    [
+        ("def f():\n    try:\n        a()\n    except Exception:\n        return cached\n", 4),
+        ("try:\n    a()\nexcept Exception:\n    ok = missing_name\n", 3),
+        (
+            "def f():\n    if c:\n        x = 1\n    try:\n        a()\n"
+            "    except E:\n        return x\n",
+            6,
+        ),
+    ],
+)
+def test_a_name_that_may_be_unbound_is_not_probed(source: str, line: int) -> None:
+    outcome, _, detail = _probe(source, line)
+    assert outcome == "not-probed" and "maybe unbound" in detail
+
+
+def test_names_bound_before_the_try_are_followed() -> None:
+    source = (
+        "import os\nDEFAULT = 3\n\ndef f(path, *rest, **options):\n    fallback = DEFAULT\n"
+        "    try:\n        a()\n    except OSError:\n        return fallback\n"
+    )
+    assert _probe(source, 8)[0] == "vanished"
+    builtin = "try:\n    a()\nexcept Exception:\n    return NotImplemented\n"
+    assert _probe(builtin, 3)[0] == "vanished"
+
+
+def test_a_later_except_clause_is_not_probed() -> None:
+    source = (
+        "def f():\n    try:\n        a()\n    except Exception:\n        raise\n"
+        "    except ValueError:\n        return None\n"
+    )
+    outcome, _, detail = _probe(source, 6)
+    assert outcome == "not-probed" and "earlier" in detail
+
+
+def test_an_enclosing_finally_is_not_probed() -> None:
+    source = (
+        "def f():\n    try:\n        try:\n            a()\n        except ValueError:\n"
+        "            return None\n    finally:\n        return 5\n"
+    )
+    outcome, _, detail = _probe(source, 5)
+    assert outcome == "not-probed" and "finally" in detail
+    nested_function = (
+        "try:\n    def g():\n        try:\n            a()\n        except ValueError:\n"
+        "            return None\nfinally:\n    pass\n"
+    )
+    assert _probe(nested_function, 5)[0] == "vanished"
 
 
 def test_continue_and_break_in_loops() -> None:
@@ -117,7 +167,8 @@ def test_a_try_with_finally_or_else_is_not_probed(extra: str) -> None:
 def test_literal_values_are_described() -> None:
     source = "try:\n    a()\nexcept Exception:\n    return {'ok': False, 'code': -1}\n"
     assert _probe(source, 3)[2] == "the caller gets `{'ok': False, 'code': -1}` instead of an error"
-    assert _probe("try:\n    a()\nexcept Exception:\n    return [x, ()]\n", 3)[0] == "vanished"
+    bound = "x = 1\ntry:\n    a()\nexcept Exception:\n    return [x, ()]\n"
+    assert _probe(bound, 4)[0] == "vanished"
 
 
 def test_chained_assignments_are_followed() -> None:

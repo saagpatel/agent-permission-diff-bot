@@ -17,6 +17,8 @@ the project's own code, which this probe deliberately does not do.
 from __future__ import annotations
 
 import ast
+import builtins
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Literal
 
@@ -54,18 +56,113 @@ def probe_python_handler(source: str, line: int) -> ProbeResult:
     )
     if found is None:
         return ProbeResult("not-probed", detail="no handler starts on that line")
-    return probe_handler(found[0], found[1])
+    return probe_handler(found[0], found[1], parent_map(tree))
 
 
-def probe_handler(statement: ast.Try | ast.TryStar, handler: ast.ExceptHandler) -> ProbeResult:
-    """Probe one handler of an already parsed ``try`` statement."""
+def parent_map(tree: ast.AST) -> dict[ast.AST, ast.AST]:
+    """Each node's parent, built once per parsed file."""
+    return {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+
+
+def probe_handler(
+    statement: ast.Try | ast.TryStar,
+    handler: ast.ExceptHandler,
+    parents: Mapping[ast.AST, ast.AST],
+) -> ProbeResult:
+    """Probe one handler of an already parsed ``try`` statement.
+
+    ``parents`` is the file's :func:`parent_map`. The probe claims an outcome only when
+    nothing else can change it: it refuses a ``try`` with ``finally`` or ``else``, a handler
+    after another ``except`` clause (which may catch the error first), one inside a
+    ``try`` whose ``finally`` runs after it, and one that reads a name that may be unbound.
+    """
     if statement.finalbody or statement.orelse:
         # A `finally` can return or raise over the handler, and an `else` changes what the
         # success path does; the outcome is no longer just the handler's.
         return ProbeResult("not-probed", detail="the try has a finally or else block")
+    if handler is not statement.handlers[0]:
+        # Exception classes are not resolved, so any earlier clause may catch it first.
+        return ProbeResult("not-probed", detail="an earlier `except` clause may catch it first")
+    if _inside_finally(statement, parents):
+        return ProbeResult("not-probed", detail="an enclosing `finally` runs after the handler")
     if not _straight_line(handler):
         return ProbeResult("not-probed", detail="the handler is not plain, call-free code")
+    unbound = _first_unbound_read(handler, _bound_before(statement, parents))
+    if unbound:
+        return ProbeResult("not-probed", detail=f"the handler reads `{unbound}`, maybe unbound")
     return ProbeResult("vanished", _injected_name(handler.type), _outcome(handler))
+
+
+_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef, ast.Module)
+_ALWAYS_BOUND = frozenset(dir(builtins))
+
+
+def _inside_finally(node: ast.AST, parents: Mapping[ast.AST, ast.AST]) -> bool:
+    """Whether a ``try`` with ``finally`` encloses ``node`` within the same function."""
+    current = parents.get(node)
+    while current is not None and not isinstance(current, _SCOPES):
+        if isinstance(current, (ast.Try, ast.TryStar)) and current.finalbody:
+            return True
+        current = parents.get(current)
+    return False
+
+
+def _bound_before(statement: ast.AST, parents: Mapping[ast.AST, ast.AST]) -> set[str]:
+    """Names certainly bound when ``statement`` runs: builtins, the enclosing function's
+    parameters, and names its scope assigns in straight-line statements before it."""
+    bound = set(_ALWAYS_BOUND)
+    child, scope = statement, parents.get(statement)
+    while scope is not None and not isinstance(scope, _SCOPES):
+        child, scope = scope, parents.get(scope)
+    if scope is None or isinstance(scope, ast.Lambda):
+        return bound
+    if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        arguments = scope.args
+        for arg in [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs]:
+            bound.add(arg.arg)
+        for extra in (arguments.vararg, arguments.kwarg):
+            if extra is not None:
+                bound.add(extra.arg)
+    for earlier in scope.body:
+        if earlier is child:
+            break
+        bound |= _binds(earlier)
+    return bound
+
+
+def _binds(statement: ast.stmt) -> set[str]:
+    """Names an unconditional statement binds once it has run."""
+    if isinstance(statement, ast.Assign):
+        return {n.id for t in statement.targets for n in ast.walk(t) if isinstance(n, ast.Name)}
+    if isinstance(statement, ast.AnnAssign) and statement.value is not None:
+        return {n.id for n in ast.walk(statement.target) if isinstance(n, ast.Name)}
+    if isinstance(statement, (ast.Import, ast.ImportFrom)):
+        return {(a.asname or a.name).split(".")[0] for a in statement.names if a.name != "*"}
+    if isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return {statement.name}
+    return set()
+
+
+def _first_unbound_read(handler: ast.ExceptHandler, bound: set[str]) -> str:
+    """The first name the handler reads that is not certainly bound at that point."""
+    known = set(bound)
+    if handler.name:
+        known.add(handler.name)
+    for statement in handler.body:
+        value = getattr(statement, "value", None)
+        if value is not None:
+            for node in ast.walk(value):
+                if isinstance(node, ast.Name) and node.id not in known:
+                    return node.id
+        if isinstance(statement, ast.Assign):
+            known |= {t.id for t in statement.targets if isinstance(t, ast.Name)}
+        elif (
+            isinstance(statement, ast.AnnAssign)
+            and isinstance(statement.target, ast.Name)
+            and statement.value is not None
+        ):
+            known.add(statement.target.id)
+    return ""
 
 
 def _outcome(handler: ast.ExceptHandler) -> str:

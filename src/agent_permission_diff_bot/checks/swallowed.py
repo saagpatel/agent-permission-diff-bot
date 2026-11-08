@@ -31,7 +31,7 @@ from agent_permission_diff_bot.checks.model import (
     DeliberateCatch,
     rank,
 )
-from agent_permission_diff_bot.checks.probe import probe_handler
+from agent_permission_diff_bot.checks.probe import parent_map, probe_handler
 from agent_permission_diff_bot.model import Severity
 
 MAX_FILE_BYTES = 1024 * 1024
@@ -394,6 +394,7 @@ def _python_catches(changed: ChangedFile, notes: list[str]) -> list[_Catch]:
         notes.append(f"`{changed.path}` did not parse as Python (line {exc.lineno}); not scanned.")
         return []
     catches: list[_Catch] = []
+    parents = parent_map(tree)
     for node in ast.walk(tree):
         if isinstance(node, (ast.Try, ast.TryStar)):
             names = tuple(_called_names(node.body))
@@ -412,7 +413,7 @@ def _python_catches(changed: ChangedFile, notes: list[str]) -> list[_Catch]:
                         broad=caught in _BROAD_PY or caught == "bare except",
                         narrow=_all_narrow(handler.type),
                         language="python",
-                        probe=probe_handler(node, handler).sentence(),
+                        probe=probe_handler(node, handler, parents).sentence(),
                     )
                 )
         elif isinstance(node, (ast.With, ast.AsyncWith)):
