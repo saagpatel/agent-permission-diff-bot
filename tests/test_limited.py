@@ -303,3 +303,58 @@ def test_an_interrupt_while_waiting_stops_the_io_first(monkeypatch: pytest.Monke
     monkeypatch.undo()
     assert io_state["running"] is False, "the reader stopped before control returned"
     reader.close()
+
+
+def test_an_interrupt_while_the_io_thread_starts_still_stops_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reader, writer = _pipe()
+    original_start = threading.Thread.start
+    stopped: list[bool] = []
+
+    def interrupted_start(self: threading.Thread) -> None:
+        original_start(self)  # the thread is launched, then the interrupt lands
+        raise KeyboardInterrupt
+
+    def stop() -> None:
+        stopped.append(True)
+        writer.close()
+
+    monkeypatch.setattr(threading.Thread, "start", interrupted_start)
+    io_state: dict[str, bool] = {}
+    with pytest.raises(KeyboardInterrupt):
+        call_within(10, lambda: reader.recv_bytes(1000), stop, io_state=io_state)
+    monkeypatch.undo()
+    assert stopped == [True]
+    assert io_state["running"] is False, "the reader finished before control returned"
+    reader.close()
+
+
+def test_a_thread_that_may_not_have_started_keeps_its_pipes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import agent_permission_diff_bot.limited as limited
+
+    monkeypatch.setattr(limited, "_SHUTDOWN_GRACE_S", 0.1)
+
+    def interrupted_before_launch(self: threading.Thread) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(threading.Thread, "start", interrupted_before_launch)
+    io_state: dict[str, bool] = {}
+    stopped: list[bool] = []
+    with pytest.raises(KeyboardInterrupt):
+        call_within(10, lambda: b"", lambda: stopped.append(True), io_state=io_state)
+    assert stopped == [True]
+    assert io_state["running"] is True, "unknown counts as running, so pipes stay open"
+
+
+def test_a_host_that_refuses_a_thread_is_not_running(monkeypatch: pytest.MonkeyPatch) -> None:
+    def refuse(self: threading.Thread) -> None:
+        raise RuntimeError("can't start new thread")
+
+    monkeypatch.setattr(threading.Thread, "start", refuse)
+    io_state: dict[str, bool] = {}
+    with pytest.raises(RuntimeError):
+        call_within(10, lambda: b"", lambda: None, io_state=io_state)
+    assert io_state["running"] is False

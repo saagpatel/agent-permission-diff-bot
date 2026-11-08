@@ -151,18 +151,28 @@ def call_within(
     deadline = (time.monotonic() if started is None else started) + timeout_s
     state = {} if io_state is None else io_state
     box: dict[str, Any] = {}
+    # Set by the worker itself when ``work`` is over. ``is_alive()`` is not enough: while
+    # ``Thread.start()`` waits for the new thread to bootstrap, an interrupt can arrive with
+    # the thread launched but not yet reported alive.
+    finished = threading.Event()
+    refused = False  # the host could not start a thread at all
 
     def run() -> None:
         try:
             box["data"] = work()
         except Exception as exc:  # reported to the caller below
             box["error"] = exc
+        finally:
+            finished.set()
 
     worker = threading.Thread(target=run, name="run-limited-io", daemon=True)
     state["running"] = True
     try:
-        # Started inside the try, so an interrupt that lands right after it still stops it.
-        worker.start()
+        try:
+            worker.start()
+        except RuntimeError:
+            refused = True
+            raise
         worker.join(max(0.0, deadline - time.monotonic()))
         if worker.is_alive():
             stop()
@@ -173,14 +183,16 @@ def call_within(
                 )
             raise LimitExceededError(f"timed out after {timeout_s:g}s")
     except BaseException as exc:
-        # An interrupt while waiting must not leave the I/O running behind the caller's
-        # cleanup. The timeout paths above already stopped it.
-        if not isinstance(exc, LimitExceededError) and worker.is_alive():
+        # An interrupt while starting or waiting must not leave the I/O running behind the
+        # caller's cleanup. The timeout paths above already stopped it. ``stop`` is safe
+        # when nothing started yet: it cancels the work before the child is launched.
+        if not isinstance(exc, LimitExceededError) and not refused:
             stop()
-            worker.join(_SHUTDOWN_GRACE_S)
+            finished.wait(_SHUTDOWN_GRACE_S)
         raise
     finally:
-        state["running"] = worker.is_alive()
+        # Unknown counts as running: a thread that may still start must keep its pipes.
+        state["running"] = not refused and not finished.is_set()
     if time.monotonic() > deadline:
         stop()
         raise LimitExceededError(f"timed out after {timeout_s:g}s")
