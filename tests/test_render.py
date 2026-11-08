@@ -108,3 +108,40 @@ def test_md_code_survives_backticks() -> None:
 
     assert md_code("a`b") == "``a`b``"
     assert md_code("`x`") == "`` `x` ``"
+
+
+def _html(markdown: str) -> str:
+    from markdown_it import MarkdownIt
+
+    return MarkdownIt("commonmark").render(markdown)
+
+
+def test_escaped_backtick_cannot_smuggle_html_into_the_rendered_comment() -> None:
+    hostile = finding(
+        "New instruction tells agents to skip a check",
+        allows=("Agents are told: “Skip tests \\`<details><summary>Safe change</summary>`”",),
+    )
+    html = _html(render_comment([CheckResult("config-guard", [hostile])], REPO))
+    assert "<details" not in html and "<summary" not in html
+
+
+def test_truncated_title_cannot_unbalance_the_location_code_span() -> None:
+    rule = "Bash(" + "a" * 200 + ")"
+    hostile = finding(
+        f"New allow rule `{rule}` while `x` runs",
+        path=".claude/skills/<details>/SKILL.md",
+    )
+    for markdown in (
+        render_comment([CheckResult("config-guard", [hostile])], REPO),
+        render_check_output(CheckResult("config-guard", [hostile]), REPO)["summary"],
+    ):
+        assert "<details" not in _html(markdown)
+
+
+def test_a_crashed_check_never_reads_as_passed() -> None:
+    crashed = CheckResult("config-guard", crashed=True, notes=["The check did not finish: X."])
+    assert conclusion(crashed, None) == "failure"
+    assert conclusion(CheckResult("swallowed", crashed=True), None) == "neutral"
+    output = render_check_output(crashed, REPO)
+    assert output["title"] == "The check did not finish"
+    assert "widens" not in output["summary"]

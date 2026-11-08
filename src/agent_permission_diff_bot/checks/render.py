@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import string
 from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import quote
@@ -42,7 +43,12 @@ class RepoRef:
 
 
 def conclusion(result: CheckResult, fail_on: Severity | None) -> Conclusion:
-    """``failure`` at or above ``fail_on``; ``neutral`` for other findings; else ``success``."""
+    """``failure`` at or above ``fail_on``; ``neutral`` for other findings; else ``success``.
+
+    A check that did not finish never passes: Config Guard fails, Swallowed is neutral.
+    """
+    if result.crashed:
+        return "failure" if result.check == "config-guard" else "neutral"
     worst = result.max_severity
     if worst is None:
         return "success"
@@ -94,6 +100,15 @@ def render_comment(results: list[CheckResult], repo: RepoRef) -> str:
 
 def render_check_output(result: CheckResult, repo: RepoRef) -> dict[str, Any]:
     """The ``output`` object of a completed check run."""
+    if result.crashed:
+        notes = "\n".join(f"- {_clean(note, 400)}" for note in result.notes)
+        return {
+            "title": "The check did not finish",
+            "summary": redact_text(
+                "The analysis did not complete, so this pull request was not checked. "
+                "Re-run the check to retry.\n\n" + notes
+            ),
+        }
     title = _count(result) if result.findings else "No findings"
     summary_lines: list[str] = []
     for index, finding in enumerate(result.findings, start=1):
@@ -178,9 +193,11 @@ def _count(result: CheckResult) -> str:
 def _clean(text: str, limit: int) -> str:
     """Collapse whitespace, cap length and keep PR-controlled text from becoming HTML.
 
-    Code spans are found the way CommonMark pairs them (a run of n backticks closes only
-    at the next run of exactly n), and stay literal. ``<`` outside them is escaped, and an
-    HTML comment opener is broken everywhere so it can never hide the rest of a comment.
+    Code spans are paired the way CommonMark pairs them (a run of n backticks closes only
+    at the next run of exactly n) and are copied literally. Outside them, a backslash keeps
+    escaping the character after it, ``<`` is escaped, and a backtick run with no partner is
+    backslash-escaped so it can never pair with a span added after this text. An HTML
+    comment opener is broken everywhere so it can never hide the rest of a comment.
     """
     text = " ".join(text.split())
     if len(text) > limit:
@@ -188,17 +205,28 @@ def _clean(text: str, limit: int) -> str:
     out: list[str] = []
     index = 0
     while index < len(text):
-        if text[index] != "`":
-            stop = text.find("`", index)
-            stop = len(text) if stop < 0 else stop
+        char = text[index]
+        if char == "\\":
+            following = text[index + 1 : index + 2]
+            if following and following in string.punctuation:
+                out.append(text[index : index + 2])
+                index += 2
+            else:
+                out.append(char)
+                index += 1
+            continue
+        if char != "`":
+            stop = min(
+                (pos for pos in (text.find("`", index), text.find("\\", index)) if pos >= 0),
+                default=len(text),
+            )
             out.append(text[index:stop].replace("<", "&lt;"))
             index = stop
             continue
         run = len(text[index:]) - len(text[index:].lstrip("`"))
-        fence = text[index : index + run]
         close = _closing_run(text, index + run, run)
         if close < 0:
-            out.append(fence)
+            out.append("\\`" * run)
             index += run
             continue
         out.append(text[index : close + run])

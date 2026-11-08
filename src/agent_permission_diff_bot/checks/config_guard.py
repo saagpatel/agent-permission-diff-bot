@@ -353,7 +353,16 @@ def _mode_finding(
     new_rank = ranks.get(atom.value)
     old_rank = ranks.get(previous[0]) if previous else None
     if new_rank is None:
-        return None
+        return CheckFinding(
+            check="config-guard",
+            rule_id="CG003",
+            severity=Severity.MEDIUM,
+            title=f"{md_code(atom.resource)} is now the unrecognised value {md_code(atom.value)}",
+            path=atom.path,
+            line=_line_of(head.get(atom.path, ""), atom.value),
+            allows=("Config Guard does not know this mode, so how much it allows is unknown.",),
+            fix="Use a documented mode value, or confirm what the agent does with this one.",
+        )
     widening = new_rank > old_rank if old_rank is not None else new_rank > 1
     if not widening:
         return None
@@ -562,6 +571,29 @@ def _instruction_findings(
             )
 
 
+_NEGATOR_RE = re.compile(
+    r"\b(never|not|don'?t|doesn'?t|mustn'?t|shouldn'?t|cannot|can'?t|no)\b(\W+\w+){0,2}\W*$",
+    re.IGNORECASE,
+)
+_SKIP_VERBS = re.compile(
+    r"(skip|bypass|ignore|disable|avoid|suppress|silence)\b|--no-verify|--dangerously",
+    re.IGNORECASE,
+)
+
+
+def _negated(text: str, match: re.Match[str]) -> bool:
+    """`Never skip the tests.` and `Don't use --no-verify.` strengthen a check.
+
+    Only a skip verb (or a skip flag) can be negated this way; `do not run the tests`
+    is itself the instruction to skip, so it is never treated as negated.
+    """
+    if not _SKIP_VERBS.match(match.group(0)):
+        return False
+    sentence_start = max(text.rfind(mark, 0, match.start()) for mark in ".!?;")
+    before = text[sentence_start + 1 : match.start()]
+    return bool(_NEGATOR_RE.search(before))
+
+
 def _added_passages(added: Mapping[int, str]) -> Iterable[tuple[int, str]]:
     """Skip-check matches in runs of added lines, so hard-wrapped sentences still match."""
     numbers = sorted(added)
@@ -578,6 +610,8 @@ def _added_passages(added: Mapping[int, str]) -> Iterable[tuple[int, str]]:
             text += added[number].strip() + " "
         reported: set[int] = set()
         for match in _SKIP_CHECK_RE.finditer(text):
+            if _negated(text, match):
+                continue
             line_no = max(n for offset, n in starts if offset <= match.start())
             if line_no in reported:
                 continue
@@ -593,7 +627,8 @@ def _added_passages(added: Mapping[int, str]) -> Iterable[tuple[int, str]]:
 def _rule_file_findings(
     base: Mapping[str, str], head: Mapping[str, str]
 ) -> Iterable[tuple[tuple[str, ...], CheckFinding]]:
-    for path, text in head.items():
+    for path in sorted(set(head) | {p for p in base if _CODEX_RULES_RE.search(p)}):
+        text = head.get(path, "")
         if _SKILL_RE.search(path):
             before = _frontmatter_rules(base.get(path, ""), path) or []
             after = _frontmatter_rules(text, path)
@@ -620,6 +655,39 @@ def _rule_file_findings(
                 finding = _while_skill_runs(finding, path)
             if finding is not None:
                 yield ("allow", path, rule.raw), finding
+        if _CODEX_RULES_RE.search(path):
+            yield from _removed_codex_gates(before, after, path, deleted=path not in head)
+
+
+def _removed_codex_gates(
+    before: list[Rule], after: list[Rule], path: str, *, deleted: bool
+) -> Iterable[tuple[tuple[str, ...], CheckFinding]]:
+    """Codex `forbidden` and `prompt` rules that no longer hold for the same command."""
+    remaining = {
+        (rule.specifier, rule.decision) for rule in after if rule.decision in {"deny", "ask"}
+    }
+    for rule in before:
+        if rule.decision not in {"deny", "ask"} or (rule.specifier, rule.decision) in remaining:
+            continue
+        if rule.decision == "ask" and (rule.specifier, "deny") in remaining:
+            continue
+        verb = "forbidden" if rule.decision == "deny" else "prompt"
+        gone = "file deleted" if deleted else "rule removed"
+        yield (
+            ("codex-gate", path, rule.raw),
+            CheckFinding(
+                check="config-guard",
+                rule_id="CG002",
+                severity=Severity.HIGH if rule.decision == "deny" else Severity.MEDIUM,
+                title=f"Codex {verb} rule {md_code(rule.raw)} removed ({gone})",
+                path=path,
+                allows=(
+                    f"{md_code(rule.specifier or '')} is no longer "
+                    + ("blocked." if rule.decision == "deny" else "asked about before it runs."),
+                ),
+                fix=f"Keep the {verb} rule unless this command is meant to run without one.",
+            ),
+        )
 
 
 def _unreadable_rules(path: str) -> CheckFinding:
@@ -637,6 +705,10 @@ def _unreadable_rules(path: str) -> CheckFinding:
     )
 
 
+# Delimiters are `---` lines of their own, so `---` inside a value does not end the block.
+_FRONTMATTER_RE = re.compile(
+    r"\A---[ \t]*\r?\n(?P<body>.*?)^---[ \t]*\r?$", re.DOTALL | re.MULTILINE
+)
 MAX_FRONTMATTER_CHARS = 64 * 1024
 MAX_TOOL_ENTRIES = 500
 MAX_TOOL_CHARS = 2000
@@ -645,11 +717,10 @@ _TOOLS_LINE_RE = re.compile(r"^(allowed-tools|tools):\s*(?P<value>.+)$", re.MULT
 
 def _frontmatter_rules(text: str, path: str) -> list[Rule] | None:
     """Allow rules from skill frontmatter; None when the frontmatter cannot be read."""
-    if not text.startswith("---"):
-        return []
-    parts = text.split("---", 2)
-    if len(parts) < 3:
-        return []
+    frontmatter = _FRONTMATTER_RE.match(text)
+    if frontmatter is None:
+        return []  # no closing `---` line: Claude Code reads no frontmatter either
+    parts = ["", frontmatter.group("body")]
     if len(parts[1]) > MAX_FRONTMATTER_CHARS:
         return None
     source = Source("claude", "skill allowed-tools", path, path)
