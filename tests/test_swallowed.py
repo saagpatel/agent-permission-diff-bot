@@ -212,3 +212,33 @@ def test_added_lines_from_github_patch() -> None:
 
 def test_added_lines_for_new_file_patch() -> None:
     assert added_lines_from_patch("@@ -0,0 +1,2 @@\n+one\n+two") == {1, 2}
+
+
+def test_removed_line_that_looks_like_a_header_does_not_shift_lines() -> None:
+    assert added_lines_from_patch("@@ -1,3 +1,3 @@\n a\n----------\n+b\n c\n+x") == {2, 4}
+
+
+@pytest.mark.parametrize(
+    "handler",
+    [
+        "catch (e) { ok = false; }",
+        "catch (e) { this.failed = true; }",
+        "catch { return -1; }",
+        "catch (e) { return void 0 }",
+    ],
+)
+def test_typescript_flag_assignments_and_unary_constants_swallow(handler: str) -> None:
+    assert [r[0] for r in scan("web/x.ts", f"try {{ await verifyToken(t) }} {handler}\n")] == [
+        "SW-auth"
+    ]
+
+
+def test_typescript_assigning_the_error_keeps_it() -> None:
+    assert scan("web/x.ts", "try { save() } catch (e) { lastError = e; }\n") == []
+
+
+def test_python_negative_constant_return_swallows() -> None:
+    source = (
+        "def f():\n    try:\n        verify_token(t)\n    except Exception:\n        return -1\n"
+    )
+    assert [r[0] for r in scan("x.py", source)] == ["SW-auth"]

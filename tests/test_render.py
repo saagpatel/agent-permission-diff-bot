@@ -91,3 +91,20 @@ def test_conclusions() -> None:
     assert conclusion(medium, Severity.HIGH) == "neutral"
     assert conclusion(CheckResult("config-guard", [finding()]), Severity.HIGH) == "failure"
     assert conclusion(CheckResult("swallowed", [finding()]), None) == "neutral"
+
+
+def test_hostile_file_names_and_notes_stay_inert() -> None:
+    hostile = finding(path="a`<details>`.py")
+    result = CheckResult("config-guard", [hostile], notes=["`x`` <img src=x> ```"])
+    body = render_comment([result], REPO)
+    output = render_check_output(result, REPO)
+    assert "<details>" not in body.replace("``a`<details>`.py:4``", "")
+    assert "<img" not in output["summary"]
+    assert "``a`<details>`.py:4``" in body
+
+
+def test_md_code_survives_backticks() -> None:
+    from agent_permission_diff_bot.checks.model import md_code
+
+    assert md_code("a`b") == "``a`b``"
+    assert md_code("`x`") == "`` `x` ``"

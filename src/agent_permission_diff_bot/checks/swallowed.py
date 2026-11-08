@@ -247,10 +247,13 @@ def added_lines_from_patch(patch: str) -> frozenset[int]:
             continue
         if not line:
             continue
-        if raw.startswith("+") and not raw.startswith("+++"):
+        # GitHub's patch field has no file headers, so the first character alone decides:
+        # a removed `----------` docstring underline is a removal, not a header.
+        marker = raw[:1]
+        if marker == "+":
             added.add(line)
             line += 1
-        elif (raw.startswith("-") and not raw.startswith("---")) or raw.startswith("\\"):
+        elif marker in {"-", "\\"}:
             continue
         else:
             line += 1
@@ -437,6 +440,8 @@ def _python_swallows(handler: ast.ExceptHandler) -> bool:
 def _is_plain_value(node: ast.expr | None) -> bool:
     if node is None or isinstance(node, (ast.Constant, ast.Name)):
         return True
+    if isinstance(node, ast.UnaryOp):
+        return isinstance(node.operand, ast.Constant)
     if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
         return not node.elts
     if isinstance(node, ast.Dict):
@@ -561,8 +566,19 @@ def _ts_block_swallows(block: Any, clause: Any) -> bool:
             values = [c for c in statement.named_children if c.type != "comment"]
             if not values or _ts_plain(values[0], param_name):
                 continue
+        if statement.type == "expression_statement" and _ts_plain_assignment(statement, param_name):
+            continue
         return False
     return True
+
+
+def _ts_plain_assignment(statement: Any, *forbidden: str) -> bool:
+    """`ok = false;` or `this.failed = true;`: a flag set, the error itself dropped."""
+    expressions = [c for c in statement.named_children if c.type != "comment"]
+    if len(expressions) != 1 or expressions[0].type != "assignment_expression":
+        return False
+    right = expressions[0].child_by_field_name("right")
+    return right is not None and _ts_plain(right, *forbidden)
 
 
 def _ts_handler_swallows(handler: Any) -> bool:
@@ -597,6 +613,9 @@ def _ts_plain(node: Any, *forbidden: str) -> bool:
         return not node.named_children
     if node.type == "parenthesized_expression" and node.named_children:
         return _ts_plain(node.named_children[0], *forbidden)
+    if node.type == "unary_expression":
+        argument = node.child_by_field_name("argument")
+        return argument is not None and argument.type != "identifier" and _ts_plain(argument)
     return False
 
 

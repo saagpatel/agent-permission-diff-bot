@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import quote
 
-from agent_permission_diff_bot.checks.model import CheckFinding, CheckResult
+from agent_permission_diff_bot.checks.model import CheckFinding, CheckResult, md_code
 from agent_permission_diff_bot.model import Severity
 from agent_permission_diff_bot.redaction import redact_text
 
@@ -54,7 +54,17 @@ def conclusion(result: CheckResult, fail_on: Severity | None) -> Conclusion:
 def render_comment(results: list[CheckResult], repo: RepoRef) -> str:
     """One comment for the whole PR, ranked per check, with a suggested fix for each finding."""
     lines = [COMMENT_MARKER]
-    if not any(r.findings or r.deliberate for r in results):
+    for result in results:
+        name = CHECK_NAMES[result.check]
+        if result.crashed:
+            lines.append(f"⚠️ **{name} did not finish**; see the check run. Re-run it to retry.")
+        elif result.notes:
+            lines.append(
+                f"⚠️ {name} read the pull request only partly ({len(result.notes)} coverage "
+                "note(s)); see the check run."
+            )
+    complete = not any(r.crashed or r.notes for r in results)
+    if complete and not any(r.findings or r.deliberate for r in results):
         lines.append("No new agent permission widening or swallowed errors in this pull request.")
     for result in results:
         if not result.findings and not result.deliberate:
@@ -67,7 +77,8 @@ def render_comment(results: list[CheckResult], repo: RepoRef) -> str:
             lines.append(f"\n…and {hidden} more in the **{CHECK_NAMES[result.check]}** check.")
         if result.deliberate:
             marked = "; ".join(
-                f"[`{d.path}:{d.line}`]({repo.link(d.path, d.line)}): {_clean(d.reason, 80)}"
+                f"[{md_code(f'{d.path}:{d.line}')}]({repo.link(d.path, d.line)}): "
+                f"{_clean(d.reason, 80)}"
                 for d in result.deliberate[:COMMENT_LIMIT]
             )
             lines.append(f"\nMarked deliberate, not ranked: {marked}")
@@ -90,12 +101,13 @@ def render_check_output(result: CheckResult, repo: RepoRef) -> dict[str, Any]:
     if result.deliberate:
         summary_lines.append("\n**Marked deliberate (not ranked)**\n")
         summary_lines.extend(
-            f"- [`{d.path}:{d.line}`]({repo.link(d.path, d.line)}): {_clean(d.reason, 200)}"
+            f"- [{md_code(f'{d.path}:{d.line}')}]({repo.link(d.path, d.line)}): "
+            f"{_clean(d.reason, 200)}"
             for d in result.deliberate
         )
     if result.notes:
         summary_lines.append("\n**Coverage notes**\n")
-        summary_lines.extend(f"- {note}" for note in result.notes)
+        summary_lines.extend(f"- {_clean(note, 400)}" for note in result.notes)
     if result.check == "swallowed":
         summary_lines.append(f"\n{_MARK_HINT}")
     if not summary_lines:
@@ -118,7 +130,9 @@ def _comment_item(
     index: int, finding: CheckFinding, repo: RepoRef, max_allows: int = 2
 ) -> list[str]:
     where = f"{finding.path}:{finding.line}" if finding.line else finding.path
-    location = f"[`{where}`]({repo.link(finding.path, finding.line)})" if finding.path else ""
+    location = (
+        f"[{md_code(where)}]({repo.link(finding.path, finding.line)})" if finding.path else ""
+    )
     allows = "; ".join(_clean(item, 220) for item in finding.allows[:max_allows])
     label = "Now allows" if finding.check == "config-guard" else "Risk"
     return [
@@ -164,15 +178,43 @@ def _count(result: CheckResult) -> str:
 def _clean(text: str, limit: int) -> str:
     """Collapse whitespace, cap length and keep PR-controlled text from becoming HTML.
 
-    Text inside single-backtick code spans is shown literally by GitHub, so only
-    ``<`` outside spans is escaped. An HTML comment opener is broken everywhere,
-    since a mismatched span must never let ``<!--`` hide the rest of the comment.
+    Code spans are found the way CommonMark pairs them (a run of n backticks closes only
+    at the next run of exactly n), and stay literal. ``<`` outside them is escaped, and an
+    HTML comment opener is broken everywhere so it can never hide the rest of a comment.
     """
     text = " ".join(text.split())
     if len(text) > limit:
         text = text[: limit - 1] + "…"
-    parts = text.split("`")
-    if len(parts) % 2 == 0:  # unbalanced: treat everything as prose
-        parts = [text.replace("`", "'")]
-    cleaned = [part if index % 2 else part.replace("<", "&lt;") for index, part in enumerate(parts)]
-    return "`".join(cleaned).replace("<!--", "< !--")
+    out: list[str] = []
+    index = 0
+    while index < len(text):
+        if text[index] != "`":
+            stop = text.find("`", index)
+            stop = len(text) if stop < 0 else stop
+            out.append(text[index:stop].replace("<", "&lt;"))
+            index = stop
+            continue
+        run = len(text[index:]) - len(text[index:].lstrip("`"))
+        fence = text[index : index + run]
+        close = _closing_run(text, index + run, run)
+        if close < 0:
+            out.append(fence)
+            index += run
+            continue
+        out.append(text[index : close + run])
+        index = close + run
+    return "".join(out).replace("<!--", "< !--")
+
+
+def _closing_run(text: str, start: int, length: int) -> int:
+    position = start
+    while True:
+        found = text.find("`", position)
+        if found < 0:
+            return -1
+        end = found
+        while end < len(text) and text[end] == "`":
+            end += 1
+        if end - found == length:
+            return found
+        position = end
