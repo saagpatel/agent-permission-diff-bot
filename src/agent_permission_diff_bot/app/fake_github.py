@@ -51,6 +51,7 @@ class FakeGitHub:
     base_sha: str = ""
     head_sha: str = ""
     merge_base_sha: str = ""
+    base_ref: str = "main"
     # Like GitHub for a commit that only exists in a fork: the commit-to-PR lookup is empty.
     fork_lookup_empty: bool = False
     check_runs: dict[int, dict[str, Any]] = field(default_factory=dict)
@@ -95,7 +96,11 @@ class FakeGitHub:
             "pull_request": {
                 "number": self.number,
                 "state": "open",
-                "base": {"sha": self.base_sha, "ref": "main"},
+                "base": {
+                    "sha": self.base_sha,
+                    "ref": self.base_ref,
+                    "repo": {"id": self.repository_id},
+                },
                 "head": {"sha": self.head_sha, "ref": "risky-change"},
             },
         }

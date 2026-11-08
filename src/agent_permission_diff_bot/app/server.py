@@ -7,15 +7,13 @@ file contents through the API, so fork pull requests are safe to analyze.
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import hmac
 import json
 import logging
 import threading
 from collections import OrderedDict
-from collections.abc import Iterator
-from typing import Any
+from collections.abc import Callable
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, Request, Response
@@ -40,60 +38,63 @@ MAX_TRACKED_PULLS = 1024
 def verify_signature(secret: str, body: bytes, header: str) -> bool:
     if not header.startswith("sha256="):
         return False
-    expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
-    return hmac.compare_digest(expected, header.removeprefix("sha256="))
+    try:
+        given = header.removeprefix("sha256=").encode("ascii")
+    except UnicodeEncodeError:
+        return False  # not a hex digest; compare_digest would raise on non-ASCII text
+    expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest().encode("ascii")
+    return hmac.compare_digest(expected, given)
 
 
-class PullLocks:
-    """One lock per pull request, remembering only the most recent ``limit`` of them.
+class PullRuns:
+    """Runs for one pull request happen one at a time, without parking worker threads.
 
-    ``holding`` reserves the entry under the same guard that hands it out, before the lock
-    is acquired, and only entries nobody has reserved are forgotten. So a lock can never
-    be dropped between being handed out and being taken, and two runs for one pull
-    request never overlap.
+    If a run for the pull request is in progress, ``submit`` queues the new job and
+    returns at once; the thread already running the pull request works through the queue.
+    A job with the same key (head commit and base branch) replaces a queued one rather
+    than piling up. Nothing is kept for a pull request once its queue is empty.
     """
 
-    def __init__(self, limit: int = MAX_TRACKED_PULLS) -> None:
-        self.limit = limit
-        self._entries: OrderedDict[tuple[int, int], list[Any]] = OrderedDict()
+    def __init__(self) -> None:
         self._guard = threading.Lock()
+        self._running: set[tuple[int, int]] = set()
+        self._pending: dict[tuple[int, int], OrderedDict[tuple[str, str], Callable[[], None]]] = {}
 
-    @contextlib.contextmanager
-    def holding(self, repository_id: int, number: int) -> Iterator[None]:
-        key = (repository_id, number)
-        entry = self._reserve(key)
-        try:
-            with entry[0]:
-                yield
-        finally:
-            self._release(key)
-
-    def _reserve(self, key: tuple[int, int]) -> list[Any]:
+    def submit(
+        self, pull: tuple[int, int], job_key: tuple[str, str], job: Callable[[], None]
+    ) -> bool:
+        """Run ``job`` now, or queue it; returns False when it was queued."""
         with self._guard:
-            entry = self._entries.pop(key, None) or [threading.Lock(), 0]
-            entry[1] += 1
-            self._entries[key] = entry
-            for old_key in list(self._entries):
-                if len(self._entries) <= self.limit:
-                    break
-                if self._entries[old_key][1] == 0:
-                    del self._entries[old_key]
-            return entry
+            if pull in self._running:
+                self._pending.setdefault(pull, OrderedDict())[job_key] = job
+                return False
+            self._running.add(pull)
+        next_job: Callable[[], None] | None = job
+        while next_job is not None:
+            try:
+                next_job()
+            except Exception:
+                log.exception("A queued run for pull request %s failed", pull)
+            with self._guard:
+                queue = self._pending.get(pull)
+                if queue:
+                    _, next_job = queue.popitem(last=False)
+                    if not queue:
+                        del self._pending[pull]
+                else:
+                    self._running.discard(pull)
+                    next_job = None
+        return True
 
-    def _release(self, key: tuple[int, int]) -> None:
+    def busy(self) -> int:
         with self._guard:
-            entry = self._entries.get(key)
-            if entry is not None:
-                entry[1] -= 1
-
-    def __len__(self) -> int:
-        return len(self._entries)
+            return len(self._running) + sum(len(q) for q in self._pending.values())
 
 
 def create_app(settings: AppSettings, transport: httpx.BaseTransport | None = None) -> FastAPI:
     http = make_http(settings.api_url, transport)
     auth = AppAuth(app_id=settings.app_id, private_key=settings.private_key, http=http)
-    locks = PullLocks()
+    runs = PullRuns()
     app = FastAPI(title="Agent Permission Diff Bot", docs_url=None, redoc_url=None)
 
     def process(target: PullTarget) -> None:
@@ -101,30 +102,36 @@ def create_app(settings: AppSettings, transport: httpx.BaseTransport | None = No
             token = auth.installation_token(target.installation_id, target.repository_id)
             repo = RepoClient(http=http, owner=target.owner, name=target.name, token=token)
             resolved = resolve_target(repo, target)
-            if resolved is None:
-                log.info("No open pull request for %s; nothing to re-run", target.head_sha[:7])
-                return
-            # One run per pull request at a time; only the PR's live head writes the comment.
-            with locks.holding(resolved.repository_id, resolved.number):
-                outcome = run_checks(
-                    repo,
-                    resolved,
-                    app_id=settings.app_id,
-                    guard_fail_on=settings.guard_fail_on,
-                    swallowed_fail_on=settings.swallowed_fail_on,
-                    is_current=lambda: repo.pull_head(resolved.number) == resolved.head_sha,
-                )
         except Exception:
             log.exception("Checks for %s/%s#%s failed", target.owner, target.name, target.number)
             return
-        log.info(
-            "Checked %s/%s#%s at %s: %s, comment %s",
-            resolved.owner,
-            resolved.name,
-            resolved.number,
-            resolved.head_sha[:7],
-            outcome.conclusions,
-            outcome.comment_action,
+        if resolved is None:
+            log.info("No open pull request for %s; nothing to re-run", target.head_sha[:7])
+            return
+
+        def run() -> None:
+            outcome = run_checks(
+                repo,
+                resolved,
+                app_id=settings.app_id,
+                guard_fail_on=settings.guard_fail_on,
+                swallowed_fail_on=settings.swallowed_fail_on,
+            )
+            log.info(
+                "Checked %s/%s#%s at %s: %s, comment %s",
+                resolved.owner,
+                resolved.name,
+                resolved.number,
+                resolved.head_sha[:7],
+                outcome.conclusions,
+                outcome.comment_action,
+            )
+
+        # One run per pull request at a time, queued rather than waited for.
+        runs.submit(
+            (resolved.repository_id, resolved.number),
+            (resolved.head_sha, resolved.base_ref),
+            run,
         )
 
     @app.get("/healthz")
@@ -158,8 +165,10 @@ def create_app(settings: AppSettings, transport: httpx.BaseTransport | None = No
             return JSONResponse({"error": "body is not a JSON object"}, status_code=400)
         try:
             target = target_from_event(event, payload)
-        except PayloadError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
+        except PayloadError:
+            # The detail goes to the log only; the response never echoes it.
+            log.warning("Rejected a %s webhook with a malformed payload", event, exc_info=True)
+            return JSONResponse({"error": "payload is missing required fields"}, status_code=400)
         if target is None:
             return JSONResponse({"status": "ignored"}, status_code=202)
         background.add_task(process, target)

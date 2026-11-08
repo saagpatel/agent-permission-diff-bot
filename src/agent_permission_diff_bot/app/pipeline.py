@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, Literal
 
 from agent_permission_diff_bot.app.github import RepoClient
 from agent_permission_diff_bot.app.snapshot import collect_inputs
@@ -24,6 +24,9 @@ from agent_permission_diff_bot.model import Severity
 
 log = logging.getLogger(__name__)
 
+# "new-head": the PR points at another commit; "new-base": it targets another branch.
+Freshness = Literal["current", "new-head", "new-base", "unknown"]
+
 PULL_REQUEST_ACTIONS = {"opened", "synchronize", "reopened", "ready_for_review"}
 
 
@@ -36,12 +39,15 @@ class PullTarget:
     number: int
     base_sha: str
     head_sha: str
+    base_ref: str = ""  # the base branch this run is for; a retarget makes the run stale
+    rerun: bool = False  # a re-run asked for this exact commit, even if it is not the head
 
 
 @dataclass
 class RunOutcome:
     conclusions: dict[str, str] = field(default_factory=dict)
-    comment_action: str = "none"  # "created", "updated", "unchanged", "stale" or "none"
+    # "created", "updated", "unchanged", "stale", "unconfirmed" or "none"
+    comment_action: str = "none"
     comment_body: str = ""
     results: list[CheckResult] = field(default_factory=list)
 
@@ -90,7 +96,16 @@ def target_from_event(event: str, payload: Mapping[str, Any]) -> PullTarget | No
             return None
         suite = (source.get("check_suite") or {}) if event == "check_run" else source
         pulls = source.get("pull_requests") or suite.get("pull_requests") or []
-        pull = pulls[0] if isinstance(pulls, list) and pulls else None
+        # The list can include pull requests into other repositories (a fork's own PRs);
+        # only one whose base is this repository is ours.
+        pull = next(
+            (
+                entry
+                for entry in (pulls if isinstance(pulls, list) else [])
+                if isinstance(entry, Mapping) and _base_repo_id(entry) == repository.get("id")
+            ),
+            None,
+        )
         # The commit whose check was clicked, not whatever the pull request points at now.
         head_sha = str(source.get("head_sha") or suite.get("head_sha") or "")
         if pull is None and not head_sha:
@@ -107,9 +122,17 @@ def target_from_event(event: str, payload: Mapping[str, Any]) -> PullTarget | No
             number=int(pull["number"]) if pull else 0,
             base_sha=str(pull["base"]["sha"]) if pull else "",
             head_sha=head_sha or str(pull["head"]["sha"]),
+            base_ref=str(pull["base"].get("ref", "")) if pull else "",
+            rerun=event != "pull_request",
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise PayloadError(f"pull request fields are missing or malformed: {exc}") from exc
+
+
+def _base_repo_id(pull: Mapping[str, Any]) -> Any:
+    base = pull.get("base")
+    repo = base.get("repo") if isinstance(base, Mapping) else None
+    return repo.get("id") if isinstance(repo, Mapping) else None
 
 
 def resolve_target(repo: RepoClient, target: PullTarget) -> PullTarget | None:
@@ -127,7 +150,10 @@ def resolve_target(repo: RepoClient, target: PullTarget) -> PullTarget | None:
         for pull in candidates():
             if pull.get("state") == "open" and pull.get("head", {}).get("sha") == target.head_sha:
                 return replace(
-                    target, number=int(pull["number"]), base_sha=str(pull["base"]["sha"])
+                    target,
+                    number=int(pull["number"]),
+                    base_sha=str(pull["base"]["sha"]),
+                    base_ref=str(pull["base"].get("ref", "")),
                 )
     return None
 
@@ -139,10 +165,20 @@ def run_checks(
     app_id: str,
     guard_fail_on: Severity | None,
     swallowed_fail_on: Severity | None,
-    is_current: Callable[[], bool] = lambda: True,
+    freshness: Callable[[], Freshness] | None = None,
 ) -> RunOutcome:
+    """Run both checks for ``target`` and publish them, unless a newer run owns the PR.
+
+    ``freshness`` compares the PR's live head commit and base branch with the run's; by
+    default it asks GitHub. A stale run publishes nothing that could replace a newer
+    result, and when freshness cannot be confirmed the comment is left alone.
+    """
     outcome = RunOutcome()
     ref = RepoRef(full_name=repo.full_name, head_sha=target.head_sha)
+    fresh = freshness or (lambda: live_freshness(repo, target))
+    if _superseded(fresh(), target):
+        outcome.comment_action = "stale"
+        return outcome
     run_ids: dict[CheckName, int] = {}
     try:
         checks: tuple[CheckName, ...] = ("config-guard", "swallowed")
@@ -172,8 +208,13 @@ def run_checks(
     except Exception as exc:
         log.exception("Reading pull request %s#%s failed", repo.full_name, target.number)
         _fail_runs(repo, run_ids, exc)
-        _report_unfinished(repo, target, ref, app_id, is_current, exc)
+        _report_unfinished(repo, target, ref, app_id, fresh, exc)
         raise
+    if _superseded(fresh(), target):
+        # The head or base moved while this ran; the newer run's check runs supersede these.
+        _cancel_runs(repo, run_ids)
+        outcome.comment_action = "stale"
+        return outcome
     completed: set[CheckName] = set()
     try:
         for result in results:
@@ -193,26 +234,57 @@ def run_checks(
     outcome.results = results
     body = render_comment(results, ref)
     outcome.comment_body = body
-    if not _still_current(is_current):
-        # A newer push arrived while this one ran; its run owns the comment.
-        outcome.comment_action = "stale"
+    state = fresh()
+    if state != "current":
+        # A newer run owns the comment, or GitHub could not confirm this run is current:
+        # never risk replacing newer findings with these.
+        outcome.comment_action = "unconfirmed" if state == "unknown" else "stale"
         return outcome
     outcome.comment_action = _upsert_comment(repo, target.number, body, app_id, results)
     return outcome
 
 
-def _still_current(is_current: Callable[[], bool]) -> bool:
-    """Whether this run's head is still the pull request's head.
+def live_freshness(repo: RepoClient, target: PullTarget) -> Freshness:
+    """``current`` when the PR's live head and base branch are the run's.
 
-    If GitHub cannot say, the comment is written anyway: it names the commit it describes,
-    and a newer run (serialized behind this one) rewrites it, whereas skipping would leave
-    an older result standing next to these check runs.
+    ``unknown`` when GitHub cannot say, in which case nothing that could replace a newer
+    result (the comment) is written.
     """
     try:
-        return is_current()
+        head_sha, base_ref = repo.pull_state(target.number)
     except Exception:
-        log.exception("Could not read the pull request's head; writing the comment anyway")
-        return True
+        log.exception("Could not read the pull request's head and base")
+        return "unknown"
+    if target.base_ref and base_ref != target.base_ref:
+        return "new-base"
+    if head_sha != target.head_sha:
+        return "new-head"
+    return "current"
+
+
+def _superseded(state: Freshness, target: PullTarget) -> bool:
+    """Whether this run's check runs would stand in for a newer result.
+
+    A retargeted pull request always supersedes the run. A newer head supersedes it too,
+    except for a re-run someone asked for on this exact commit: its check runs apply to
+    that commit only (it never writes the comment unless it is the current head).
+    """
+    return state == "new-base" or (state == "new-head" and not target.rerun)
+
+
+def _cancel_runs(repo: RepoClient, run_ids: Mapping[CheckName, int]) -> None:
+    output = {
+        "title": "Superseded",
+        "summary": (
+            "The pull request's head or base branch changed while this ran; the newer "
+            "run's result is the one that counts."
+        ),
+    }
+    for run_id in run_ids.values():
+        try:
+            repo.complete_check_run(run_id, "cancelled", output)
+        except Exception:
+            log.exception("Could not mark check run %s as superseded", run_id)
 
 
 def _guarded(name: CheckName, run: Callable[[], CheckResult]) -> CheckResult:
@@ -233,7 +305,7 @@ def _report_unfinished(
     target: PullTarget,
     ref: RepoRef,
     app_id: str,
-    is_current: Callable[[], bool],
+    fresh: Callable[[], Freshness],
     exc: Exception,
 ) -> None:
     """After a read failure, the comment must not keep showing an older all-clear."""
@@ -243,7 +315,7 @@ def _report_unfinished(
         CheckResult(check="swallowed", crashed=True, notes=[note]),
     ]
     try:
-        if _still_current(is_current):
+        if fresh() == "current":
             _upsert_comment(repo, target.number, render_comment(results, ref), app_id, results)
     except Exception:
         log.exception("Could not update the comment after a read failure")

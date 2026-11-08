@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 import httpx
@@ -274,17 +275,19 @@ def test_an_older_push_finishing_late_does_not_overwrite_the_comment() -> None:
     repo = RepoClient(
         http=http, owner="octo-demo", name="guard-demo", token="ghs_replay_installation_token"
     )
+    answers = iter(["current", "new-head", "new-head"])
     outcome = run_checks(
         repo,
         target,
         app_id="123456",
         guard_fail_on=None,
         swallowed_fail_on=None,
-        is_current=lambda: False,
+        freshness=lambda: next(answers),  # type: ignore[arg-type, return-value]
     )
     assert outcome.comment_action == "stale"
     assert bot_comments(replayer) == []
-    assert len(replayer.github.check_runs) == 2
+    runs = list(replayer.github.check_runs.values())
+    assert len(runs) == 2 and all(run_["conclusion"] == "cancelled" for run_ in runs)
 
 
 def test_rerun_from_a_fork_finds_the_pull_request_by_head_commit() -> None:
@@ -404,12 +407,10 @@ def test_a_late_delivery_checks_the_files_of_its_own_commit() -> None:
         replayer.send(Recording("pull_request", older, first.base, risky), advance_head=False)
         == 202
     )
-    old_runs = {
-        run["name"]: run["conclusion"]
-        for run in replayer.github.check_runs.values()
-        if run["head_sha"] == commit_sha(risky)
-    }
-    assert old_runs["Agent Config Guard"] == "failure", "the older commit's own AGENTS.md change"
+    old_runs = [
+        run for run in replayer.github.check_runs.values() if run["head_sha"] == commit_sha(risky)
+    ]
+    assert old_runs == [], "a late delivery for a superseded head publishes nothing"
     assert bot_comments(replayer) == [], "the newer, clean head owns the comment"
 
 
@@ -485,44 +486,32 @@ def test_a_source_file_missing_from_a_truncated_tree_is_read_with_a_cap() -> Non
     assert repo.caps and all(cap <= 1024 * 1024 for cap in repo.caps)
 
 
-def test_held_locks_are_never_evicted() -> None:
+def test_runs_for_one_pull_request_queue_instead_of_parking_threads() -> None:
     import threading
 
-    from agent_permission_diff_bot.app.server import PullLocks
+    from agent_permission_diff_bot.app.server import PullRuns
 
-    locks = PullLocks(limit=2)
-    entered, release = threading.Event(), threading.Event()
+    runs = PullRuns()
+    order: list[str] = []
+    started, release = threading.Event(), threading.Event()
 
-    def hold() -> None:
-        with locks.holding(1, 1):
-            entered.set()
-            release.wait(5)
+    def first() -> None:
+        started.set()
+        release.wait(5)
+        order.append("first")
 
-    holder = threading.Thread(target=hold)
-    holder.start()
-    assert entered.wait(5)
-    for number in range(2, 10):
-        with locks.holding(1, number):
-            pass
-    assert (1, 1) in locks._entries
+    worker = threading.Thread(target=lambda: runs.submit((1, 1), ("a", "main"), first))
+    worker.start()
+    assert started.wait(5)
+    began = time.monotonic()
+    assert runs.submit((1, 1), ("b", "main"), lambda: order.append("second")) is False
+    assert runs.submit((1, 1), ("b", "main"), lambda: order.append("second again")) is False
+    assert time.monotonic() - began < 1, "a busy pull request never blocks the caller"
+    assert runs.submit((1, 2), ("c", "main"), lambda: order.append("other PR")) is True
     release.set()
-    holder.join(5)
-
-
-def test_a_lock_handed_out_but_not_yet_taken_is_not_evicted() -> None:
-    from agent_permission_diff_bot.app.server import PullLocks
-
-    locks = PullLocks(limit=2)
-    entry = locks._reserve((1, 1))  # handed out; the caller has not acquired it yet
-    for number in range(2, 10):
-        with locks.holding(1, number):
-            pass
-    assert locks._entries[(1, 1)] is entry
-    locks._release((1, 1))
-    for number in range(10, 13):
-        with locks.holding(1, number):
-            pass
-    assert (1, 1) not in locks._entries, "idle entries are still forgotten"
+    worker.join(5)
+    assert order == ["other PR", "first", "second again"]
+    assert runs.busy() == 0, "nothing is kept once a pull request's queue is empty"
 
 
 def test_serve_without_settings_exits_cleanly(
@@ -614,12 +603,12 @@ def test_a_failed_completion_never_strands_a_check_run_in_progress() -> None:
     assert all(run_["status"] == "completed" for run_ in replayer.github.check_runs.values())
 
 
-def test_the_comment_is_written_even_if_the_live_head_cannot_be_read() -> None:
+def test_no_comment_is_written_when_freshness_cannot_be_confirmed() -> None:
     replayer = Replayer(Recording.load(FIXTURES / "broad-bash-allow"))
     replayer.github._pull = lambda body: httpx.Response(502)  # type: ignore[method-assign]
     assert replayer.send() == 202
-    [body] = bot_comments(replayer)
-    assert "Bash(git *)" in body
+    assert bot_comments(replayer) == []
+    assert conclusions(replayer)["Agent Config Guard"] == "failure", "check runs still land"
 
 
 def test_a_rerun_checks_the_commit_that_was_clicked() -> None:
@@ -685,3 +674,91 @@ def test_signed_but_malformed_payloads_get_a_clear_400() -> None:
     del broken["pull_request"]["head"]
     assert _signed_post(replayer, "pull_request", json.dumps(broken).encode()) == 400
     assert replayer.github.check_runs == {}
+
+
+def test_a_delayed_run_for_the_old_base_publishes_nothing_after_a_retarget() -> None:
+    recording = Recording.load(FIXTURES / "broad-bash-allow")
+    replayer = Replayer(recording)
+    replayer.github.base_ref = "release"  # the PR now targets another branch
+    stale = json.loads(json.dumps(recording.payload))
+    stale["pull_request"]["base"]["ref"] = "main"
+    assert replayer.send(Recording("pull_request", stale, recording.base, recording.head)) == 202
+    assert replayer.github.check_runs == {}
+    assert bot_comments(replayer) == []
+
+
+def test_a_rerun_ignores_pull_requests_into_other_repositories() -> None:
+    recording = Recording.load(FIXTURES / "silent-except")
+    pull = recording.payload["pull_request"]
+    foreign = {
+        "number": 77,
+        "base": {"sha": "0" * 40, "ref": "main", "repo": {"id": 1}},
+        "head": pull["head"],
+    }
+    payload = {
+        "action": "rerequested",
+        "check_run": {
+            "name": "Swallowed errors",
+            "head_sha": pull["head"]["sha"],
+            "pull_requests": [foreign],
+        },
+        "repository": recording.payload["repository"],
+        "installation": recording.payload["installation"],
+    }
+    target = target_from_event("check_run", payload)
+    assert target is not None and target.number == 0, "looked up in this repository instead"
+
+
+def test_a_non_ascii_signature_is_a_401_not_a_crash() -> None:
+    replayer = Replayer(Recording.load(FIXTURES / "clean"))
+    response = replayer.client.post(
+        "/webhook",
+        content=b"{}",
+        headers=[
+            (b"X-GitHub-Event", b"ping"),
+            (b"X-Hub-Signature-256", "sha256=\u00e9".encode("latin-1")),
+        ],
+    )
+    assert response.status_code == 401
+
+
+def test_a_pure_rename_is_not_called_too_large() -> None:
+    from agent_permission_diff_bot.app.snapshot import collect_inputs
+
+    class Repo:
+        def tree(self, sha: str) -> tuple[dict[str, dict[str, object]], bool]:
+            return {}, False
+
+        def blob_text(self, sha: str, max_bytes: int) -> str:
+            raise AssertionError("nothing to download for a pure rename")
+
+    files = [
+        {
+            "filename": "b.py",
+            "previous_filename": "a.py",
+            "status": "renamed",
+            "changes": 0,
+            "sha": "s",
+        }
+    ]
+    inputs = collect_inputs(Repo(), "b" * 40, "h" * 40, files)
+    assert not any("too large" in note for note in inputs.swallowed_notes)
+
+
+def test_a_malformed_payload_answer_does_not_echo_details() -> None:
+    recording = Recording.load(FIXTURES / "clean")
+    replayer = Replayer(recording)
+    broken = json.loads(json.dumps(recording.payload))
+    del broken["pull_request"]["head"]
+    body = json.dumps(broken).encode()
+    import hashlib
+    import hmac
+
+    digest = hmac.new(replayer.secret.encode(), body, hashlib.sha256).hexdigest()
+    response = replayer.client.post(
+        "/webhook",
+        content=body,
+        headers={"X-GitHub-Event": "pull_request", "X-Hub-Signature-256": f"sha256={digest}"},
+    )
+    assert response.status_code == 400
+    assert response.json() == {"error": "payload is missing required fields"}

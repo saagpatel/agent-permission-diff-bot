@@ -138,10 +138,10 @@ class RepoClient:
         files = list(data.get("files") or [])
         return str(data["merge_base_commit"]["sha"]), files, len(files) >= MAX_COMPARE_FILES
 
-    def pull_head(self, number: int) -> str:
-        """The pull request's head commit right now, whatever order webhooks arrived in."""
+    def pull_state(self, number: int) -> tuple[str, str]:
+        """The pull request's head commit and base branch right now."""
         data = self._request("GET", f"/repos/{self.full_name}/pulls/{number}").json()
-        return str(data["head"]["sha"])
+        return str(data["head"]["sha"]), str(data["base"]["ref"])
 
     def open_pulls(self) -> list[dict[str, Any]]:
         return list(self._paginate(f"/repos/{self.full_name}/pulls", {"state": "open"}))

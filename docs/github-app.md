@@ -21,11 +21,17 @@ each push. Findings are ranked, and each one comes with a suggested fix.
 - If reading the pull request fails, Config Guard reports `failure` ("did not finish")
   rather than passing; Swallowed reports `neutral`. The comment says so too, and never shows
   the all-clear line when a check crashed or read the pull request only partly.
-- When pushes arrive close together, only the newest push writes the comment; each push
-  still gets its own check runs.
+- Every run compares the pull request's live head commit and base branch with its own
+  before it publishes. A run that is already superseded creates no check runs; one that
+  becomes superseded while it works marks its runs `cancelled` ("Superseded") and leaves
+  the comment alone; and when GitHub cannot confirm the head and base, the check runs
+  still complete but the comment is not touched.
 - Changing a pull request's base branch runs both checks again against the new base, so a
   head that passed against a permissive branch cannot keep that result after being
-  retargeted. A re-run checks the commit whose check was re-run.
+  retargeted. A re-run checks the commit whose check was re-run (its check runs apply to
+  that commit; only the current head writes the comment).
+- Events for one pull request are queued and run one at a time, without holding a server
+  worker per waiting event.
 
 ### Marking a swallowed error as deliberate
 

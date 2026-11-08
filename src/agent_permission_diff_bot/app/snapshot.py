@@ -216,6 +216,8 @@ def _swallowed_files(
             continue
         patch = item.get("patch")
         if not patch:
+            if item.get("status") == "renamed" and not int(item.get("changes") or 0):
+                continue  # a pure rename: no line changed, so nothing new to scan
             skipped_patch += 1
             continue
         changed = changed_lines_from_patch(str(patch))

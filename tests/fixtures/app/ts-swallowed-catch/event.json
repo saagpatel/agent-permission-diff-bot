@@ -12,14 +12,16 @@
         "ref": "main",
         "sha": "8aa235a0ab18dcc4f89ef59470fb5950431e5dac",
         "repo": {
-          "full_name": "octo-demo/guard-demo"
+          "full_name": "octo-demo/guard-demo",
+          "id": 9001
         }
       },
       "head": {
         "ref": "risky-change",
         "sha": "8f4e9d3bb456add0e6ad868de8361e5972b19f5a",
         "repo": {
-          "full_name": "octo-demo/guard-demo"
+          "full_name": "octo-demo/guard-demo",
+          "id": 9001
         }
       }
     },
