@@ -263,11 +263,52 @@ def test_an_enclosing_with_is_not_probed() -> None:
         "        except ValueError:\n            return None\n"
     )
     outcome, _, detail = _probe(source, 5)
-    assert outcome == "not-probed" and "finally" in detail
+    assert outcome == "not-probed" and "`with`" in detail
 
 
 def test_a_handlers_own_name_and_unshadowed_builtins_are_bound() -> None:
     source = (
         "def f():\n    try:\n        a()\n    except Exception:\n        return NotImplemented\n"
     )
+    assert _probe(source, 4)[0] == "vanished"
+
+
+@pytest.mark.parametrize(
+    ("source", "line"),
+    [
+        # a match capture makes `len` local to the function
+        (
+            "def f(v):\n    try:\n        a()\n    except Exception:\n        return len\n"
+            "    match v:\n        case len:\n            pass\n",
+            4,
+        ),
+        # a walrus in a nested default binds `len` in the enclosing function
+        (
+            "def f():\n    try:\n        a()\n    except Exception:\n        return len\n"
+            "    def g(x=(len := 1)):\n        pass\n",
+            4,
+        ),
+        # an enclosing function binds `len`, so the inner read is a closure, maybe empty
+        (
+            "def outer():\n    def inner():\n        try:\n            a()\n"
+            "        except Exception:\n            return len\n    if False:\n        len = 1\n",
+            5,
+        ),
+        # a nested function can `nonlocal x; del x`
+        (
+            "def f():\n    x = 1\n    def g():\n        nonlocal x\n        del x\n"
+            "    try:\n        g()\n    except Exception:\n        return x\n",
+            8,
+        ),
+        # a module-level annotation is evaluated
+        ("try:\n    a()\nexcept Exception:\n    x: Missing = None\n", 3),
+    ],
+)
+def test_bindings_python_resolves_elsewhere_are_not_trusted(source: str, line: int) -> None:
+    outcome, _, detail = _probe(source, line)
+    assert outcome == "not-probed" and "maybe unbound" in detail
+
+
+def test_the_handlers_own_name_is_bound() -> None:
+    source = "def f():\n    try:\n        a()\n    except Exception as e:\n        return e\n"
     assert _probe(source, 4)[0] == "vanished"

@@ -56,25 +56,65 @@ def probe_python_handler(source: str, line: int) -> ProbeResult:
     )
     if found is None:
         return ProbeResult("not-probed", detail="no handler starts on that line")
-    return probe_handler(found[0], found[1], parent_map(tree))
+    return probe_handler(found[0], found[1], file_context(tree))
 
 
-def parent_map(tree: ast.AST) -> dict[ast.AST, ast.AST]:
-    """Each node's parent, built once per parsed file."""
-    return {child: node for node in ast.walk(tree) for child in ast.iter_child_nodes(node)}
+@dataclass(frozen=True)
+class FileContext:
+    """What the probe needs from the whole parsed file, built once per file."""
+
+    parents: Mapping[ast.AST, ast.AST]
+    # Names some binding in the file can make local or free: any assignment, deletion,
+    # parameter, import, definition, `except ... as`, match capture or global/nonlocal
+    # declaration, in any scope. A builtin is trusted only if it is in none of these.
+    bound_anywhere: frozenset[str]
+    # Names that can be unbound again: deleted, an `except ... as` target (unbound when that
+    # handler ends) or declared global/nonlocal, anywhere in the file.
+    unbound_anywhere: frozenset[str]
+
+
+def file_context(tree: ast.AST) -> FileContext:
+    """Parent links and file-wide binding facts for :func:`probe_handler`."""
+    parents: dict[ast.AST, ast.AST] = {}
+    bound: set[str] = set()
+    unbound: set[str] = set()
+    for node in ast.walk(tree):
+        for child in ast.iter_child_nodes(node):
+            parents[child] = node
+        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+            bound.add(node.id)
+            if isinstance(node.ctx, ast.Del):
+                unbound.add(node.id)
+        elif isinstance(node, ast.arg):
+            bound.add(node.arg)
+        elif isinstance(node, ast.ExceptHandler) and node.name:
+            bound.add(node.name)
+            unbound.add(node.name)
+        elif isinstance(node, (ast.Import, ast.ImportFrom)):
+            bound |= {(a.asname or a.name).split(".")[0] for a in node.names if a.name != "*"}
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            bound.add(node.name)
+        elif isinstance(node, (ast.MatchAs, ast.MatchStar)) and node.name:
+            bound |= {node.name}  # a match capture binds like an assignment
+        elif isinstance(node, ast.MatchMapping) and node.rest:
+            bound.add(node.rest)
+        elif isinstance(node, (ast.Global, ast.Nonlocal)):
+            bound |= set(node.names)
+            unbound |= set(node.names)
+    return FileContext(parents, frozenset(bound), frozenset(unbound))
 
 
 def probe_handler(
     statement: ast.Try | ast.TryStar,
     handler: ast.ExceptHandler,
-    parents: Mapping[ast.AST, ast.AST],
+    context: FileContext,
 ) -> ProbeResult:
     """Probe one handler of an already parsed ``try`` statement.
 
-    ``parents`` is the file's :func:`parent_map`. The probe claims an outcome only when
-    nothing else can change it: it refuses a ``try`` with ``finally`` or ``else``, a handler
-    after another ``except`` clause (which may catch the error first), one inside a
-    ``try`` whose ``finally`` runs after it, and one that reads a name that may be unbound.
+    ``context`` is the file's :func:`file_context`. The probe refuses a ``try`` with
+    ``finally`` or ``else``, a handler after another ``except`` clause (which may catch the
+    error first), one inside an enclosing ``finally`` or ``with`` block, and one that reads
+    a name that may be unbound.
     """
     if statement.finalbody or statement.orelse:
         # A `finally` can return or raise over the handler, and an `else` changes what the
@@ -83,11 +123,12 @@ def probe_handler(
     if handler is not statement.handlers[0]:
         # Exception classes are not resolved, so any earlier clause may catch it first.
         return ProbeResult("not-probed", detail="an earlier `except` clause may catch it first")
-    if _inside_finally(statement, parents):
-        return ProbeResult("not-probed", detail="an enclosing `finally` runs after the handler")
+    enclosing = _enclosing_exit(statement, context.parents)
+    if enclosing:
+        return ProbeResult("not-probed", detail=f"an enclosing `{enclosing}` runs after it")
     if not _straight_line(handler):
         return ProbeResult("not-probed", detail="the handler is not plain, call-free code")
-    unbound = _first_unbound_read(handler, _bound_before(statement, parents))
+    unbound = _first_unbound_read(handler, _bound_before(statement, context))
     if unbound:
         return ProbeResult("not-probed", detail=f"the handler reads `{unbound}`, maybe unbound")
     return ProbeResult("vanished", _injected_name(handler.type), _outcome(handler))
@@ -103,77 +144,45 @@ _ALWAYS_BOUND = frozenset(
 )
 
 
-def _inside_finally(node: ast.AST, parents: Mapping[ast.AST, ast.AST]) -> bool:
-    """Whether a ``try`` with ``finally``, or a ``with`` block, encloses ``node`` within the
-    same function: either runs after the handler and can raise over its result."""
+def _enclosing_exit(node: ast.AST, parents: Mapping[ast.AST, ast.AST]) -> str:
+    """``finally`` or ``with`` if one encloses ``node`` in the same function: either runs
+    after the handler and can raise over its result. Empty otherwise."""
     current = parents.get(node)
     while current is not None and not isinstance(current, _SCOPES):
         if isinstance(current, (ast.Try, ast.TryStar)) and current.finalbody:
-            return True
+            return "finally"
         if isinstance(current, (ast.With, ast.AsyncWith)):
-            return True
+            return "with"
         current = parents.get(current)
-    return False
+    return ""
 
 
-def _bound_before(statement: ast.AST, parents: Mapping[ast.AST, ast.AST]) -> set[str]:
+def _bound_before(statement: ast.AST, context: FileContext) -> set[str]:
     """Names certainly bound when ``statement`` runs.
 
-    Builtins (unless the enclosing function binds that name anywhere, which makes it local
-    for the whole function), the function's parameters, and names its scope assigns in
-    straight-line statements before it. A name that is deleted, used as an ``except ... as``
-    target (Python unbinds it when that handler ends) or declared ``global``/``nonlocal``
-    anywhere in the scope is never counted as certainly bound.
+    Builtins that nothing in the file binds (any binding of the name could make it local or
+    a closure over an empty cell), the enclosing function's parameters, and names its scope
+    assigns in straight-line statements before it. Names that can be unbound again anywhere
+    in the file are never counted.
     """
+    parents = context.parents
+    bound = set(_ALWAYS_BOUND - context.bound_anywhere)
     child, scope = statement, parents.get(statement)
     while scope is not None and not isinstance(scope, _SCOPES):
         child, scope = scope, parents.get(scope)
-    if scope is None or isinstance(scope, ast.Lambda):
-        return set(_ALWAYS_BOUND)
-    local, unbinding = _scope_names(scope)
-    function = isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef))
-    bound = set(_ALWAYS_BOUND - local) if function else set(_ALWAYS_BOUND)
-    if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
-        arguments = scope.args
-        for arg in [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs]:
-            bound.add(arg.arg)
-        for extra in (arguments.vararg, arguments.kwarg):
-            if extra is not None:
-                bound.add(extra.arg)
-    for earlier in scope.body:
-        if earlier is child:
-            break
-        bound |= _binds(earlier)
-    return bound - unbinding
-
-
-_NESTED_SCOPES = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)
-
-
-def _scope_names(scope: ast.AST) -> tuple[set[str], set[str]]:
-    """Names the scope binds anywhere, and names it may unbind, nested scopes excluded."""
-    local: set[str] = set()
-    unbinding: set[str] = set()
-    stack: list[ast.AST] = list(getattr(scope, "body", []))
-    while stack:
-        node = stack.pop()
-        if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
-            local.add(node.id)
-            if isinstance(node.ctx, ast.Del):
-                unbinding.add(node.id)
-        elif isinstance(node, ast.ExceptHandler) and node.name:
-            local.add(node.name)
-            unbinding.add(node.name)
-        elif isinstance(node, (ast.Import, ast.ImportFrom)):
-            local |= {(a.asname or a.name).split(".")[0] for a in node.names if a.name != "*"}
-        elif isinstance(node, (ast.Global, ast.Nonlocal)):
-            unbinding |= set(node.names)
-        if isinstance(node, _NESTED_SCOPES):
-            if not isinstance(node, ast.Lambda):
-                local.add(node.name)
-            continue  # its own names belong to its own scope
-        stack.extend(ast.iter_child_nodes(node))
-    return local, unbinding
+    if scope is not None and not isinstance(scope, ast.Lambda):
+        if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            arguments = scope.args
+            for arg in [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs]:
+                bound.add(arg.arg)
+            for extra in (arguments.vararg, arguments.kwarg):
+                if extra is not None:
+                    bound.add(extra.arg)
+        for earlier in scope.body:
+            if earlier is child:
+                break
+            bound |= _binds(earlier)
+    return bound - context.unbound_anywhere
 
 
 def _binds(statement: ast.stmt) -> set[str]:
@@ -195,8 +204,9 @@ def _first_unbound_read(handler: ast.ExceptHandler, bound: set[str]) -> str:
     if handler.name:
         known.add(handler.name)
     for statement in handler.body:
-        value = getattr(statement, "value", None)
-        if value is not None:
+        # An annotation is evaluated at module and class scope, so its names count as reads.
+        reads = [getattr(statement, "value", None), getattr(statement, "annotation", None)]
+        for value in (r for r in reads if r is not None):
             for node in ast.walk(value):
                 if isinstance(node, ast.Name) and node.id not in known:
                     return node.id
