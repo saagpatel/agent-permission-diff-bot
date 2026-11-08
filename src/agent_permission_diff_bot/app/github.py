@@ -7,7 +7,6 @@ are never logged.
 
 from __future__ import annotations
 
-import base64
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
@@ -27,6 +26,16 @@ TOKEN_PERMISSIONS = {
     "metadata": "read",
     "pull_requests": "write",
 }
+
+
+MAX_COMPARE_FILES = 300
+
+
+class BlobTooLargeError(ValueError):
+    """A blob is larger than the caller's limit; it was not read in full."""
+
+    def __init__(self, sha: str) -> None:
+        super().__init__(f"blob {sha[:12]} is larger than the read limit")
 
 
 class GitHubError(RuntimeError):
@@ -104,9 +113,6 @@ class RepoClient:
 
     # --- reads ---------------------------------------------------------------------------
 
-    def pull_files(self, number: int) -> list[dict[str, Any]]:
-        return list(self._paginate(f"/repos/{self.full_name}/pulls/{number}/files"))
-
     def tree(self, sha: str) -> tuple[dict[str, dict[str, Any]], bool]:
         """Blob entries of a commit's tree by path, and whether GitHub truncated the list."""
         data = self._request(
@@ -119,14 +125,18 @@ class RepoClient:
         }
         return entries, bool(data.get("truncated"))
 
-    def merge_base(self, base_sha: str, head_sha: str) -> str:
-        """The commit the PR branched from; the files list is relative to it."""
+    def compare(self, base_sha: str, head_sha: str) -> tuple[str, list[dict[str, Any]], bool]:
+        """Merge base and changed files for exactly these two commits.
+
+        Unlike the pull request's files list, this is fixed to the commits given, so a late
+        webhook for an older push still sees that push's files. GitHub returns at most 300
+        files here; the flag says when the list may be cut short.
+        """
         data = self._request(
-            "GET",
-            f"/repos/{self.full_name}/compare/{base_sha}...{head_sha}",
-            params={"per_page": 1},
+            "GET", f"/repos/{self.full_name}/compare/{base_sha}...{head_sha}"
         ).json()
-        return str(data["merge_base_commit"]["sha"])
+        files = list(data.get("files") or [])
+        return str(data["merge_base_commit"]["sha"]), files, len(files) >= MAX_COMPARE_FILES
 
     def pull_head(self, number: int) -> str:
         """The pull request's head commit right now, whatever order webhooks arrived in."""
@@ -136,14 +146,24 @@ class RepoClient:
     def pulls_for_commit(self, sha: str) -> list[dict[str, Any]]:
         return list(self._paginate(f"/repos/{self.full_name}/commits/{sha}/pulls"))
 
-    def blob_text(self, sha: str) -> str:
-        data = self._request("GET", f"/repos/{self.full_name}/git/blobs/{sha}").json()
-        raw = (
-            base64.b64decode(data.get("content", ""))
-            if data.get("encoding") == "base64"
-            else (str(data.get("content", "")).encode())
-        )
-        return raw.decode("utf-8", errors="surrogateescape")
+    def blob_text(self, sha: str, max_bytes: int) -> str:
+        """A blob's text, streamed raw and abandoned once it passes ``max_bytes``."""
+        path = f"/repos/{self.full_name}/git/blobs/{sha}"
+        headers = {"Authorization": f"Bearer {self.token}", "Accept": "application/vnd.github.raw"}
+        with self.http.stream("GET", path, headers=headers) as response:
+            if response.status_code >= 400:
+                raise GitHubError("GET", path, response.status_code)
+            declared = response.headers.get("content-length", "")
+            if declared.isdigit() and int(declared) > max_bytes:
+                raise BlobTooLargeError(sha)
+            chunks: list[bytes] = []
+            size = 0
+            for chunk in response.iter_bytes():
+                size += len(chunk)
+                if size > max_bytes:
+                    raise BlobTooLargeError(sha)
+                chunks.append(chunk)
+        return b"".join(chunks).decode("utf-8", errors="surrogateescape")
 
     # --- check runs ----------------------------------------------------------------------
 

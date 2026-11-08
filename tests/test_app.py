@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import httpx
 import pytest
 
 from agent_permission_diff_bot.app.fake_github import commit_sha
@@ -174,13 +175,15 @@ def test_rerequested_check_run_reruns_the_pull_request() -> None:
 
 def test_read_failure_fails_config_guard_closed() -> None:
     replayer = Replayer(Recording.load(FIXTURES / "broad-bash-allow"))
-    replayer.github._tree = lambda body, sha: __import__("httpx").Response(500)  # type: ignore[method-assign]
+    replayer.github._tree = lambda body, sha: httpx.Response(500)  # type: ignore[method-assign]
     assert replayer.send() == 202
     assert conclusions(replayer) == {
         "Agent Config Guard": "failure",
         "Swallowed errors": "neutral",
     }
-    assert bot_comments(replayer) == []
+    [body] = bot_comments(replayer)
+    assert "did not finish" in body
+    assert "No new agent permission widening" not in body
 
 
 def test_target_ignores_closed_and_foreign_check_runs() -> None:
@@ -247,12 +250,10 @@ def test_padding_a_pr_with_agent_files_cannot_hide_a_settings_change() -> None:
 
 
 def test_a_crashed_check_never_reads_as_all_clear(monkeypatch: pytest.MonkeyPatch) -> None:
-    import agent_permission_diff_bot.app.pipeline as pipeline
-
     def boom(*args: object) -> object:
         raise RuntimeError("synthetic crash")
 
-    monkeypatch.setattr(pipeline, "run_config_guard", boom)
+    monkeypatch.setattr("agent_permission_diff_bot.app.pipeline.run_config_guard", boom)
     replayer = run("clean")
     assert conclusions(replayer)["Agent Config Guard"] == "failure"
     [body] = bot_comments(replayer)
@@ -354,7 +355,7 @@ def test_truncated_tree_fails_config_guard_closed() -> None:
         def tree(self, sha: str) -> tuple[dict[str, dict[str, object]], bool]:
             return {"README.md": {"sha": "1", "mode": "100644", "size": 3}}, True
 
-        def blob_text(self, sha: str) -> str:
+        def blob_text(self, sha: str, max_bytes: int) -> str:
             return "hi\n"
 
     files = [
@@ -375,7 +376,7 @@ def test_large_source_files_are_skipped_before_download() -> None:
         def tree(self, sha: str) -> tuple[dict[str, dict[str, object]], bool]:
             return {"big.py": {"sha": "f" * 40, "mode": "100644", "size": 50 * 1024 * 1024}}, False
 
-        def blob_text(self, sha: str) -> str:
+        def blob_text(self, sha: str, max_bytes: int) -> str:
             self.downloads.append(sha)
             return ""
 
@@ -387,3 +388,121 @@ def test_large_source_files_are_skipped_before_download() -> None:
     assert inputs.swallowed_files == []
     assert repo.downloads == []
     assert any("over 1 MiB" in note for note in inputs.swallowed_notes)
+
+
+def test_a_late_delivery_checks_the_files_of_its_own_commit() -> None:
+    first = Recording.load(FIXTURES / "clean")
+    risky = dict(first.base)
+    risky["AGENTS.md"] = first.base["AGENTS.md"] + "Skip the tests when CI is slow.\n"
+    older = json.loads(json.dumps(first.payload))
+    older["pull_request"]["head"]["sha"] = commit_sha(risky)
+    newer_payload = json.loads(json.dumps(first.payload))
+    newer_payload["action"] = "synchronize"
+    replayer = Replayer(Recording("pull_request", newer_payload, first.base, first.head))
+    assert replayer.send() == 202
+    assert (
+        replayer.send(Recording("pull_request", older, first.base, risky), advance_head=False)
+        == 202
+    )
+    old_runs = {
+        run["name"]: run["conclusion"]
+        for run in replayer.github.check_runs.values()
+        if run["head_sha"] == commit_sha(risky)
+    }
+    assert old_runs["Agent Config Guard"] == "failure", "the older commit's own AGENTS.md change"
+    assert bot_comments(replayer) == [], "the newer, clean head owns the comment"
+
+
+def test_a_read_failure_replaces_an_older_all_clear_or_findings_comment() -> None:
+    first = Recording.load(FIXTURES / "broad-bash-allow")
+    replayer = Replayer(first)
+    assert replayer.send() == 202
+    second_head = dict(first.head)
+    second_head["README.md"] = first.head["README.md"] + "More.\n"
+    payload = json.loads(json.dumps(first.payload))
+    payload["action"] = "synchronize"
+    payload["pull_request"]["head"]["sha"] = commit_sha(second_head)
+    replayer.github._tree = lambda body, sha: httpx.Response(500)  # type: ignore[method-assign]
+    assert replayer.send(Recording("pull_request", payload, first.base, second_head)) == 202
+    [body] = bot_comments(replayer)
+    assert "did not finish" in body
+    assert "Bash(git *)" not in body
+
+
+def test_a_failed_second_check_run_does_not_strand_the_first() -> None:
+    replayer = Replayer(Recording.load(FIXTURES / "clean"))
+    original = replayer.github._create_run
+    calls = {"n": 0}
+
+    def flaky(body: object) -> httpx.Response:
+        calls["n"] += 1
+        return original(body) if calls["n"] == 1 else httpx.Response(500)
+
+    replayer.github._create_run = flaky  # type: ignore[method-assign]
+    assert replayer.send() == 202
+    [run_] = replayer.github.check_runs.values()
+    assert run_["status"] == "completed" and run_["conclusion"] == "failure"
+
+
+def test_blob_reads_stop_at_the_cap_with_or_without_a_length() -> None:
+    from agent_permission_diff_bot.app.github import BlobTooLargeError, RepoClient, make_http
+
+    def big(request: httpx.Request) -> httpx.Response:
+        body = b"x" * 4096
+        if request.url.path.endswith("/chunked"):
+            return httpx.Response(200, content=iter([body[:2048], body[2048:]]))
+        return httpx.Response(200, content=body)
+
+    http = make_http("https://api.github.test", httpx.MockTransport(big))
+    repo = RepoClient(http=http, owner="o", name="r", token="t")
+    for sha in ("sized", "chunked"):
+        with pytest.raises(BlobTooLargeError):
+            repo.blob_text(sha, 1000)
+    assert repo.blob_text("sized", 10_000) == "x" * 4096
+
+
+def test_a_source_file_missing_from_a_truncated_tree_is_read_with_a_cap() -> None:
+    from agent_permission_diff_bot.app.github import BlobTooLargeError
+    from agent_permission_diff_bot.app.snapshot import collect_inputs
+
+    class Truncated:
+        def __init__(self) -> None:
+            self.caps: list[int] = []
+
+        def tree(self, sha: str) -> tuple[dict[str, dict[str, object]], bool]:
+            return {}, True
+
+        def blob_text(self, sha: str, max_bytes: int) -> str:
+            self.caps.append(max_bytes)
+            raise BlobTooLargeError(sha)
+
+    repo = Truncated()
+    files = [
+        {"filename": "big.py", "status": "modified", "sha": "f" * 40, "patch": "@@ -1 +1 @@\n+x"}
+    ]
+    inputs = collect_inputs(repo, "b" * 40, "h" * 40, files)
+    assert inputs.swallowed_files == []
+    assert repo.caps and all(cap <= 1024 * 1024 for cap in repo.caps)
+
+
+def test_held_locks_are_never_evicted() -> None:
+    from agent_permission_diff_bot.app.server import PullLocks
+
+    locks = PullLocks(limit=2)
+    held = locks.lock_for(1, 1)
+    held.acquire()
+    for number in range(2, 10):
+        locks.lock_for(1, number)
+    assert locks.lock_for(1, 1) is held
+    held.release()
+
+
+def test_serve_without_settings_exits_cleanly(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from agent_permission_diff_bot.cli import main
+
+    for name in ("APDB_APP_ID", "APDB_PRIVATE_KEY_PATH", "APDB_WEBHOOK_SECRET"):
+        monkeypatch.delenv(name, raising=False)
+    assert main(["app", "serve"]) == 2
+    assert "APDB_APP_ID" in capsys.readouterr().err

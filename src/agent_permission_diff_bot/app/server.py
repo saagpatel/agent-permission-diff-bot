@@ -40,22 +40,39 @@ def verify_signature(secret: str, body: bytes, header: str) -> bool:
     return hmac.compare_digest(expected, header.removeprefix("sha256="))
 
 
+class PullLocks:
+    """One lock per pull request, remembering only the most recent ``limit`` of them.
+
+    The oldest idle locks are forgotten first; a held lock is never dropped, so two runs
+    for one pull request can never overlap even after many other pull requests.
+    """
+
+    def __init__(self, limit: int = MAX_TRACKED_PULLS) -> None:
+        self.limit = limit
+        self._locks: OrderedDict[tuple[int, int], threading.Lock] = OrderedDict()
+        self._guard = threading.Lock()
+
+    def lock_for(self, repository_id: int, number: int) -> threading.Lock:
+        key = (repository_id, number)
+        with self._guard:
+            lock = self._locks.pop(key, None) or threading.Lock()
+            self._locks[key] = lock
+            for old_key in list(self._locks):
+                if len(self._locks) <= self.limit:
+                    break
+                if old_key != key and not self._locks[old_key].locked():
+                    del self._locks[old_key]
+            return lock
+
+    def __len__(self) -> int:
+        return len(self._locks)
+
+
 def create_app(settings: AppSettings, transport: httpx.BaseTransport | None = None) -> FastAPI:
     http = make_http(settings.api_url, transport)
     auth = AppAuth(app_id=settings.app_id, private_key=settings.private_key, http=http)
-    locks: OrderedDict[tuple[int, int], threading.Lock] = OrderedDict()
-    locks_guard = threading.Lock()
+    locks = PullLocks()
     app = FastAPI(title="Agent Permission Diff Bot", docs_url=None, redoc_url=None)
-
-    def lock_for(target: PullTarget) -> threading.Lock:
-        """One lock per pull request, kept for the most recent MAX_TRACKED_PULLS only."""
-        key = (target.repository_id, target.number)
-        with locks_guard:
-            lock = locks.pop(key, None) or threading.Lock()
-            locks[key] = lock
-            while len(locks) > MAX_TRACKED_PULLS:
-                locks.popitem(last=False)
-            return lock
 
     def process(target: PullTarget) -> None:
         try:
@@ -66,7 +83,7 @@ def create_app(settings: AppSettings, transport: httpx.BaseTransport | None = No
                 log.info("No open pull request for %s; nothing to re-run", target.head_sha[:7])
                 return
             # One run per pull request at a time; only the PR's live head writes the comment.
-            with lock_for(resolved):
+            with locks.lock_for(resolved.repository_id, resolved.number):
                 outcome = run_checks(
                     repo,
                     resolved,

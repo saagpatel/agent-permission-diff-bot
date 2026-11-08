@@ -573,8 +573,13 @@ def _run_app(args: argparse.Namespace) -> int:
     try:
         if args.app_command == "serve":
             from agent_permission_diff_bot.app.server import main_serve
+            from agent_permission_diff_bot.app.settings import SettingsError
 
-            return main_serve(args.host, args.port)
+            try:
+                return main_serve(args.host, args.port)
+            except SettingsError as exc:
+                print(f"agent-permission-diff: {exc}", file=sys.stderr)
+                return 2
         from agent_permission_diff_bot.app.replay import main_replay
     except ImportError as exc:
         print(

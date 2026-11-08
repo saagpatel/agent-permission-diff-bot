@@ -42,7 +42,7 @@ except FileNotFoundError:  # swallowed: ok - already gone is the goal
 Marked catches are listed with their reason and are not ranked. A ruff `noqa: S110`,
 `S112`, `BLE001` or `SIM105` on the handler counts too, and is listed as "no reason given".
 
-## Register and install the App (Saagar)
+## Register and install the App (repository owner)
 
 These steps touch your GitHub account settings and create a private key, so they are yours
 to do. Keep the key and the webhook secret on your machine; none of the steps needs them
@@ -142,10 +142,14 @@ them into the demo repository.
 - Category ranking reads called names (`verify_token`, `db.commit`, `fetch`), so a
   wrapper with a neutral name ranks as "other".
 - Config Guard reads startup configs first, then changed agent-facing files, up to 300 per
-  side; GitHub lists at most 3,000 changed files. Anything past a limit, or missing from a
-  truncated tree, is marked unread, which Config Guard reports as a finding rather than
-  passing. Both sides are compared from the pull request's merge base, so changes that
-  landed on the base branch later are not blamed on the pull request.
+  side. The changed-file list comes from comparing the merge base with the exact head
+  commit the event names (so a late webhook checks its own push), and GitHub returns at
+  most 300 files there. Anything past a limit, missing from a truncated tree, or larger
+  than the read cap (downloads stop at the cap) is marked unread, which Config Guard
+  reports as a finding rather than passing. Comparing from the merge base also means
+  changes that landed on the base branch later are not blamed on the pull request.
+- A pull request with more than 300 changed files therefore always fails Config Guard
+  with an "input could not be analyzed" finding; split it, or review it by hand.
 - An allow rule the Range has no data on (an unknown program, an unrecognised tool) is
   reported as high: unknown reach is not treated as safe.
 - Webhook deliveries are processed in the server process; a restart drops in-flight work

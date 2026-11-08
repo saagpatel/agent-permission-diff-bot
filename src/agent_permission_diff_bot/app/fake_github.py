@@ -133,10 +133,12 @@ class FakeGitHub:
             ("POST", rf"/issues/{self.number}/comments", self._create_comment),
             ("PATCH", r"/issues/comments/(?P<id>\d+)", self._update_comment),
         ]
+        raw = request.headers.get("accept", "") == "application/vnd.github.raw"
         for verb, pattern, handler in routes:
             match = re.fullmatch(pattern, rest)
             if verb == method and match:
-                response: httpx.Response = handler(body=body, **match.groupdict())
+                extra = {"raw": True} if raw and handler == self._blob else {}
+                response: httpx.Response = handler(body=body, **match.groupdict(), **extra)
                 return response
         return httpx.Response(404, json={"message": "Not Found"})
 
@@ -157,7 +159,9 @@ class FakeGitHub:
     def _compare(self, body: Any, base: str, head: str) -> httpx.Response:
         if base not in self.commits or head not in self.commits:
             return httpx.Response(404, json={"message": "Not Found"})
-        return httpx.Response(200, json={"merge_base_commit": {"sha": self._merge_base()}})
+        merge_base = self.merge_base_sha or base
+        files = self._changed_files(self.commits[merge_base], self.commits[head])
+        return httpx.Response(200, json={"merge_base_commit": {"sha": merge_base}, "files": files})
 
     def _merge_base(self) -> str:
         return self.merge_base_sha or self.base_sha
@@ -174,6 +178,9 @@ class FakeGitHub:
     def _pull_files(self, body: Any) -> httpx.Response:
         # Like GitHub, the files list is relative to the merge base, not the base tip.
         base, head = self.commits[self._merge_base()], self.commits[self.head_sha]
+        return httpx.Response(200, json=self._changed_files(base, head))
+
+    def _changed_files(self, base: dict[str, str], head: dict[str, str]) -> list[dict[str, Any]]:
         files = []
         for path in sorted(set(base) | set(head)):
             before, after = base.get(path), head.get(path)
@@ -187,7 +194,7 @@ class FakeGitHub:
                 "patch": unified_patch(before or "", after or ""),
             }
             files.append(entry)
-        return httpx.Response(200, json=files)
+        return files
 
     def _tree(self, body: Any, sha: str) -> httpx.Response:
         files = self.commits.get(sha)
@@ -205,10 +212,14 @@ class FakeGitHub:
         ]
         return httpx.Response(200, json={"sha": sha, "tree": tree, "truncated": False})
 
-    def _blob(self, body: Any, sha: str) -> httpx.Response:
+    def _blob(self, body: Any, sha: str, raw: bool = False) -> httpx.Response:
         for files in self.commits.values():
             for text in files.values():
                 if blob_sha(text) == sha:
+                    if raw:
+                        return httpx.Response(
+                            200, content=text.encode("utf-8", errors="surrogateescape")
+                        )
                     content = base64.b64encode(text.encode("utf-8", errors="surrogateescape"))
                     return httpx.Response(
                         200, json={"sha": sha, "encoding": "base64", "content": content.decode()}

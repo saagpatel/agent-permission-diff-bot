@@ -41,7 +41,7 @@ class PullTarget:
 @dataclass
 class RunOutcome:
     conclusions: dict[str, str] = field(default_factory=dict)
-    comment_action: str = "none"  # "created", "updated", "unchanged" or "none"
+    comment_action: str = "none"  # "created", "updated", "unchanged", "stale" or "none"
     comment_body: str = ""
     results: list[CheckResult] = field(default_factory=list)
 
@@ -110,17 +110,24 @@ def run_checks(
 ) -> RunOutcome:
     outcome = RunOutcome()
     ref = RepoRef(full_name=repo.full_name, head_sha=target.head_sha)
-    run_ids: dict[CheckName, int] = {
-        "config-guard": repo.create_check_run(CHECK_NAMES["config-guard"], target.head_sha),
-        "swallowed": repo.create_check_run(CHECK_NAMES["swallowed"], target.head_sha),
-    }
+    run_ids: dict[CheckName, int] = {}
+    try:
+        checks: tuple[CheckName, ...] = ("config-guard", "swallowed")
+        for check in checks:
+            run_ids[check] = repo.create_check_run(CHECK_NAMES[check], target.head_sha)
+    except Exception as exc:
+        # Never leave a run that was created stuck "in progress".
+        _fail_runs(repo, run_ids, exc)
+        raise
     fail_on: dict[CheckName, Severity | None] = {
         "config-guard": guard_fail_on,
         "swallowed": swallowed_fail_on,
     }
     try:
-        merge_base = repo.merge_base(target.base_sha, target.head_sha)
-        inputs = collect_inputs(repo, merge_base, target.head_sha, repo.pull_files(target.number))
+        # The comparison is fixed to these commits, unlike the PR's live file list, so a late
+        # webhook for an older push checks exactly that push.
+        merge_base, files, truncated = repo.compare(target.base_sha, target.head_sha)
+        inputs = collect_inputs(repo, merge_base, target.head_sha, files, files_truncated=truncated)
         results = [
             _guarded(
                 "config-guard", lambda: run_config_guard(inputs.base_files, inputs.head_files)
@@ -132,6 +139,7 @@ def run_checks(
     except Exception as exc:
         log.exception("Reading pull request %s#%s failed", repo.full_name, target.number)
         _fail_runs(repo, run_ids, exc)
+        _report_unfinished(repo, target, ref, app_id, is_current, exc)
         raise
     for result in results:
         check = result.check
@@ -163,6 +171,27 @@ def _guarded(name: CheckName, run: Callable[[], CheckResult]) -> CheckResult:
             f"The check did not finish: {type(exc).__name__}. Re-run the check to retry."
         )
         return result
+
+
+def _report_unfinished(
+    repo: RepoClient,
+    target: PullTarget,
+    ref: RepoRef,
+    app_id: str,
+    is_current: Callable[[], bool],
+    exc: Exception,
+) -> None:
+    """After a read failure, the comment must not keep showing an older all-clear."""
+    note = f"The check did not finish: {type(exc).__name__}. Re-run the check to retry."
+    results = [
+        CheckResult(check="config-guard", crashed=True, notes=[note]),
+        CheckResult(check="swallowed", crashed=True, notes=[note]),
+    ]
+    try:
+        if is_current():
+            _upsert_comment(repo, target.number, render_comment(results, ref), app_id, results)
+    except Exception:
+        log.exception("Could not update the comment after a read failure")
 
 
 def _fail_runs(repo: RepoClient, run_ids: Mapping[CheckName, int], exc: Exception) -> None:

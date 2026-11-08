@@ -2,9 +2,9 @@
 
 Config Guard gets base and head snapshots of the agent-facing files: changed files it
 reads, every startup config (context for correlating hooks with their scripts), and the
-scripts those configs reference. Swallowed gets the head text and added lines of each
-changed Python or TypeScript file. Credential paths are never fetched, and blob sizes
-are checked from the tree before anything is downloaded.
+scripts those configs reference. Swallowed gets the head text and changed lines of each
+changed Python or TypeScript file. Credential paths are never fetched; blob sizes are
+checked from the tree where it lists them, and every download stops at its read cap.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Any, Protocol
 
+from agent_permission_diff_bot.app.github import BlobTooLargeError
 from agent_permission_diff_bot.checks.config_guard import is_guard_path
 from agent_permission_diff_bot.checks.swallowed import (
     MAX_FILE_BYTES,
@@ -41,14 +42,15 @@ from agent_permission_diff_bot.sources import (
 )
 
 MAX_GUARD_FILES = 300
-MAX_PULL_FILES = 3000
 MAX_SWALLOWED_FILES = 200
 
 
 class TreeReader(Protocol):
-    def tree(self, sha: str) -> tuple[dict[str, dict[str, Any]], bool]: ...
+    def tree(self, sha: str) -> tuple[dict[str, dict[str, Any]], bool]:
+        """Blob entries of a commit's tree by path, and whether the listing was truncated."""
 
-    def blob_text(self, sha: str) -> str: ...
+    def blob_text(self, sha: str, max_bytes: int) -> str:
+        """A blob's text; raises ``BlobTooLargeError`` past ``max_bytes``."""
 
 
 @dataclass
@@ -61,9 +63,19 @@ class PullInputs:
 
 
 def collect_inputs(
-    repo: TreeReader, base_sha: str, head_sha: str, pull_files: list[dict[str, Any]]
+    repo: TreeReader,
+    base_sha: str,
+    head_sha: str,
+    pull_files: list[dict[str, Any]],
+    *,
+    files_truncated: bool = False,
 ) -> PullInputs:
-    """Inputs for both checks. ``base_sha`` should be the merge base, not the base tip."""
+    """Inputs for both checks.
+
+    ``base_sha`` is the merge base and ``pull_files`` the changed files between it and
+    ``head_sha`` (from the commit comparison, so they match these exact commits).
+    ``files_truncated`` says GitHub may have cut the file list short.
+    """
     notes: list[str] = []
     swallowed_notes: list[str] = []
     changed = [str(f["filename"]) for f in pull_files]
@@ -83,8 +95,8 @@ def collect_inputs(
     for files, truncated in ((base_files, base_truncated), (head_files, head_truncated)):
         if truncated:
             _mark_incomplete(files, "(git tree)", "GitHub truncated the repository tree")
-    if len(pull_files) >= MAX_PULL_FILES:
-        limit_note = "GitHub lists at most 3,000 changed files; later files were not read."
+    if files_truncated:
+        limit_note = "GitHub lists at most 300 changed files here; later files were not read."
         notes.append(limit_note)
         swallowed_notes.append(limit_note)
         _mark_incomplete(head_files, "(pull request files)", limit_note)
@@ -154,11 +166,10 @@ def _read(
     if str(entry.get("mode", "")) in {"120000", "160000"}:
         _mark_incomplete(files, path, "input is a symlink or submodule in the selected Git tree")
         return
-    text = repo.blob_text(str(entry["sha"]))
-    if len(text.encode("utf-8", errors="surrogateescape")) > limit:
+    try:
+        files[path] = repo.blob_text(str(entry["sha"]), limit)
+    except BlobTooLargeError:
         _mark_incomplete(files, path, _too_large_reason(limit))
-        return
-    files[path] = text
 
 
 def _source_state(
@@ -210,7 +221,12 @@ def _swallowed_files(
         if size > MAX_FILE_BYTES:
             notes.append(f"`{path}` is over 1 MiB and was not scanned.")
             continue
-        text = repo.blob_text(str(item["sha"]))
+        try:
+            # A size missing from a truncated tree is unknown, not zero: the read is capped.
+            text = repo.blob_text(str(item["sha"]), MAX_FILE_BYTES)
+        except BlobTooLargeError:
+            notes.append(f"`{path}` is over 1 MiB and was not scanned.")
+            continue
         out.append(ChangedFile(path=path, text=text, changed=changed))
     if skipped_patch:
         notes.append(
