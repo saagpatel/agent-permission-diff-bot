@@ -292,6 +292,23 @@ Acknowledged findings stay visible in JSON, Markdown, SARIF, and PR comments, bu
 excluded from gate decisions. Each acknowledgement must match the finding rule and all
 finding paths; expired acknowledgements are ignored.
 
+## GitHub App (unreleased)
+
+`agent-permission-diff app serve` runs a GitHub App with two check runs and one pull request
+comment, updated in place on every push:
+
+- **Agent Config Guard** explains what a PR now lets an agent do: new allow rules expanded
+  into what they really reach (using the vendored Range knowledge base), removed deny rules,
+  wider permission modes, new hooks and MCP servers, skill `allowed-tools`, Codex `.rules`, and
+  new instruction lines telling agents to skip a check. Each finding has a suggested fix.
+- **Swallowed errors** finds new places where the diff catches an error and drops it, in
+  Python and TypeScript/JavaScript, ranked by what they could hide: auth, data loss, network.
+
+The App reads files through the API and never runs pull request code. It needs the `app`
+extra (`pip install "agent-permission-diff-bot[app]"`). Registration steps, settings, and a
+local replay that proves the whole flow without network access are in
+[docs/github-app.md](docs/github-app.md).
+
 ## GitHub Action
 
 The composite action expects the repository to be checked out with enough history to
