@@ -319,8 +319,8 @@ skill frontmatter is reported as unreadable.
 
 The pull request checks in `agent_permission_diff_bot.checks` (part of the unreleased GitHub
 App) are **experimental**. Known gaps, tracked in
-[#69](https://github.com/saagpatel/agent-permission-diff-bot/issues/69) and
-[#68](https://github.com/saagpatel/agent-permission-diff-bot/issues/68):
+[#77](https://github.com/saagpatel/agent-permission-diff-bot/issues/77) and
+[#78](https://github.com/saagpatel/agent-permission-diff-bot/issues/78):
 
 - Skip-check instructions are matched with a pattern per paragraph, bullet or heading, not
   parsed, so unusual phrasings can be missed or misread. A match counts as new when any line

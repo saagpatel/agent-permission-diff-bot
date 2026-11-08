@@ -1025,3 +1025,19 @@ def test_quiet_failures_carries_the_probe_and_the_promise_flag() -> None:
     [body] = bot_comments(replayer)
     assert "somewhere else. Probe: injecting `OSError` into the `try` leaves no trace" in body
     assert "`.catch()` dropped around a network call" in body
+
+
+@pytest.mark.parametrize(
+    ("items", "joined"),
+    [
+        ([], ""),
+        (["a", "b"], "a; b"),
+        (["a.", "b"], "a. b"),
+        (["a?", "b"], "a? b"),
+        (["a!", "b"], "a! b"),
+    ],
+)
+def test_risk_items_join_as_sentences(items: list[str], joined: str) -> None:
+    from agent_permission_diff_bot.checks.render import _join_items
+
+    assert _join_items(items) == joined
