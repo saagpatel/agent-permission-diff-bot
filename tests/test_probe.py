@@ -83,12 +83,39 @@ def test_handlers_that_could_run_code_are_not_probed(body: str) -> None:
         'x.__init__.__globals__["marker"] = "changed"',
         "x.__class__.__getitem__ = y",
         "a, *b = c",
+        "a, b = None",
+        "self.failed = True",
+        "cache[key] = None",
     ],
 )
-def test_nothing_in_the_handler_is_executed(body: str) -> None:
-    # These would escape a sandbox or loop forever if run; the probe only reads them.
+def test_assignments_it_cannot_follow_are_not_probed(body: str) -> None:
+    # Unpacking can fail and attribute/subscript stores can run code; nothing is run, and
+    # no outcome is claimed for these.
     source = f"try:\n    a()\nexcept Exception:\n    {body}\n"
-    assert _probe(source, 3)[0] == "vanished"
+    assert _probe(source, 3)[0] == "not-probed"
+
+
+@pytest.mark.parametrize("extra", ["finally:\n    cleanup()\n", "else:\n    done()\n"])
+def test_a_try_with_finally_or_else_is_not_probed(extra: str) -> None:
+    source = f"try:\n    a()\nexcept OSError:\n    pass\n{extra}"
+    assert _probe(source, 3)[0] == "not-probed"
+
+
+def test_chained_assignments_are_followed() -> None:
+    source = (
+        "def f():\n    try:\n        a()\n    except Exception:\n"
+        "        result = 1\n        result = other = 2\n        return result\n"
+    )
+    assert _probe(source, 4)[2] == "the caller gets `2` instead of an error"
+
+
+def test_the_scanner_probes_from_its_own_parse() -> None:
+    source = (
+        "def f():\n    try:\n        db.commit()\n    except Exception:\n        return 0\n" * 50
+    )
+    changed = ChangedFile("x.py", source, changed_lines_between("", source))
+    findings = scan_swallowed([changed]).findings
+    assert len(findings) == 50 and all("leaves no trace" in f.allows[1] for f in findings)
 
 
 def test_swallowed_findings_carry_the_probe_result() -> None:

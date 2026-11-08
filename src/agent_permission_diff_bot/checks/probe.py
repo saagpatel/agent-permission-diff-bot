@@ -42,9 +42,9 @@ def probe_python_handler(source: str, line: int) -> ProbeResult:
         tree = ast.parse(source)
     except (SyntaxError, ValueError, RecursionError, MemoryError):
         return ProbeResult("not-probed", detail="the file did not parse")
-    handler = next(
+    found = next(
         (
-            h
+            (node, h)
             for node in ast.walk(tree)
             if isinstance(node, (ast.Try, ast.TryStar))
             for h in node.handlers
@@ -52,8 +52,19 @@ def probe_python_handler(source: str, line: int) -> ProbeResult:
         ),
         None,
     )
-    if handler is None or not _straight_line(handler):
-        return ProbeResult("not-probed", detail="no call-free handler starts on that line")
+    if found is None:
+        return ProbeResult("not-probed", detail="no handler starts on that line")
+    return probe_handler(found[0], found[1])
+
+
+def probe_handler(statement: ast.Try | ast.TryStar, handler: ast.ExceptHandler) -> ProbeResult:
+    """Probe one handler of an already parsed ``try`` statement."""
+    if statement.finalbody or statement.orelse:
+        # A `finally` can return or raise over the handler, and an `else` changes what the
+        # success path does; the outcome is no longer just the handler's.
+        return ProbeResult("not-probed", detail="the try has a finally or else block")
+    if not _straight_line(handler):
+        return ProbeResult("not-probed", detail="the handler is not plain, call-free code")
     return ProbeResult("vanished", _injected_name(handler.type), _outcome(handler))
 
 
@@ -67,16 +78,14 @@ def _outcome(handler: ast.ExceptHandler) -> str:
             return "the loop moves on to its next item as if this one succeeded"
         if isinstance(statement, ast.Break):
             return "the loop stops early as if it had finished"
-        if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
-            target = statement.targets[0]
-            if isinstance(target, ast.Name):
-                known[target.id] = _describe(statement.value, known)
-        elif (
-            isinstance(statement, ast.AnnAssign)
-            and isinstance(statement.target, ast.Name)
-            and statement.value is not None
-        ):
-            known[statement.target.id] = _describe(statement.value, known)
+        if isinstance(statement, ast.Assign):
+            value = _describe(statement.value, known)
+            for target in statement.targets:  # `a = b = x` sets both
+                if isinstance(target, ast.Name):
+                    known[target.id] = value
+        elif isinstance(statement, ast.AnnAssign) and isinstance(statement.target, ast.Name):
+            if statement.value is not None:
+                known[statement.target.id] = _describe(statement.value, known)
     return "execution continues after the `try` as if it had succeeded"
 
 
@@ -99,6 +108,14 @@ def _straight_line(handler: ast.ExceptHandler) -> bool:
         if not isinstance(statement, allowed):
             return False
         if isinstance(statement, ast.Expr) and not isinstance(statement.value, ast.Constant):
+            return False
+        # Only plain names are assigned: unpacking can fail at run time, and an attribute
+        # or subscript assignment can run a `__setattr__` / `__setitem__` the probe cannot see.
+        if isinstance(statement, ast.Assign) and not all(
+            isinstance(target, ast.Name) for target in statement.targets
+        ):
+            return False
+        if isinstance(statement, ast.AnnAssign) and not isinstance(statement.target, ast.Name):
             return False
         for node in ast.walk(statement):
             if isinstance(
