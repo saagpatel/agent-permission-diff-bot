@@ -195,8 +195,9 @@ def _clean(text: str, limit: int) -> str:
 
     Code spans are paired the way CommonMark pairs them (a run of n backticks closes only
     at the next run of exactly n) and rebuilt with ``md_code``, which redacts their
-    contents and picks a fence they cannot close. Every other stretch is redacted first and then has its inline Markdown and HTML
-    characters backslash-escaped, so PR text cannot add links, images, emphasis or tags. A
+    contents and picks a fence they cannot close. Every other stretch is redacted first
+    and then has its inline Markdown and HTML characters backslash-escaped, so PR text
+    cannot add links, images, emphasis or tags. A
     backtick run with no partner is escaped too, so it can never pair with a span added
     after this text.
     """
