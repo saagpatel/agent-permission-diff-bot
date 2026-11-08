@@ -163,9 +163,88 @@ def test_codex_rules_file_allow_is_expanded() -> None:
     assert finding.severity == Severity.CRITICAL
 
 
-def test_unparseable_codex_rules_leave_a_note() -> None:
-    result = run_config_guard({}, {".codex/rules/x.rules": "prefix_rule(\n"})
-    assert any("could not be parsed" in note for note in result.notes)
+def test_unparseable_codex_rules_fail_closed() -> None:
+    [finding] = run_config_guard({}, {".codex/rules/x.rules": "prefix_rule(\n"}).findings
+    assert finding.rule_id == "CG007"
+    assert finding.severity == Severity.HIGH
+
+
+@pytest.mark.parametrize(
+    "rule",
+    [
+        "*",
+        "Bash(terraform:*)",
+        "Bash(./scripts/deploy.sh:*)",
+        "WebFetch(domain:*)",
+        "Read(**/.env)",
+    ],
+)
+def test_allow_rules_the_range_cannot_rate_fail_closed(rule: str) -> None:
+    [finding] = run_config_guard({SETTINGS: allow()}, {SETTINGS: allow(rule)}).findings
+    assert finding.rule_id == "CG001"
+    assert finding.severity >= Severity.HIGH
+
+
+@pytest.mark.parametrize(
+    "rule", ["Read(./docs/**)", "WebFetch(domain:docs.example.com)", "mcp__notes__get_note"]
+)
+def test_rules_the_range_knows_are_narrow_stay_quiet(rule: str) -> None:
+    assert run_config_guard({SETTINGS: allow()}, {SETTINGS: allow(rule)}).findings == []
+
+
+def test_unknown_program_in_skill_and_codex_rules_fails_closed() -> None:
+    head = {
+        ".claude/skills/infra/SKILL.md": "---\nallowed-tools: Bash(terraform:*)\n---\nGo.\n",
+        ".codex/rules/default.rules": 'prefix_rule(pattern=["terraform"], decision="allow")\n',
+    }
+    found = run_config_guard({}, head).findings
+    assert len(found) == 2
+    assert all(f.severity == Severity.HIGH for f in found)
+
+
+def test_skill_frontmatter_that_is_not_yaml_is_still_read() -> None:
+    head = {".claude/commands/log.md": "---\nallowed-tools: Bash(git log: *), Bash\n---\nGo.\n"}
+    assert any("`Bash`" in f.title for f in run_config_guard({}, head).findings)
+
+
+def test_narrower_rule_replacing_a_whole_tool_rule_is_quiet() -> None:
+    assert (
+        run_config_guard({SETTINGS: allow("Bash")}, {SETTINGS: allow("Bash(git *)")}).findings == []
+    )
+
+
+@pytest.mark.parametrize(
+    ("path", "base", "head"),
+    [
+        (SETTINGS, settings(permissions={"defaultMode": "plan"}), settings(permissions={})),
+        (
+            ".codex/config.toml",
+            'sandbox_mode = "read-only"\napproval_policy = "untrusted"\n',
+            "",
+        ),
+    ],
+)
+def test_removing_a_restrictive_mode_is_reported(path: str, base: str, head: str) -> None:
+    found = run_config_guard({path: base}, {path: head}).findings
+    assert found and all(f.rule_id == "CG003" and f.severity == Severity.MEDIUM for f in found)
+
+
+def test_hard_wrapped_skip_instruction_is_caught() -> None:
+    base = {"AGENTS.md": "# Rules\n"}
+    head = {"AGENTS.md": "# Rules\nWhen you are short on time you may skip the\nunit tests.\n"}
+    [finding] = run_config_guard(base, head).findings
+    assert finding.line == 2
+    assert "skip the unit tests" in finding.allows[0]
+
+
+def test_two_plugin_settings_are_two_entries() -> None:
+    head = {
+        SETTINGS: settings(
+            enabledPlugins={"helper@market": True},
+            extraKnownMarketplaces={"market": {"source": {"source": "github", "repo": "o/r"}}},
+        )
+    }
+    assert len(run_config_guard({}, head).findings) == 2
 
 
 def test_guard_paths() -> None:

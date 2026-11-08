@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from typing import Literal
 
@@ -60,3 +61,16 @@ def rank(findings: list[CheckFinding]) -> list[CheckFinding]:
 
 
 _CATEGORY_ORDER = {"auth": 0, "data-loss": 1, "network": 2, "other": 3}
+
+
+def md_code(value: str) -> str:
+    """``value`` as one Markdown code span, whatever backticks it contains.
+
+    The fence is one backtick longer than the longest run inside the value, so a value
+    from the pull request cannot close the span early and turn the rest into HTML.
+    """
+    value = " ".join(value.split()) or " "
+    longest = max((len(run) for run in re.findall(r"`+", value)), default=0)
+    fence = "`" * (longest + 1)
+    pad = " " if value.startswith("`") or value.endswith("`") else ""
+    return f"{fence}{pad}{value}{pad}{fence}"

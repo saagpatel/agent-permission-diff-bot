@@ -30,10 +30,10 @@ from agent_permission_diff_bot._vendor.therange.codex_rules import (
 )
 from agent_permission_diff_bot._vendor.therange.kb import load_kb
 from agent_permission_diff_bot._vendor.therange.model import Rule, Source
-from agent_permission_diff_bot.checks.model import CheckFinding, CheckResult, rank
+from agent_permission_diff_bot.checks.model import CheckFinding, CheckResult, md_code, rank
 from agent_permission_diff_bot.engine import build_report
 from agent_permission_diff_bot.model import Finding, PermissionAtom, PermissionChange, Severity
-from agent_permission_diff_bot.persistence import MODE_RANKS, project_config_kind
+from agent_permission_diff_bot.persistence import MODE_RANKS, _covers_rule, project_config_kind
 from agent_permission_diff_bot.surfaces import _is_instruction, is_interesting_path
 
 MAX_ALLOWS = 3
@@ -120,7 +120,13 @@ def run_config_guard(base: Mapping[str, str], head: Mapping[str, str]) -> CheckR
         if any(_is_mcp_server_atom(atom) for atom in atoms):
             continue
         keep(
-            ("engine", engine_finding.rule_id, *engine_finding.paths(), engine_finding.title),
+            (
+                "engine",
+                engine_finding.rule_id,
+                *engine_finding.paths(),
+                engine_finding.title,
+                *(f"{atom.resource}={atom.value}" for atom in atoms),
+            ),
             _from_engine(engine_finding, head),
         )
 
@@ -128,6 +134,8 @@ def run_config_guard(base: Mapping[str, str], head: Mapping[str, str]) -> CheckR
         atom = change.atom
         if atom.action == "permission_rule":
             if change.kind == "added" and atom.resource == "allow":
+                if _replaces_broader(atom, report.changes):
+                    continue
                 rule = parse_rule(atom.value, "allow", _source(atom.path))
                 keep(("allow", atom.path, atom.value), _allow_finding(rule, atom.path, head))
             elif change.kind == "removed" and atom.resource == "deny":
@@ -135,6 +143,8 @@ def run_config_guard(base: Mapping[str, str], head: Mapping[str, str]) -> CheckR
                     keep(("deny", atom.path, atom.value), _removed_deny(atom, head))
         elif atom.action == "permission_mode" and change.kind == "added":
             keep(("mode", atom.path, atom.resource), _mode_finding(atom, report.changes, head))
+        elif atom.action == "permission_mode" and change.kind == "removed":
+            keep(("mode", atom.path, atom.resource), _mode_removed(atom, report.changes))
         elif atom.action == "auto_hook" and change.kind == "added":
             keep(("hook", atom.path, atom.trigger, atom.value), _hook_finding(atom, head))
         elif _is_mcp_server_atom(atom) and change.kind == "added":
@@ -143,7 +153,7 @@ def run_config_guard(base: Mapping[str, str], head: Mapping[str, str]) -> CheckR
 
     for finding in _instruction_findings(base, head):
         keep(("instruction", finding.path, str(finding.line)), finding)
-    for key, finding in _rule_file_findings(base, head, result.notes):
+    for key, finding in _rule_file_findings(base, head):
         keep(key, finding)
 
     result.findings = rank(_fold_into_hooks(list(findings.values()), report.findings))
@@ -197,29 +207,105 @@ def _allow_finding(rule: Rule, path: str, head: Mapping[str, str]) -> CheckFindi
     kb = load_kb()
     expanded = range_engine.analyze_rule(rule, kb)
     serious = [f for f in expanded if f.effective_severity != "info"]
+    label = "allow rule" if rule.agent == "claude" else "Codex allow rule"
+    title = f"New {label} {md_code(rule.raw)}"
+    line = _line_of(head.get(path, ""), rule.raw)
     if not serious:
-        return None
+        unknown = _unknown_reach(rule, expanded)
+        if unknown is None:
+            return None
+        unknown_allows, fix = unknown
+        return CheckFinding(
+            check="config-guard",
+            rule_id="CG001",
+            severity=Severity.HIGH,
+            title=title,
+            path=path,
+            line=line,
+            allows=unknown_allows,
+            fix=fix,
+        )
     suggestion = range_engine.suggest(rule, expanded, kb)
     severity = max(_RANGE_SEVERITY[f.effective_severity] for f in serious)
     allows = [_range_line(f.title, f.example) for f in serious[:MAX_ALLOWS]]
     if len(serious) > MAX_ALLOWS:
         allows.append(f"…and {len(serious) - MAX_ALLOWS} more reaches the Range knows about.")
-    label = "allow rule" if rule.agent == "claude" else "Codex allow rule"
     return CheckFinding(
         check="config-guard",
         rule_id="CG001",
         severity=severity,
-        title=f"New {label} `{rule.raw}`",
+        title=title,
         path=path,
-        line=_line_of(head.get(path, ""), rule.raw),
+        line=line,
         allows=tuple(allows),
         fix=suggestion.text,
     )
 
 
+# Range verdicts that positively establish a narrow rule. Anything else the Range rates
+# "info" (an unknown program, an unrecognised tool) is unknown reach, not safe reach.
+_KNOWN_NARROW = {"mcp.tool", "tool.benign", "file.read-scoped", "web.fetch-domain"}
+
+
+def _unknown_reach(
+    rule: Rule, expanded: list[range_engine.Finding]
+) -> tuple[tuple[str, ...], str] | None:
+    spec = rule.specifier or ""
+    for finding in expanded:
+        if finding.mitigated_by:
+            continue
+        if finding.capability_id == "web.fetch-domain" and "*" not in spec:
+            continue
+        if finding.capability_id == "file.read-scoped" and not _sensitive_spec(spec):
+            continue
+        if finding.capability_id in _KNOWN_NARROW - {"web.fetch-domain", "file.read-scoped"}:
+            continue
+        if finding.capability_id == "kb.unknown":
+            program = finding.title.split("`")[1] if "`" in finding.title else "this program"
+            return (
+                (
+                    f"{md_code(program)} now runs without a prompt, and the Range has no data on "
+                    "what its subcommands and flags reach.",
+                ),
+                "Allow only the exact commands the work needs, and keep apply, deploy, delete "
+                "and publish verbs on prompt.",
+            )
+        if finding.capability_id == "web.fetch-domain":
+            return (
+                ("Fetches from any matching domain without asking.",),
+                "Name each domain, such as `WebFetch(domain:docs.example.com)`.",
+            )
+        if finding.capability_id == "file.read-scoped":
+            return (
+                (f"Reads files matching {md_code(spec)} without asking, including credentials.",),
+                "Keep credential files out of allow rules; add a deny rule for them.",
+            )
+        return (
+            (f"{finding.title}. {finding.explain}",),
+            "Replace it with a rule that names the tool and scope it needs.",
+        )
+    return None
+
+
+def _sensitive_spec(spec: str) -> bool:
+    return spec.startswith("**") or any(hint in spec for hint in range_engine._SECRET_HINTS)
+
+
 def _range_line(title: str, example: str) -> str:
     example = example.strip()
-    return f"{title}, e.g. `{example}`" if example else title
+    return f"{title}, e.g. {md_code(example)}" if example else title
+
+
+def _replaces_broader(atom: PermissionAtom, changes: Iterable[PermissionChange]) -> bool:
+    """A narrower rule replacing a whole-tool rule in the same file is not a widening."""
+    return any(
+        other.kind == "removed"
+        and other.atom.action == "permission_rule"
+        and other.atom.resource == "allow"
+        and other.atom.path == atom.path
+        and _covers_rule(other.atom.value, atom.value)
+        for other in changes
+    )
 
 
 def _still_denied(atom: PermissionAtom, changes: Iterable[PermissionChange]) -> bool:
@@ -241,10 +327,10 @@ def _removed_deny(atom: PermissionAtom, head: Mapping[str, str]) -> CheckFinding
         check="config-guard",
         rule_id="CG002",
         severity=Severity.HIGH,
-        title=f"Deny rule `{atom.value}` removed",
+        title=f"Deny rule {md_code(atom.value)} removed",
         path=atom.path,
         line=None,
-        allows=(f"The agent is no longer blocked from `{atom.value}`.",),
+        allows=(f"The agent is no longer blocked from {md_code(atom.value)}.",),
         fix="Keep the deny rule unless this action is meant to run without a prompt.",
     )
 
@@ -276,12 +362,12 @@ def _mode_finding(
         if atom.value in {"bypassPermissions", "danger-full-access"}
         else Severity.HIGH
     )
-    was = f" (was `{previous[0]}`)" if previous else ""
+    was = f" (was {md_code(previous[0])})" if previous else ""
     return CheckFinding(
         check="config-guard",
         rule_id="CG003",
         severity=severity,
-        title=f"`{atom.resource}` is now `{atom.value}`{was}",
+        title=f"{md_code(atom.resource)} is now {md_code(atom.value)}{was}",
         path=atom.path,
         line=_line_of(head.get(atom.path, ""), atom.value),
         allows=(_MODE_TEXT.get(atom.value, "The agent asks for approval less often."),),
@@ -292,14 +378,39 @@ def _mode_finding(
     )
 
 
+def _mode_removed(atom: PermissionAtom, changes: Iterable[PermissionChange]) -> CheckFinding | None:
+    """A restrictive mode deleted outright: the agent falls back to its default."""
+    replaced = any(
+        other.kind == "added"
+        and other.atom.action == "permission_mode"
+        and other.atom.path == atom.path
+        and other.atom.resource == atom.resource
+        for other in changes
+    )
+    ranks = MODE_RANKS.get(atom.resource, {})
+    if replaced or not ranks or ranks.get(atom.value, 0) >= max(ranks.values()):
+        return None
+    return CheckFinding(
+        check="config-guard",
+        rule_id="CG003",
+        severity=Severity.MEDIUM,
+        title=f"{md_code(atom.resource)} {md_code(atom.value)} removed",
+        path=atom.path,
+        allows=("The agent falls back to its default mode, which may ask less often.",),
+        fix=f"Keep {md_code(atom.resource + ' = ' + atom.value)} unless the default is intended.",
+    )
+
+
 # --- hooks ---------------------------------------------------------------------------------
 
 
 def _hook_finding(atom: PermissionAtom, head: Mapping[str, str]) -> CheckFinding:
     event = atom.trigger or "hook"
-    when = _HOOK_WHEN.get(event.lower(), f"on the `{event}` event")
+    when = _HOOK_WHEN.get(event.lower(), f"on the {md_code(event)} event")
     matcher = _MATCHER_RE.search(atom.scope)
-    target = f" for tools matching `{matcher.group(1)}`" if matcher and matcher.group(1) else ""
+    target = (
+        f" for tools matching {md_code(matcher.group(1))}" if matcher and matcher.group(1) else ""
+    )
     auto_start = event.lower() in {
         "sessionstart",
         "session_start",
@@ -311,14 +422,14 @@ def _hook_finding(atom: PermissionAtom, head: Mapping[str, str]) -> CheckFinding
     }
     approves = event.lower() in {"pretooluse", "permissionrequest", "userpromptsubmit"}
     severity = Severity.HIGH if auto_start or approves else Severity.MEDIUM
-    allows = [f"Runs `{_short(atom.value)}` {when}{target}."]
+    allows = [f"Runs {md_code(_short(atom.value))} {when}{target}."]
     if auto_start:
         allows.append("Anyone who can change that command or script runs code on every machine.")
     return CheckFinding(
         check="config-guard",
         rule_id="CG004",
         severity=severity,
-        title=f"New `{event}` hook",
+        title=f"New {md_code(event)} hook",
         path=atom.path,
         line=_line_of(head.get(atom.path, ""), atom.value.split(" ", 1)[0]),
         allows=tuple(allows),
@@ -372,10 +483,10 @@ def _mcp_finding(
                 check="config-guard",
                 rule_id="CG005",
                 severity=Severity.MEDIUM,
-                title=f"MCP server `{name}` is now approved automatically",
+                title=f"MCP server {md_code(name)} is now approved automatically",
                 path=atom.path,
                 line=_line_of(head.get(atom.path, ""), name),
-                allows=(f"`{name}` from `.mcp.json` starts without a trust prompt.",),
+                allows=(f"{md_code(name)} from `.mcp.json` starts without a trust prompt.",),
                 fix="Approve it per user instead of in committed settings.",
             )
     launch: list[str] = []
@@ -391,23 +502,23 @@ def _mcp_finding(
         credentials.update(other_atom.credential_keys)
         if other_atom.action == "launch":
             command = _short(other_atom.value.replace(",", " "))
-            launch.append(f"Launches `{command}` on the developer's machine.")
+            launch.append(f"Launches {md_code(command)} on the developer's machine.")
         elif other_atom.action == "remote_server":
             host = other_atom.egress_hosts[0] if other_atom.egress_hosts else "a remote host"
-            launch.append(f"Connects the agent to `{host}`.")
+            launch.append(f"Connects the agent to {md_code(host)}.")
     if not launch and atom.action == "project_setting":
         launch.append("Registers a server the agent can call tools on.")
     allows = launch[:2]
     if credentials:
         allows.append(
-            "Hands it credentials from: " + ", ".join(f"`{k}`" for k in sorted(credentials))
+            "Hands it credentials from: " + ", ".join(f"{md_code(k)}" for k in sorted(credentials))
         )
     severity = Severity.HIGH if credentials or atom.action == "remote_server" else Severity.MEDIUM
     return CheckFinding(
         check="config-guard",
         rule_id="CG005",
         severity=severity,
-        title=f"New MCP server `{name}`",
+        title=f"New MCP server {md_code(name)}",
         path=atom.path,
         line=_line_of(head.get(atom.path, ""), f'"{name}"'),
         allows=tuple(allows),
@@ -435,42 +546,70 @@ def _instruction_findings(
             if tag in {"insert", "replace"}:
                 for index in range(j1, j2):
                     added[index + 1] = after[index]
-        for line_no, line in added.items():
-            if _SKIP_CHECK_RE.search(line):
-                yield CheckFinding(
-                    check="config-guard",
-                    rule_id="CG006",
-                    severity=Severity.HIGH,
-                    title="New instruction tells agents to skip a check",
-                    path=path,
-                    line=line_no,
-                    allows=(f"Agents reading `{path}` are told: “{_short(line.strip(), 160)}”",),
-                    fix=(
-                        "Remove the line, or narrow it to what may be skipped and say which "
-                        "check still runs (for example: CI still runs the full suite)."
-                    ),
-                )
+        for line_no, sentence in _added_passages(added):
+            yield CheckFinding(
+                check="config-guard",
+                rule_id="CG006",
+                severity=Severity.HIGH,
+                title="New instruction tells agents to skip a check",
+                path=path,
+                line=line_no,
+                allows=(f"Agents reading {md_code(path)} are told: “{_short(sentence, 160)}”",),
+                fix=(
+                    "Remove the line, or narrow it to what may be skipped and say which "
+                    "check still runs (for example: CI still runs the full suite)."
+                ),
+            )
+
+
+def _added_passages(added: Mapping[int, str]) -> Iterable[tuple[int, str]]:
+    """Skip-check matches in runs of added lines, so hard-wrapped sentences still match."""
+    numbers = sorted(added)
+    runs: list[list[int]] = []
+    for number in numbers:
+        if runs and number == runs[-1][-1] + 1 and added[number].strip():
+            runs[-1].append(number)
+        else:
+            runs.append([number])
+    for run in runs:
+        text, starts = "", []
+        for number in run:
+            starts.append((len(text), number))
+            text += added[number].strip() + " "
+        reported: set[int] = set()
+        for match in _SKIP_CHECK_RE.finditer(text):
+            line_no = max(n for offset, n in starts if offset <= match.start())
+            if line_no in reported:
+                continue
+            reported.add(line_no)
+            first = next(i for i, (_, n) in enumerate(starts) if n == line_no)
+            end = next((o for o, _ in starts if o > match.end()), len(text))
+            yield line_no, text[starts[first][0] : end].strip()
 
 
 # --- skill frontmatter and Codex rule files -------------------------------------------------
 
 
 def _rule_file_findings(
-    base: Mapping[str, str], head: Mapping[str, str], notes: list[str]
+    base: Mapping[str, str], head: Mapping[str, str]
 ) -> Iterable[tuple[tuple[str, ...], CheckFinding]]:
     for path, text in head.items():
         if _SKILL_RE.search(path):
-            kind = "skill allowed-tools"
-            before = _frontmatter_rules(base.get(path, ""), path, kind)
-            after = _frontmatter_rules(text, path, kind)
+            before = _frontmatter_rules(base.get(path, ""), path) or []
+            after = _frontmatter_rules(text, path)
         elif _CODEX_RULES_RE.search(path):
             try:
                 before = _codex_rules(base.get(path, ""), path)
+            except RulesParseError:
+                before = []
+            try:
                 after = _codex_rules(text, path)
             except RulesParseError:
-                notes.append(f"`{path}` could not be parsed as Codex rules; it was not expanded.")
-                continue
+                after = None
         else:
+            continue
+        if after is None:
+            yield ("unreadable", path), _unreadable_rules(path)
             continue
         known = {rule.raw for rule in before if rule.decision == "allow"}
         for rule in after:
@@ -483,20 +622,42 @@ def _rule_file_findings(
                 yield ("allow", path, rule.raw), finding
 
 
-def _frontmatter_rules(text: str, path: str, kind: str) -> list[Rule]:
+def _unreadable_rules(path: str) -> CheckFinding:
+    return CheckFinding(
+        check="config-guard",
+        rule_id="CG007",
+        severity=Severity.HIGH,
+        title=f"{md_code(path)} could not be parsed",
+        path=path,
+        allows=(
+            "Config Guard could not read the permission rules in this file, so any allow rule "
+            "in it went unchecked; the agent may still load it.",
+        ),
+        fix="Fix the syntax so the rules can be reviewed, then re-run the check.",
+    )
+
+
+_TOOLS_LINE_RE = re.compile(r"^(allowed-tools|tools):\s*(?P<value>.+)$", re.MULTILINE)
+
+
+def _frontmatter_rules(text: str, path: str) -> list[Rule] | None:
+    """Allow rules from skill frontmatter; None when the frontmatter cannot be read."""
     if not text.startswith("---"):
         return []
     parts = text.split("---", 2)
     if len(parts) < 3:
         return []
+    source = Source("claude", "skill allowed-tools", path, path)
     try:
         data = yaml.safe_load(parts[1])
     except yaml.YAMLError:
-        return []
+        # Claude Code reads `allowed-tools: Bash(git log: *)` even though it is not YAML.
+        match = _TOOLS_LINE_RE.search(parts[1])
+        return parse_allowed_tools(match.group("value"), source) if match else None
     if not isinstance(data, Mapping):
-        return []
+        return None if data is not None else []
     value = data.get("allowed-tools", data.get("tools"))
-    return parse_allowed_tools(value, Source("claude", kind, path, path)) if value else []
+    return parse_allowed_tools(value, source) if value else []
 
 
 def _codex_rules(text: str, path: str) -> list[Rule]:
@@ -507,7 +668,7 @@ def _while_skill_runs(finding: CheckFinding, path: str) -> CheckFinding:
     name = PurePosixPath(path).stem
     if name.upper() == "SKILL":
         name = PurePosixPath(path).parent.name
-    return replace(finding, title=f"{finding.title} while `{name}` runs")
+    return replace(finding, title=f"{finding.title} while {md_code(name)} runs")
 
 
 # --- other engine findings -----------------------------------------------------------------
