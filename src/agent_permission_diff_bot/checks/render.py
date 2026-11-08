@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import string
+import re
 from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import quote
@@ -95,7 +95,7 @@ def render_comment(results: list[CheckResult], repo: RepoRef) -> str:
         f"<sub>Static read of the diff at `{repo.head_sha[:7]}`; nothing in the PR was run. "
         "Updated in place on every push.</sub>"
     )
-    return redact_text("\n".join(lines))
+    return "\n".join(lines)
 
 
 def render_check_output(result: CheckResult, repo: RepoRef) -> dict[str, Any]:
@@ -104,7 +104,7 @@ def render_check_output(result: CheckResult, repo: RepoRef) -> dict[str, Any]:
         notes = "\n".join(f"- {_clean(note, 400)}" for note in result.notes)
         return {
             "title": "The check did not finish",
-            "summary": redact_text(
+            "summary": (
                 "The analysis did not complete, so this pull request was not checked. "
                 "Re-run the check to retry.\n\n" + notes
             ),
@@ -131,7 +131,7 @@ def render_check_output(result: CheckResult, repo: RepoRef) -> dict[str, Any]:
             if result.check == "config-guard"
             else "No new place in this pull request catches an error and drops it."
         )
-    summary = redact_text("\n".join(summary_lines))
+    summary = "\n".join(summary_lines)
     if len(summary) > OUTPUT_LIMIT:
         summary = summary[: OUTPUT_LIMIT - 40] + "\n\n…truncated; see the PR comment."
     output: dict[str, Any] = {"title": title, "summary": summary}
@@ -171,7 +171,7 @@ def _annotation(finding: CheckFinding) -> dict[str, Any]:
         "start_line": finding.line,
         "end_line": finding.line,
         "annotation_level": level,
-        "title": redact_text(_clean(finding.title, 250)),
+        "title": redact_text(" ".join(finding.title.split()))[:250],
         "message": redact_text(message)[:4000],
     }
 
@@ -191,13 +191,14 @@ def _count(result: CheckResult) -> str:
 
 
 def _clean(text: str, limit: int) -> str:
-    """Collapse whitespace, cap length and keep PR-controlled text from becoming HTML.
+    """Collapse whitespace, cap length, redact, and keep PR text from becoming Markdown.
 
     Code spans are paired the way CommonMark pairs them (a run of n backticks closes only
-    at the next run of exactly n) and are copied literally. Outside them, a backslash keeps
-    escaping the character after it, ``<`` is escaped, and a backtick run with no partner is
-    backslash-escaped so it can never pair with a span added after this text. An HTML
-    comment opener is broken everywhere so it can never hide the rest of a comment.
+    at the next run of exactly n) and rebuilt with ``md_code``, which redacts their
+    contents and picks a fence they cannot close. Every other stretch is redacted first and then has its inline Markdown and HTML
+    characters backslash-escaped, so PR text cannot add links, images, emphasis or tags. A
+    backtick run with no partner is escaped too, so it can never pair with a span added
+    after this text.
     """
     text = " ".join(text.split())
     if len(text) > limit:
@@ -205,22 +206,10 @@ def _clean(text: str, limit: int) -> str:
     out: list[str] = []
     index = 0
     while index < len(text):
-        char = text[index]
-        if char == "\\":
-            following = text[index + 1 : index + 2]
-            if following and following in string.punctuation:
-                out.append(text[index : index + 2])
-                index += 2
-            else:
-                out.append(char)
-                index += 1
-            continue
-        if char != "`":
-            stop = min(
-                (pos for pos in (text.find("`", index), text.find("\\", index)) if pos >= 0),
-                default=len(text),
-            )
-            out.append(text[index:stop].replace("<", "&lt;"))
+        if text[index] != "`":
+            stop = text.find("`", index)
+            stop = len(text) if stop < 0 else stop
+            out.append(_escape_prose(text[index:stop]))
             index = stop
             continue
         run = len(text[index:]) - len(text[index:].lstrip("`"))
@@ -229,9 +218,17 @@ def _clean(text: str, limit: int) -> str:
             out.append("\\`" * run)
             index += run
             continue
-        out.append(text[index : close + run])
+        # Rebuild the span: its contents are redacted and get a fence they cannot close.
+        out.append(md_code(text[index + run : close]))
         index = close + run
-    return "".join(out).replace("<!--", "< !--")
+    return "".join(out)
+
+
+_PROSE_SPECIALS = re.compile(r"([\\*_\[\]!<>&~|])")
+
+
+def _escape_prose(text: str) -> str:
+    return _PROSE_SPECIALS.sub(r"\\\1", redact_text(text))
 
 
 def _closing_run(text: str, start: int, length: int) -> int:

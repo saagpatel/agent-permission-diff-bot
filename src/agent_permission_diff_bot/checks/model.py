@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from agent_permission_diff_bot.model import Severity
+from agent_permission_diff_bot.redaction import redact_text
 
 CheckName = Literal["config-guard", "swallowed"]
 
@@ -69,8 +70,10 @@ def md_code(value: str) -> str:
 
     The fence is one backtick longer than the longest run inside the value, so a value
     from the pull request cannot close the span early and turn the rest into HTML.
+    Credential-looking values are redacted here, before the fence is chosen, so a later
+    redaction can never eat a closing backtick.
     """
-    value = " ".join(value.split()) or " "
+    value = " ".join(redact_text(value).split()) or " "
     longest = max((len(run) for run in re.findall(r"`+", value)), default=0)
     fence = "`" * (longest + 1)
     pad = " " if value.startswith("`") or value.endswith("`") else ""

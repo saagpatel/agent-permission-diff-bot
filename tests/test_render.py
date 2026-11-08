@@ -59,9 +59,10 @@ def test_pr_controlled_text_cannot_hide_the_rest_of_the_comment() -> None:
         "New instruction tells agents to skip a check",
         allows=("Agents are told: “<!-- hide everything --> <img src=x>”",),
     )
-    body = render_comment([CheckResult("config-guard", [hostile])], REPO)
-    assert body.count("<!--") == 1, "only the bot's own marker may open an HTML comment"
-    assert "<img" not in body
+    html = _html(render_comment([CheckResult("config-guard", [hostile])], REPO))
+    assert html.count("<!--") == 1, "only the bot's own marker may open an HTML comment"
+    assert "<img" not in html
+    assert "everything" in html, "the rest of the comment stays visible"
 
 
 def test_code_spans_keep_their_angle_brackets() -> None:
@@ -98,8 +99,8 @@ def test_hostile_file_names_and_notes_stay_inert() -> None:
     result = CheckResult("config-guard", [hostile], notes=["`x`` <img src=x> ```"])
     body = render_comment([result], REPO)
     output = render_check_output(result, REPO)
-    assert "<details>" not in body.replace("``a`<details>`.py:4``", "")
-    assert "<img" not in output["summary"]
+    assert "<details" not in _html(body)
+    assert "<img" not in _html(output["summary"])
     assert "``a`<details>`.py:4``" in body
 
 
@@ -145,3 +146,22 @@ def test_a_crashed_check_never_reads_as_passed() -> None:
     output = render_check_output(crashed, REPO)
     assert output["title"] == "The check did not finish"
     assert "widens" not in output["summary"]
+
+
+def test_pr_text_cannot_add_links_emphasis_or_images() -> None:
+    hostile = finding(
+        allows=("Told: [Approved by security](https://evil.example) **safe** ![x](y)",)
+    )
+    html = _html(render_comment([CheckResult("config-guard", [hostile])], REPO))
+    assert 'evil.example"' not in html and "<strong>safe" not in html and "<img" not in html
+
+
+def test_redaction_runs_before_escaping_so_spans_stay_closed() -> None:
+    hostile = finding(
+        title="New `PreToolUse` hook",
+        allows=("Runs `true --token=synthetic-value` for tools matching `<details><summary>x`",),
+    )
+    body = render_comment([CheckResult("config-guard", [hostile])], REPO)
+    html = _html(body)
+    assert "synthetic-value" not in body
+    assert "<details" not in html and "<summary" not in html

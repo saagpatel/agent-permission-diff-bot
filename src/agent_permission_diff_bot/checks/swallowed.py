@@ -17,7 +17,9 @@ Python is parsed with :mod:`ast`; TypeScript and JavaScript with tree-sitter
 from __future__ import annotations
 
 import ast
+import io
 import re
+import tokenize
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import PurePosixPath
@@ -183,11 +185,15 @@ _NARROW_PY = {
 
 @dataclass(frozen=True)
 class ChangedFile:
-    """A file in the pull request: its head text and the 1-based lines the PR adds."""
+    """A file in the pull request: its head text and the head lines the PR touches.
+
+    ``changed`` holds the 1-based head lines the PR adds, plus the head lines on either side
+    of anything it deletes, so a handler made silent only by deleting a line still counts.
+    """
 
     path: str
     text: str
-    added: frozenset[int]
+    changed: frozenset[int]
 
 
 @dataclass(frozen=True)
@@ -207,7 +213,7 @@ def scan_swallowed(files: Iterable[ChangedFile]) -> CheckResult:
     ts_files: list[ChangedFile] = []
     findings: list[CheckFinding] = []
     for changed in files:
-        if not changed.added:
+        if not changed.changed:
             continue
         if len(changed.text.encode("utf-8", errors="surrogateescape")) > MAX_FILE_BYTES:
             result.notes.append(f"`{changed.path}` is over 1 MiB and was not scanned.")
@@ -215,12 +221,13 @@ def scan_swallowed(files: Iterable[ChangedFile]) -> CheckResult:
         suffix = PurePosixPath(changed.path).suffix.lower()
         if suffix in PYTHON_SUFFIXES:
             catches = _python_catches(changed, result.notes)
+            comments = _python_comments(changed.text)
         elif suffix in TS_SUFFIXES:
             ts_files.append(changed)
             continue
         else:
             continue
-        _classify(changed, catches, findings, result.deliberate)
+        _classify(changed, catches, comments, findings, result.deliberate)
     if ts_files:
         parser = _ts_parsers()
         if parser is None:
@@ -230,15 +237,15 @@ def scan_swallowed(files: Iterable[ChangedFile]) -> CheckResult:
             )
         else:
             for changed in ts_files:
-                catches = _ts_catches(changed, parser)
-                _classify(changed, catches, findings, result.deliberate)
+                catches, comments = _ts_catches(changed, parser)
+                _classify(changed, catches, comments, findings, result.deliberate)
     result.findings = rank(findings)
     return result
 
 
-def added_lines_from_patch(patch: str) -> frozenset[int]:
-    """1-based head line numbers that a unified diff hunk adds."""
-    added: set[int] = set()
+def changed_lines_from_patch(patch: str) -> frozenset[int]:
+    """Head lines a unified diff hunk adds, plus the head lines around each deletion."""
+    changed: set[int] = set()
     line = 0
     for raw in patch.splitlines():
         if raw.startswith("@@"):
@@ -251,25 +258,30 @@ def added_lines_from_patch(patch: str) -> frozenset[int]:
         # a removed `----------` docstring underline is a removal, not a header.
         marker = raw[:1]
         if marker == "+":
-            added.add(line)
+            changed.add(line)
             line += 1
-        elif marker in {"-", "\\"}:
+        elif marker == "-":
+            # A deletion sits between head lines line-1 and line; both are touched.
+            changed.update(n for n in (line - 1, line) if n > 0)
+        elif marker == "\\":
             continue
         else:
             line += 1
-    return frozenset(added)
+    return frozenset(changed)
 
 
-def added_lines_between(base: str, head: str) -> frozenset[int]:
-    """Lines of ``head`` that are new compared with ``base`` (for local scans)."""
+def changed_lines_between(base: str, head: str) -> frozenset[int]:
+    """Head lines that are new, or next to a deletion, compared with ``base``."""
     import difflib
 
     matcher = difflib.SequenceMatcher(a=base.splitlines(), b=head.splitlines(), autojunk=False)
-    added: set[int] = set()
+    changed: set[int] = set()
     for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
         if tag in {"insert", "replace"}:
-            added.update(range(j1 + 1, j2 + 1))
-    return frozenset(added)
+            changed.update(range(j1 + 1, j2 + 1))
+        elif tag == "delete":
+            changed.update(n for n in (j1, j1 + 1) if n > 0)
+    return frozenset(changed)
 
 
 # --- classification ------------------------------------------------------------------------
@@ -278,16 +290,15 @@ def added_lines_between(base: str, head: str) -> frozenset[int]:
 def _classify(
     changed: ChangedFile,
     catches: Iterable[_Catch],
+    comments: Mapping[int, str],
     findings: list[CheckFinding],
     deliberate: list[DeliberateCatch],
 ) -> None:
-    source_lines = changed.text.splitlines()
     for catch in catches:
-        if not any(line in changed.added for line in catch.lines):
+        if not any(line in changed.changed for line in catch.lines):
             continue
-        comment_text = "\n".join(
-            source_lines[n - 1] for n in catch.lines if 0 < n <= len(source_lines)
-        )
+        # Markers count only in real comments, never inside a string literal.
+        comment_text = "\n".join(comments[n] for n in catch.lines if n in comments)
         marker = _MARKER_RE.search(comment_text)
         noqa = _NOQA_RE.search(comment_text)
         if marker or noqa:
@@ -358,6 +369,18 @@ def _words(name: str) -> list[str]:
 
 
 # --- Python ----------------------------------------------------------------------------------
+
+
+def _python_comments(text: str) -> dict[int, str]:
+    """Comment text by 1-based line, from the tokenizer (so strings never count)."""
+    comments: dict[int, str] = {}
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(text).readline):
+            if token.type == tokenize.COMMENT:
+                comments[token.start[0]] = token.string
+    except (tokenize.TokenError, SyntaxError, IndentationError):
+        pass  # the file did not parse; _python_catches already noted it
+    return comments
 
 
 def _python_catches(changed: ChangedFile, notes: list[str]) -> list[_Catch]:
@@ -501,16 +524,24 @@ def _ts_parsers() -> Mapping[str, Any] | None:
     }
 
 
-def _ts_catches(changed: ChangedFile, parsers: Mapping[str, Any]) -> list[_Catch]:
+def _ts_catches(
+    changed: ChangedFile, parsers: Mapping[str, Any]
+) -> tuple[list[_Catch], dict[int, str]]:
     suffix = PurePosixPath(changed.path).suffix.lower()
     parser = parsers["tsx" if suffix in {".tsx", ".jsx"} else "ts"]
     source = changed.text.encode("utf-8", errors="surrogateescape")
     tree = parser.parse(source)
     catches: list[_Catch] = []
+    comments: dict[int, str] = {}
     stack = [tree.root_node]
     while stack:
         node = stack.pop()
         stack.extend(node.children)
+        if node.type == "comment":
+            text = _text(node)
+            for row in range(node.start_point[0] + 1, node.end_point[0] + 2):
+                comments[row] = (comments.get(row, "") + " " + text).strip()
+            continue
         if node.type == "catch_clause":
             body = node.child_by_field_name("body")
             if body is None or not _ts_block_swallows(body, node):
@@ -533,7 +564,7 @@ def _ts_catches(changed: ChangedFile, parsers: Mapping[str, Any]) -> list[_Catch
             catches.append(
                 _ts_catch(changed, node, function.child_by_field_name("object"), ".catch()")
             )
-    return catches
+    return catches, comments
 
 
 def _ts_catch(changed: ChangedFile, node: Any, protected: Any, caught: str) -> _Catch:
