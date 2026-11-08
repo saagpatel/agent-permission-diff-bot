@@ -624,7 +624,8 @@ def _ts_plain_assignment(statement: Any, *forbidden: str) -> bool:
 
 
 def _ts_plain_target(node: Any, *forbidden: str) -> bool:
-    """`ok`, `this.failed` or `state.last.ok`: no call, and the caught error is not used."""
+    """`ok`, `this.failed`, `state.last.ok` or `failed[key]`: no call, and the caught error
+    is not used."""
     if node.type == "identifier":
         return _text(node) not in forbidden
     if node.type == "this":
@@ -637,6 +638,15 @@ def _ts_plain_target(node: Any, *forbidden: str) -> bool:
             and prop is not None
             and prop.type == "property_identifier"
             and _ts_plain_target(target, *forbidden)
+        )
+    if node.type == "subscript_expression":
+        target = node.child_by_field_name("object")
+        index = node.child_by_field_name("index")
+        return (
+            target is not None
+            and index is not None
+            and _ts_plain_target(target, *forbidden)
+            and _ts_plain(index, *forbidden)
         )
     return False
 

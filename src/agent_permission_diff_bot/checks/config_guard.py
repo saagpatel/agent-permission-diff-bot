@@ -622,7 +622,7 @@ def _instruction_findings(
 # (`never ever skip`, `don't use --no-verify`), never a clause boundary.
 _NEGATOR_RE = re.compile(
     r"\b(never|not|don'?t|doesn'?t|mustn'?t|shouldn'?t|cannot|can'?t|no)"
-    r"(\s+(ever|use|run|pass|add|call|try|to))?\s*$",
+    r"(\s+(ever|use|run|pass|add|call|try|to))?[\s`*_\"']*$",  # opening code/quote marks
     re.IGNORECASE,
 )
 _SKIP_VERBS = re.compile(
@@ -639,9 +639,18 @@ def _negated(text: str, match: re.Match[str]) -> bool:
     """
     if not _SKIP_VERBS.match(match.group(0)):
         return False
-    sentence_start = max(text.rfind(mark, 0, match.start()) for mark in ".!?;,:")
-    before = text[sentence_start + 1 : match.start()]
+    before = text[_clause_start(text, match.start()) : match.start()]
     return bool(_NEGATOR_RE.search(before))
+
+
+def _clause_start(text: str, position: int) -> int:
+    """Where the clause holding ``position`` starts: after the last `.!?;,:` before it."""
+    return max(text.rfind(mark, 0, position) for mark in ".!?;,:") + 1
+
+
+# A skip verb inside a flag (`skip` in `--dangerously-skip-permissions`) is part of that
+# flag, which is matched (and negated) as a whole.
+_INSIDE_FLAG_RE = re.compile(r"--[\w-]*$")
 
 
 # `etc.` often ends a sentence, so it is read through only when a lowercase word follows.
@@ -698,9 +707,14 @@ def _added_passages(lines: list[str], added: set[int]) -> Iterable[tuple[int, st
         position = 0
         while match := _SKIP_CHECK_RE.search(searchable, position):
             position = match.start() + 1
+            if _INSIDE_FLAG_RE.search(searchable, max(0, match.start() - 80), match.start()):
+                continue
             if _negated(searchable, match):
                 continue
-            covered = [n for s, e, n in spans if s < match.end() and e > match.start()]
+            # A match touches an edit when its clause does, so removing a negator on the line
+            # above (`must never` becoming `may`) is found as well.
+            clause = _clause_start(searchable, match.start())
+            covered = [n for s, e, n in spans if s < match.end() and e > clause]
             touched = [n for n in covered if n in added]
             if not touched or touched[0] in reported:
                 continue

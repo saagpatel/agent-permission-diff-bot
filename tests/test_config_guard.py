@@ -547,3 +547,24 @@ def test_etc_at_the_end_of_a_sentence_ends_it() -> None:
     assert run_config_guard({"AGENTS.md": "# R\n"}, head).findings == []
     head = {"AGENTS.md": "# R\nNever ignore warnings etc. Skip the tests.\n"}
     assert len(run_config_guard({"AGENTS.md": "# R\n"}, head).findings) == 1
+
+
+def test_removing_a_negator_on_the_line_above_is_found() -> None:
+    base = {"AGENTS.md": "# Rules\nAgents must never\nskip the tests before pushing.\n"}
+    head = {"AGENTS.md": "# Rules\nAgents may\nskip the tests before pushing.\n"}
+    [finding] = run_config_guard(base, head).findings
+    assert finding.rule_id == "CG006" and finding.line == 2
+
+
+@pytest.mark.parametrize(
+    ("line", "found"),
+    [
+        ("Never use --dangerously-skip-permissions.", 0),
+        ("Don't use `--dangerously-skip-permissions`, ever.", 0),
+        ("Use --dangerously-skip-permissions in the sandbox.", 1),
+        ("Never skip lint, use --dangerously-skip-permissions instead.", 1),
+    ],
+)
+def test_a_skip_flag_is_read_as_one_token(line: str, found: int) -> None:
+    head = {"AGENTS.md": f"# R\n{line}\n"}
+    assert len(run_config_guard({"AGENTS.md": "# R\n"}, head).findings) == found

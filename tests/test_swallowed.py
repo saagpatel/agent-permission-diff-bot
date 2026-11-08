@@ -301,3 +301,25 @@ def test_promise_catch_whose_target_uses_the_error_keeps_it(handler: str) -> Non
 def test_promise_catch_that_sets_a_member_flag_swallows() -> None:
     found = scan("web/x.ts", "fetch(url).catch(() => { this.state.failed = true; });\n")
     assert [r[0] for r in found] == ["SW-network"]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "try { f(); } catch (e) { failed[key] = true; }\n",
+        "fetch(url).catch(() => { failed[key] = true; });\n",
+    ],
+)
+def test_a_subscript_flag_assignment_swallows_in_both_catch_forms(source: str) -> None:
+    assert len(scan("web/x.ts", source)) == 1
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "try { f(); } catch (e) { failed[e.code] = true; }\n",
+        "fetch(url).catch((e) => { failed[e] = true; });\n",
+    ],
+)
+def test_a_subscript_keyed_by_the_error_keeps_it(source: str) -> None:
+    assert scan("web/x.ts", source) == []
