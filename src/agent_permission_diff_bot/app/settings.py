@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -55,7 +56,7 @@ class AppSettings:
             guard_fail_on=parse_fail_on(env.get("APDB_GUARD_FAIL_ON", "high")),
             swallowed_fail_on=parse_fail_on(env.get("APDB_SWALLOWED_FAIL_ON", "never")),
             analysis_timeout_s=_positive(env, "APDB_ANALYSIS_TIMEOUT_S", 60.0),
-            analysis_memory_mb=int(_positive(env, "APDB_ANALYSIS_MEMORY_MB", 1024)),
+            analysis_memory_mb=_whole(env, "APDB_ANALYSIS_MEMORY_MB", 1024, minimum=64),
         )
 
 
@@ -67,9 +68,16 @@ def _positive(env: Mapping[str, str], name: str, default: float) -> float:
         value = float(raw)
     except ValueError as exc:
         raise SettingsError(f"{name} must be a positive number.") from exc
-    if value <= 0:
-        raise SettingsError(f"{name} must be a positive number.")
+    if not math.isfinite(value) or value <= 0:
+        raise SettingsError(f"{name} must be a positive, finite number.")
     return value
+
+
+def _whole(env: Mapping[str, str], name: str, default: int, *, minimum: int) -> int:
+    value = _positive(env, name, float(default))
+    if not value.is_integer() or value < minimum:
+        raise SettingsError(f"{name} must be a whole number of at least {minimum}.")
+    return int(value)
 
 
 def parse_fail_on(value: str) -> Severity | None:

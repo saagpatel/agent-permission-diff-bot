@@ -198,7 +198,9 @@ def run_checks(
         # The comparison is fixed to these commits, unlike the PR's live file list, so a late
         # webhook for an older push checks exactly that push.
         merge_base, files, truncated = repo.compare(target.base_sha, target.head_sha)
-        inputs = collect_inputs(repo, merge_base, target.head_sha, files, files_truncated=truncated)
+        inputs = collect_inputs(
+            repo, merge_base, target.head_sha, files, files_truncated=truncated, limits=limits
+        )
         # Both checks run in a time- and memory-limited child; a pathological PR can only
         # exhaust that child, and then both checks report that they did not finish.
         results = run_analysis(inputs, limits)

@@ -259,6 +259,8 @@ def test_an_analysis_that_exceeds_its_limits_never_reads_as_all_clear() -> None:
     [body] = bot_comments(replayer)
     assert "did not finish" in body
     assert "No new agent permission widening" not in body
+    runs = {run_["name"]: run_ for run_ in replayer.github.check_runs.values()}
+    assert "timed out" in runs["Agent Config Guard"]["output"]["summary"], "the deadline fired"
 
 
 def test_analysis_results_survive_the_round_trip_through_the_child() -> None:
@@ -776,3 +778,89 @@ def test_a_malformed_payload_answer_does_not_echo_details() -> None:
     )
     assert response.status_code == 400
     assert response.json() == {"error": "payload is missing required fields"}
+
+
+def test_one_check_crashing_in_the_child_still_reports_the_other() -> None:
+    from agent_permission_diff_bot.app.analysis import AnalysisLimits, run_analysis
+    from agent_permission_diff_bot.app.snapshot import PullInputs
+    from agent_permission_diff_bot.checks.swallowed import ChangedFile
+
+    source = "try:\n    db.commit()\nexcept Exception:\n    pass\n"
+    inputs = PullInputs(
+        base_files={},
+        head_files={".claude/settings.json": 42},  # type: ignore[dict-item]
+        swallowed_files=[ChangedFile("x.py", source, frozenset({1, 2, 3, 4}))],
+    )
+    guard, swallowed = run_analysis(inputs, AnalysisLimits())
+    assert guard.crashed and "did not finish" in guard.notes[0]
+    assert not swallowed.crashed and [f.rule_id for f in swallowed.findings] == ["SW-data-loss"]
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"check": "config-guard"},
+        {"check": "config-guard", "findings": {}, "deliberate": [], "notes": [], "crashed": False},
+        {"check": "config-guard", "findings": [], "deliberate": [], "notes": [], "crashed": []},
+    ],
+)
+def test_malformed_results_are_refused(data: dict[str, object]) -> None:
+    from agent_permission_diff_bot.checks.model import result_from_dict
+
+    with pytest.raises(ValueError):
+        result_from_dict(data)
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("APDB_ANALYSIS_TIMEOUT_S", "nan"),
+        ("APDB_ANALYSIS_TIMEOUT_S", "inf"),
+        ("APDB_ANALYSIS_TIMEOUT_S", "0"),
+        ("APDB_ANALYSIS_MEMORY_MB", "inf"),
+        ("APDB_ANALYSIS_MEMORY_MB", "0.5"),
+        ("APDB_ANALYSIS_MEMORY_MB", "32"),
+    ],
+)
+def test_analysis_limits_must_be_sane(tmp_path: Path, name: str, value: str) -> None:
+    key = tmp_path / "app.pem"
+    key.write_text("-----BEGIN PRIVATE KEY-----\nsynthetic\n-----END PRIVATE KEY-----\n")
+    env = {
+        "APDB_APP_ID": "12345",
+        "APDB_PRIVATE_KEY_PATH": str(key),
+        "APDB_WEBHOOK_SECRET": "synthetic-webhook-secret",
+        name: value,
+    }
+    with pytest.raises(SettingsError, match=name):
+        AppSettings.from_env(env)
+
+
+def test_hook_references_that_exceed_the_limits_fail_closed() -> None:
+    from agent_permission_diff_bot.app.analysis import AnalysisLimits
+    from agent_permission_diff_bot.app.snapshot import collect_inputs
+    from agent_permission_diff_bot.checks.config_guard import run_config_guard
+
+    settings = json.dumps(
+        {"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "bash a.sh"}]}]}}
+    )
+
+    class Repo:
+        def tree(self, sha: str) -> tuple[dict[str, dict[str, object]], bool]:
+            return {".claude/settings.json": {"sha": "c", "mode": "100644", "size": 10}}, False
+
+        def blob_text(self, sha: str, max_bytes: int) -> str:
+            return settings
+
+    changed = [
+        {
+            "filename": ".claude/settings.json",
+            "status": "modified",
+            "sha": "c",
+            "patch": "@@ -1 +1 @@\n+x",
+        }
+    ]
+    inputs = collect_inputs(
+        Repo(), "b" * 40, "h" * 40, changed, limits=AnalysisLimits(timeout_s=0.001)
+    )
+    found = run_config_guard(inputs.base_files, inputs.head_files).findings
+    assert any(f.rule_id == "APD013" for f in found)

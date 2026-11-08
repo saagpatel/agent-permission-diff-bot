@@ -88,6 +88,9 @@ def result_from_dict(data: object) -> CheckResult:
     """
     if not isinstance(data, dict) or data.get("check") not in ("config-guard", "swallowed"):
         raise ValueError("not a check result")
+    for key, kind in (("findings", list), ("deliberate", list), ("notes", list), ("crashed", bool)):
+        if not isinstance(data.get(key), kind):
+            raise ValueError(f"check result field {key!r} is missing or not a {kind.__name__}")
     try:
         findings = [
             CheckFinding(

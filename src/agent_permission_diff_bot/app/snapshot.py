@@ -10,12 +10,14 @@ checked from the tree where it lists them, and every download stops at its read 
 from __future__ import annotations
 
 import hashlib
+import logging
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Any, Protocol
 
 from agent_permission_diff_bot.app.github import BlobTooLargeError
+from agent_permission_diff_bot.app.limits import AnalysisLimits
 from agent_permission_diff_bot.checks.config_guard import is_guard_path
 from agent_permission_diff_bot.checks.swallowed import (
     MAX_FILE_BYTES,
@@ -24,6 +26,7 @@ from agent_permission_diff_bot.checks.swallowed import (
     ChangedFile,
     changed_lines_from_patch,
 )
+from agent_permission_diff_bot.limited import ChildStartError, LimitExceededError, run_limited
 from agent_permission_diff_bot.persistence import (
     ConfigCache,
     is_sensitive_path,
@@ -40,6 +43,8 @@ from agent_permission_diff_bot.sources import (
     _mark_incomplete,
     _too_large_reason,
 )
+
+log = logging.getLogger(__name__)
 
 MAX_GUARD_FILES = 300
 MAX_SWALLOWED_FILES = 200
@@ -69,6 +74,7 @@ def collect_inputs(
     pull_files: list[dict[str, Any]],
     *,
     files_truncated: bool = False,
+    limits: AnalysisLimits | None = None,
 ) -> PullInputs:
     """Inputs for both checks.
 
@@ -89,8 +95,9 @@ def collect_inputs(
     head_tree, head_truncated = repo.tree(head_sha)
     if base_truncated or head_truncated:
         notes.append("GitHub truncated a repository tree; unlisted files are marked unread.")
-    base_files = _snapshot(repo, base_tree, [*changed, *previous], base_truncated, {})
-    head_files = _snapshot(repo, head_tree, changed, head_truncated, head_blobs)
+    limits = limits or AnalysisLimits()
+    base_files = _snapshot(repo, base_tree, [*changed, *previous], base_truncated, {}, limits)
+    head_files = _snapshot(repo, head_tree, changed, head_truncated, head_blobs, limits)
     # A truncated tree can hide a startup config nobody changed, so it never passes.
     for files, truncated in ((base_files, base_truncated), (head_files, head_truncated)):
         if truncated:
@@ -115,6 +122,7 @@ def _snapshot(
     changed: Iterable[str],
     truncated: bool,
     known_blobs: Mapping[str, str],
+    limits: AnalysisLimits,
 ) -> dict[str, str]:
     """Startup configs first, then changed agent-facing files.
 
@@ -145,8 +153,7 @@ def _snapshot(
         limit = MAX_CONFIG_INPUT_BYTES if project_config_kind(path) else MAX_INPUT_BYTES
         reads += 1
         _read(repo, entry, path, limit, files)
-    cache: ConfigCache = {}
-    for path in sorted(snapshot_hook_references(files, cache, tree.keys())):
+    for path in _hook_references(files, sorted(tree), limits):
         if path in files or is_sensitive_path(path):
             continue
         if ".git" in {part.casefold() for part in path.split("/")}:
@@ -162,6 +169,35 @@ def _snapshot(
             _read(repo, tree[path], path, MAX_INPUT_BYTES, files)
     _source_state(files, tree, changed, truncated)
     return files
+
+
+def reference_targets(files: dict[str, str], available: list[str]) -> list[str]:
+    """Scripts the startup configs refer to. Runs in a limited child: parsing hook
+    metadata from a pull request can expand a small file into a lot of data."""
+    cache: ConfigCache = {}
+    return sorted(snapshot_hook_references(files, cache, available))
+
+
+def _hook_references(
+    files: dict[str, str], available: list[str], limits: AnalysisLimits
+) -> list[str]:
+    try:
+        targets = run_limited(
+            reference_targets,
+            {path: text for path, text in files.items() if project_config_kind(path)},
+            available,
+            timeout_s=limits.timeout_s,
+            memory_bytes=limits.memory_bytes,
+        )
+        if not isinstance(targets, list) or not all(isinstance(t, str) for t in targets):
+            raise ValueError("unexpected reference list")
+        return list(targets)
+    except (LimitExceededError, ChildStartError, RuntimeError, ValueError) as exc:
+        log.warning("Hook references were not resolved: %s", exc)
+        _mark_incomplete(
+            files, "(hook references)", "startup config references could not be resolved"
+        )
+        return []
 
 
 def _read(

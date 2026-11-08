@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
 
+from agent_permission_diff_bot.app.limits import AnalysisLimits
 from agent_permission_diff_bot.app.snapshot import PullInputs
 from agent_permission_diff_bot.checks.config_guard import run_config_guard
 from agent_permission_diff_bot.checks.model import CheckName, CheckResult, result_from_dict
@@ -21,13 +21,9 @@ from agent_permission_diff_bot.limited import ChildStartError, LimitExceededErro
 
 log = logging.getLogger(__name__)
 
+__all__ = ["AnalysisLimits", "analyze", "run_analysis"]
+
 CHECKS: tuple[CheckName, CheckName] = ("config-guard", "swallowed")
-
-
-@dataclass(frozen=True)
-class AnalysisLimits:
-    timeout_s: float = 60.0
-    memory_bytes: int = 1024 * 1024 * 1024
 
 
 def analyze(
