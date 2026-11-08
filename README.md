@@ -326,8 +326,10 @@ App) are **experimental**. Known gaps, tracked in
   parsed, so unusual phrasings can be missed or misread. A match counts as new when any line
   of its clause was edited.
 - The Swallowed probe (`probe-swallowed`, and the probe line in a finding) reads the flagged
-  Python handler rather than running anything. It skips handlers whose `try` has a `finally`
-  or `else`, or that assign anything but plain names, and it never runs the protected code;
+  Python handler rather than running anything. It skips a `try` with `finally` or `else`, a
+  handler after another `except` clause, one inside an enclosing `finally` or `with` block,
+  and one that assigns anything but plain names or reads a name that may be unbound
+  (shadowed, deleted, or bound only on some paths). It never runs the protected code, and
   TypeScript handlers are not probed.
 
 ## Analysis containment (experimental)
