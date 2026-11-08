@@ -344,3 +344,79 @@ def test_python_nested_too_deeply_to_parse_is_refused_not_unfinished() -> None:
     result = scan_swallowed([ChangedFile("deep.py", text, frozenset(range(1, 6)))])
     assert not result.crashed and result.findings == []
     assert any("not scanned" in note for note in result.notes)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "p.catch(() => (failed = true));\n",
+        "p.catch(() => failed = true);\n",
+        "try { f(); } catch (e) { failed ||= true; }\n",
+        "try { f(); } catch (e) { errors += 1; }\n",
+        "try { f(); } catch (e) { errors++; }\n",
+    ],
+)
+def test_expression_body_and_compound_flag_sets_swallow(source: str) -> None:
+    assert len(scan("web/x.ts", source)) == 1
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "try { f(); } catch ({ message }) { last = message; }\n",
+        "try { f(); } catch (e) { counts[e.code]++; }\n",
+        "p.catch((e) => (last = e));\n",
+    ],
+)
+def test_a_flag_set_that_uses_the_error_keeps_it(source: str) -> None:
+    assert scan("web/x.ts", source) == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "try { verifyToken(t); } catch ({ message = fallback }) { last = fallback; }\n",
+        "try { verifyToken(t); } catch ({ [key]: message }) { last = key; }\n",
+        "verifyToken(t).catch(({ message = fallback }) => { last = fallback; });\n",
+    ],
+)
+def test_defaults_and_computed_keys_are_not_the_error(source: str) -> None:
+    assert len(scan("web/x.ts", source)) == 1
+
+
+def test_a_typed_destructured_error_is_still_the_error() -> None:
+    source = "try { f(); } catch ({ message }: any) { last = message; }\n"
+    assert scan("web/x.ts", source) == []
+
+
+def test_a_deeply_nested_catch_pattern_does_not_crash_the_scan() -> None:
+    depth = 1_100
+    source = "verifyToken(t).catch((" + "[" * depth + "e" + "]" * depth + ") => {});\n"
+    found = scan("web/x.ts", source)
+    assert [r[0] for r in found] == ["SW-auth"]
+    nested = "try { f(); } catch (" + "{a:" * 600 + "e" + "}" * 600 + ") { last = e; }\n"
+    assert scan("web/x.ts", nested) == []
+
+
+def test_a_ts_file_too_nested_to_walk_is_noted_and_the_rest_still_scanned(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_permission_diff_bot.checks import swallowed
+
+    original = swallowed._ts_catches
+
+    def deep(changed: ChangedFile, parser: object) -> object:
+        if changed.path == "web/deep.ts":
+            raise RecursionError("maximum recursion depth exceeded")
+        return original(changed, parser)
+
+    monkeypatch.setattr(swallowed, "_ts_catches", deep)
+    body = "verifyToken(t).catch(() => {});\n"
+    result = scan_swallowed(
+        [
+            ChangedFile("web/deep.ts", body, frozenset({1})),
+            ChangedFile("web/x.ts", body, frozenset({1})),
+        ]
+    )
+    assert not result.crashed and [f.path for f in result.findings] == ["web/x.ts"]
+    assert any("web/deep.ts" in note and "not scanned" in note for note in result.notes)
