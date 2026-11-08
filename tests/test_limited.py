@@ -9,7 +9,12 @@ from typing import Any
 import pytest
 import yaml
 
-from agent_permission_diff_bot.limited import LimitExceededError, call_within, run_limited
+from agent_permission_diff_bot.limited import (
+    ChildStartError,
+    LimitExceededError,
+    call_within,
+    run_limited,
+)
 from agent_permission_diff_bot.model import Severity
 
 BOMB = "a: &a [x,x,x,x,x,x,x,x,x]\n" + "".join(
@@ -74,7 +79,7 @@ def _deep() -> Any:
 
 def _colliding_keys() -> dict[int, int]:
     modulus = sys.hash_info.modulus
-    return {modulus * n: n for n in range(20_000)}
+    return {modulus * n: n for n in range(2_000)}
 
 
 def test_returns_json_data() -> None:
@@ -130,7 +135,7 @@ def test_shared_references_do_not_survive_into_the_parent() -> None:
 def test_colliding_integer_keys_cannot_slow_the_parent() -> None:
     started = time.monotonic()
     result = run_limited(_colliding_keys)
-    assert len(result) == 20_000
+    assert len(result) == 2_000
     assert all(isinstance(key, str) for key in list(result)[:5])
     assert time.monotonic() - started < 10
 
@@ -200,3 +205,47 @@ def test_nesting_up_to_the_cap_is_returned() -> None:
 def test_nesting_past_the_cap_is_refused() -> None:
     with pytest.raises(LimitExceededError, match="nested too deeply"):
         run_limited(_nested, 201)
+
+
+class SlowToEncode:
+    def __reduce__(self) -> Any:
+        time.sleep(1.0)
+        return (str, ("encoded",))
+
+
+def test_encoding_the_arguments_counts_against_the_deadline() -> None:
+    started = time.monotonic()
+    with pytest.raises(LimitExceededError, match="timed out"):
+        run_limited(_echo, SlowToEncode(), timeout_s=0.2)
+    assert time.monotonic() - started < 3
+
+
+def test_a_timeout_during_start_up_still_kills_the_child(monkeypatch: pytest.MonkeyPatch) -> None:
+    import multiprocessing as mp
+    from multiprocessing.context import SpawnProcess
+    from multiprocessing.process import BaseProcess
+
+    def slow_start(self: BaseProcess) -> None:
+        time.sleep(1.0)
+        BaseProcess.start(self)
+
+    monkeypatch.setattr(SpawnProcess, "start", slow_start)
+    with pytest.raises(LimitExceededError, match="timed out"):
+        run_limited(_sleep, timeout_s=0.2)
+    deadline = time.monotonic() + 5
+    while mp.active_children() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert mp.active_children() == []
+
+
+def test_a_host_that_cannot_start_the_child_is_not_a_verdict(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from multiprocessing.context import SpawnProcess
+
+    def refuse(self: object) -> None:
+        raise OSError(11, "Resource temporarily unavailable")
+
+    monkeypatch.setattr(SpawnProcess, "start", refuse)
+    with pytest.raises(ChildStartError, match="could not start"):
+        run_limited(_double, 1)

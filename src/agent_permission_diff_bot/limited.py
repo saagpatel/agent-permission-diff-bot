@@ -3,10 +3,11 @@
 The child is spawned fresh, so a hostile input (a YAML alias bomb, an exponential pattern)
 can exhaust only the child:
 
-- One deadline covers starting the child, handing it the arguments, running ``fn`` and
-  receiving the whole result. Starting the child sends only a reference to ``fn``; the
-  arguments travel over a separate pipe inside the deadline. Past the deadline the child
-  is killed, and the parent waits for its own I/O thread to finish before closing a pipe.
+- One deadline covers encoding the arguments, starting the child, handing it the
+  arguments, running ``fn`` and receiving the whole result. Starting the child sends only
+  a reference to ``fn``; the arguments travel over a separate pipe. Past the deadline the
+  child is killed (as soon as it exists, if it was still starting), and the parent waits
+  for its own I/O thread to finish before closing a pipe, at most ``_SHUTDOWN_GRACE_S``.
 - The result crosses as JSON text no larger than ``max_result_bytes``. JSON has no shared
   references, no classes and no integer keys, so decoding it in the parent is linear in
   its size and cannot re-expand a structure the child flattened. Callers get plain data:
@@ -28,7 +29,6 @@ import pickle
 import re
 import threading
 from collections.abc import Callable
-from itertools import accumulate
 from typing import Any
 
 try:
@@ -41,14 +41,23 @@ DEFAULT_MEMORY_BYTES = 1024 * 1024 * 1024
 DEFAULT_MAX_RESULT_BYTES = 8 * 1024 * 1024
 # Deepest JSON nesting a result may have, so the parent's decoder never recurses far.
 MAX_RESULT_DEPTH = 200
-_JSON_STRING = re.compile(r'"(?:\\.|[^"\\])*"')
-_JSON_BRACKET = re.compile(r"[\[\]{}]")
+_JSON_ESCAPE = re.compile(r"\\.")
+_JSON_PLAIN_STRING = re.compile(r'"[^"]*"')
+_OPENERS = frozenset(b"[{")
+_NOT_BRACKETS = bytes(c for c in range(256) if c not in b"[]{}")
 # After a kill, how long the parent waits for its I/O thread to see the pipe close.
 _SHUTDOWN_GRACE_S = 5.0
 
 
 class LimitExceededError(RuntimeError):
     """The child timed out, ran out of memory, returned too much, or died."""
+
+
+class ChildStartError(RuntimeError):
+    """The host could not start the analysis process (out of processes or descriptors).
+
+    Not a verdict on the input: callers should retry or report an infrastructure error.
+    """
 
 
 class _IOStillRunningError(LimitExceededError):
@@ -72,10 +81,20 @@ def _encode(kind: str, payload: Any) -> bytes:
 
 
 def _json_depth(text: str) -> int:
-    """Deepest bracket nesting in JSON text, ignoring brackets inside strings."""
-    brackets = _JSON_BRACKET.findall(_JSON_STRING.sub("", text))
-    steps = (1 if bracket in "[{" else -1 for bracket in brackets)
-    return max(accumulate(steps), default=0)
+    """Deepest bracket nesting in JSON text, ignoring brackets inside strings.
+
+    Linear and constant-memory per character: escape pairs are dropped first, so a string
+    is then just a quote, non-quotes and a quote. Neither pattern repeats a group, so the
+    regex engine keeps no per-character backtracking state.
+    """
+    unescaped = _JSON_ESCAPE.sub("", text)
+    outside_strings = _JSON_PLAIN_STRING.sub("", unescaped)
+    brackets = outside_strings.encode("ascii", "ignore").translate(None, _NOT_BRACKETS)
+    depth = deepest = 0
+    for bracket in brackets:
+        depth += 1 if bracket in _OPENERS else -1
+        deepest = max(deepest, depth)
+    return deepest
 
 
 def _child(
@@ -157,8 +176,9 @@ def run_limited(
     ``fn`` must be importable by name, and its result JSON-serialisable (dataclasses and
     enums are converted). ``timeout_s`` includes starting the child. Raises
     ``LimitExceededError`` when the deadline passes, the memory cap is hit, the result is
-    too large or too deeply nested, or the child dies without a whole result; and
-    ``RuntimeError`` when ``fn`` raised or returned something that is not JSON data.
+    too large or too deeply nested, or the child dies without a whole result;
+    ``ChildStartError`` when the host cannot start the child; and ``RuntimeError`` when
+    ``fn`` raised or returned something that is not JSON data.
     """
     ctx = mp.get_context("spawn")
     args_reader, args_writer = ctx.Pipe(duplex=False)
@@ -167,10 +187,21 @@ def run_limited(
         target=_child,
         args=(args_reader, result_writer, fn, memory_bytes, max_result_bytes),
     )
-    arg_bytes = pickle.dumps(args, protocol=pickle.HIGHEST_PROTOCOL)
+    cancelled = threading.Event()
 
     def work() -> bytes:
-        proc.start()
+        # Encoding the arguments and starting the child both run inside the deadline.
+        arg_bytes = pickle.dumps(args, protocol=pickle.HIGHEST_PROTOCOL)
+        if cancelled.is_set():
+            raise LimitExceededError("timed out before the child started")
+        try:
+            proc.start()
+        except OSError as exc:
+            raise ChildStartError(f"could not start the analysis process: {exc}") from exc
+        if cancelled.is_set():
+            # The deadline passed while the child was starting; nobody else will kill it.
+            proc.kill()
+            raise LimitExceededError("timed out while the child started")
         args_reader.close()
         result_writer.close()
         args_writer.send_bytes(arg_bytes)
@@ -179,6 +210,7 @@ def run_limited(
         return received
 
     def stop() -> None:
+        cancelled.set()
         if proc.pid is not None:
             proc.kill()
 
