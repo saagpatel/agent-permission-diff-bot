@@ -421,6 +421,95 @@ def test_an_anchor_without_an_alias_is_still_read() -> None:
     assert any(title.startswith("New allow rule `Bash`") for title in titles)
 
 
+def test_a_weakening_edited_into_one_line_of_a_wrapped_sentence_is_found() -> None:
+    base = {"AGENTS.md": "# Rules\nAlways run the\nunit tests before pushing.\n"}
+    head = {"AGENTS.md": "# Rules\nAlways skip the\nunit tests before pushing.\n"}
+    [finding] = run_config_guard(base, head).findings
+    assert finding.rule_id == "CG006" and finding.line == 2
+    assert "skip the unit tests" in finding.allows[0]
+
+
+def test_an_untouched_wrapped_instruction_stays_quiet() -> None:
+    base = {"AGENTS.md": "# Rules\nYou may skip the\nslow tests locally.\n"}
+    head = {"AGENTS.md": "# Rules\nYou may skip the\nslow tests locally.\nKeep commits small.\n"}
+    assert run_config_guard(base, head).findings == []
+
+
+def test_a_negated_sentence_does_not_hide_the_next_one() -> None:
+    head = {"AGENTS.md": "# Rules\nNever skip lint. Skip the tests.\n"}
+    [finding] = run_config_guard({"AGENTS.md": "# Rules\n"}, head).findings
+    assert "Skip the tests" in finding.allows[0]
+
+
+def test_invalid_yaml_skill_without_tools_is_not_unreadable() -> None:
+    text = "---\ndescription: Use when: deploying\n---\nBody.\n"
+    assert run_config_guard({}, {".claude/skills/deploy/SKILL.md": text}).findings == []
+
+
+def test_an_unreadable_rules_file_the_pr_did_not_touch_is_quiet() -> None:
+    path = ".codex/rules/x.rules"
+    broken = "prefix_rule(\n"
+    assert run_config_guard({path: broken}, {path: broken}).findings == []
+
+
+def test_a_subagent_tools_restriction_is_not_an_allow_rule() -> None:
+    text = "---\nname: reviewer\ntools: Bash, Read\n---\nReview code.\n"
+    assert run_config_guard({}, {".claude/agents/reviewer.md": text}).findings == []
+
+
+@pytest.mark.parametrize("value", ["acceptEdits", "default"])
+def test_removing_an_explicit_mode_says_another_layer_now_decides(value: str) -> None:
+    base = {SETTINGS: settings(permissions={"defaultMode": value})}
+    [finding] = run_config_guard(base, {SETTINGS: settings(permissions={})}).findings
+    assert finding.rule_id == "CG003" and "another settings layer" in finding.allows[0]
+
+
+def test_removing_the_most_permissive_mode_is_quiet() -> None:
+    base = {SETTINGS: settings(permissions={"defaultMode": "bypassPermissions"})}
+    assert run_config_guard(base, {SETTINGS: settings(permissions={})}).findings == []
+
+
+def test_neighbouring_bullets_do_not_merge_into_one_instruction() -> None:
+    base = {"AGENTS.md": "# Rules\n- Never skip lint\n"}
+    head = {"AGENTS.md": "# Rules\n- Never skip lint\n- Skip the tests\n"}
+    [finding] = run_config_guard(base, head).findings
+    assert finding.line == 3 and "Skip the tests" in finding.allows[0]
+    base = {"AGENTS.md": "# Rules\n- Avoid large PRs\n"}
+    head = {"AGENTS.md": "# Rules\n- Avoid large PRs\n- Run the tests before pushing\n"}
+    assert run_config_guard(base, head).findings == []
+
+
+@pytest.mark.parametrize(
+    "line", ["Ignore failures in package.json checks.", "Skip the e.g. integration tests."]
+)
+def test_a_period_inside_a_sentence_does_not_end_it(line: str) -> None:
+    [finding] = run_config_guard({"AGENTS.md": "# R\n"}, {"AGENTS.md": f"# R\n{line}\n"}).findings
+    assert finding.rule_id == "CG006"
+
+
+def test_an_agent_file_with_invalid_yaml_still_grants_nothing() -> None:
+    text = "---\ndescription: Use when: reviewing\ntools: Bash\n---\nReview.\n"
+    assert run_config_guard({}, {".claude/agents/reviewer.md": text}).findings == []
+
+
+def test_a_command_inside_a_directory_named_agents_still_grants_tools() -> None:
+    text = "---\nallowed-tools: Bash\n---\nDeploy.\n"
+    found = run_config_guard({}, {".claude/commands/agents/deploy.md": text}).findings
+    assert any(f.title.startswith("New allow rule `Bash`") for f in found)
+
+
+def test_a_wrapped_blockquote_weakening_is_found() -> None:
+    head = {"AGENTS.md": "# Rules\n> Skip the\n> unit tests before pushing.\n"}
+    [finding] = run_config_guard({"AGENTS.md": "# Rules\n"}, head).findings
+    assert finding.rule_id == "CG006" and "Skip the unit tests" in finding.allows[0]
+
+
+def test_quoted_bullets_stay_apart() -> None:
+    base = {"AGENTS.md": "# Rules\n> - Never skip lint\n"}
+    head = {"AGENTS.md": "# Rules\n> - Never skip lint\n> - Run the tests first\n"}
+    assert run_config_guard(base, head).findings == []
+
+
 @pytest.mark.parametrize("head_text", [None, "", "\n"])
 def test_deleting_rules_from_a_file_the_parser_refuses_fails_closed(head_text: str | None) -> None:
     path = ".codex/rules/default.rules"
@@ -428,3 +517,73 @@ def test_deleting_rules_from_a_file_the_parser_refuses_fails_closed(head_text: s
     head = {} if head_text is None else {path: head_text}
     found = run_config_guard(base, head).findings
     assert any(f.rule_id == "CG007" and "previous" in f.title for f in found)
+
+
+def test_an_unchanged_negated_clause_does_not_hide_an_edited_one_after_a_comma() -> None:
+    base = {"AGENTS.md": "# Rules\nNever skip lint when you push,\nand always run the tests.\n"}
+    head = {"AGENTS.md": "# Rules\nNever skip lint when you push,\nand skip the tests.\n"}
+    [finding] = run_config_guard(base, head).findings
+    assert finding.rule_id == "CG006" and finding.line == 3
+
+
+def test_a_negated_match_is_searched_again_from_inside() -> None:
+    head = {"AGENTS.md": "# Rules\nNever skip anything, skip the tests.\n"}
+    [finding] = run_config_guard({"AGENTS.md": "# Rules\n"}, head).findings
+    assert finding.rule_id == "CG006"
+
+
+def test_a_heading_does_not_absorb_the_line_below_it() -> None:
+    base = {"AGENTS.md": "## Never skip lint\n"}
+    head = {"AGENTS.md": "## Never skip lint\nSkip the tests for docs.\n"}
+    [finding] = run_config_guard(base, head).findings
+    assert finding.line == 2 and "“Skip the tests for docs.”" in finding.allows[0]
+    base = {"AGENTS.md": "## Skip lint\n"}
+    head = {"AGENTS.md": "## Skip lint\nRun the tests.\n"}
+    assert run_config_guard(base, head).findings == []
+
+
+def test_etc_at_the_end_of_a_sentence_ends_it() -> None:
+    head = {"AGENTS.md": "# R\nAvoid big PRs, renames etc. Run the tests.\n"}
+    assert run_config_guard({"AGENTS.md": "# R\n"}, head).findings == []
+    head = {"AGENTS.md": "# R\nNever ignore warnings etc. Skip the tests.\n"}
+    assert len(run_config_guard({"AGENTS.md": "# R\n"}, head).findings) == 1
+
+
+def test_removing_a_negator_on_the_line_above_is_found() -> None:
+    base = {"AGENTS.md": "# Rules\nAgents must never\nskip the tests before pushing.\n"}
+    head = {"AGENTS.md": "# Rules\nAgents may\nskip the tests before pushing.\n"}
+    [finding] = run_config_guard(base, head).findings
+    assert finding.rule_id == "CG006" and finding.line == 2
+
+
+@pytest.mark.parametrize(
+    ("line", "found"),
+    [
+        ("Never use --dangerously-skip-permissions.", 0),
+        ("Don't use `--dangerously-skip-permissions`, ever.", 0),
+        ("Use --dangerously-skip-permissions in the sandbox.", 1),
+        ("Never skip lint, use --dangerously-skip-permissions instead.", 1),
+    ],
+)
+def test_a_skip_flag_is_read_as_one_token(line: str, found: int) -> None:
+    head = {"AGENTS.md": f"# R\n{line}\n"}
+    assert len(run_config_guard({"AGENTS.md": "# R\n"}, head).findings) == found
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "Never skip or disable the tests.",
+        "Do not bypass or weaken hooks.",
+        "Never skip, bypass, or disable hooks.",
+        "Never ignore or suppress lint errors.",
+    ],
+)
+def test_a_negator_covers_a_list_of_skip_verbs(line: str) -> None:
+    head = {"AGENTS.md": f"# R\n{line}\n"}
+    assert run_config_guard({"AGENTS.md": "# R\n"}, head).findings == []
+
+
+def test_a_negated_verb_list_does_not_cover_a_later_clause() -> None:
+    head = {"AGENTS.md": "# R\nNever skip or disable lint, but skip the tests.\n"}
+    assert len(run_config_guard({"AGENTS.md": "# R\n"}, head).findings) == 1

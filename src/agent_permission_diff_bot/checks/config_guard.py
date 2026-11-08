@@ -79,12 +79,13 @@ _MODE_TEXT = {
 _SKIP_CHECK_RE = re.compile(
     r"(\b(skip|bypass|ignore|disable|avoid|suppress|silence)\b|\bdo(n'?t| not)\s+run\b|"
     r"\bnever\s+run\b|\bno need to (run|wait for)\b|\bwithout (running|waiting for)\b)"
-    r".{0,60}\b(tests?|reviews?|approvals?|secrets?|permissions?|polic(y|ies)|"
+    r"(?:[^.!?;\n]|\.(?=\S)){0,60}?\b(tests?|reviews?|approvals?|secrets?|permissions?|polic(y|ies)|"
     r"guard(rail)?s?|hooks?|checks?|lint\w*|ci|type.?check\w*|verification|pre-commit)\b"
     r"|--no-verify\b|--dangerously-skip-permissions\b",
     re.IGNORECASE,
 )
 _ABSORBED_BY_HOOK = {"APD011", "APD012", "APD015", "APD105"}
+_AGENT_RE = re.compile(r"(^|/)\.claude/agents/[^/]+\.md$", re.IGNORECASE)
 _SKILL_RE = re.compile(r"(^|/)\.claude/(commands|skills|agents)/.+\.md$", re.IGNORECASE)
 _CODEX_RULES_RE = re.compile(r"(^|/)\.codex/rules/[^/]+\.rules$", re.IGNORECASE)
 _MATCHER_RE = re.compile(r'"matcher":\s*"([^"]*)"')
@@ -436,6 +437,9 @@ def _mode_removed(atom: PermissionAtom, changes: Iterable[PermissionChange]) -> 
         for other in changes
     )
     ranks = MODE_RANKS.get(atom.resource, {})
+    # Without the explicit value the mode comes from another settings layer (user or local)
+    # or the built-in default, and either may ask less often; only removing the most
+    # permissive value is certainly not a widening.
     if replaced or not ranks or ranks.get(atom.value, 0) >= max(ranks.values()):
         return None
     return CheckFinding(
@@ -444,7 +448,12 @@ def _mode_removed(atom: PermissionAtom, changes: Iterable[PermissionChange]) -> 
         severity=Severity.MEDIUM,
         title=f"{md_code(atom.resource)} {md_code(atom.value)} removed",
         path=atom.path,
-        allows=("The agent falls back to its default mode, which may ask less often.",),
+        allows=(
+            (
+                "Without this explicit value the mode comes from another settings layer (user or "
+                "local) or the built-in default, which may ask less often."
+            ),
+        ),
         fix=f"Keep {md_code(atom.resource + ' = ' + atom.value)} unless the default is intended.",
     )
 
@@ -588,13 +597,12 @@ def _instruction_findings(
             continue
         before = base.get(path, "").splitlines()
         after = text.splitlines()
-        added: dict[int, str] = {}
+        added: set[int] = set()
         matcher = difflib.SequenceMatcher(a=before, b=after, autojunk=False)
         for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
             if tag in {"insert", "replace"}:
-                for index in range(j1, j2):
-                    added[index + 1] = after[index]
-        for line_no, sentence in _added_passages(added):
+                added.update(range(j1 + 1, j2 + 1))
+        for line_no, sentence in _added_passages(after, added):
             yield CheckFinding(
                 check="config-guard",
                 rule_id="CG006",
@@ -614,7 +622,7 @@ def _instruction_findings(
 # (`never ever skip`, `don't use --no-verify`), never a clause boundary.
 _NEGATOR_RE = re.compile(
     r"\b(never|not|don'?t|doesn'?t|mustn'?t|shouldn'?t|cannot|can'?t|no)"
-    r"(\s+(ever|use|run|pass|add|call|try|to))?\s*$",
+    r"(\s+(ever|use|run|pass|add|call|try|to))?[\s`*_\"']*$",  # opening code/quote marks
     re.IGNORECASE,
 )
 _SKIP_VERBS = re.compile(
@@ -631,36 +639,97 @@ def _negated(text: str, match: re.Match[str]) -> bool:
     """
     if not _SKIP_VERBS.match(match.group(0)):
         return False
-    sentence_start = max(text.rfind(mark, 0, match.start()) for mark in ".!?;,:")
-    before = text[sentence_start + 1 : match.start()]
+    before = text[_clause_start(text, match.start()) : match.start()]
     return bool(_NEGATOR_RE.search(before))
 
 
-def _added_passages(added: Mapping[int, str]) -> Iterable[tuple[int, str]]:
-    """Skip-check matches in runs of added lines, so hard-wrapped sentences still match."""
-    numbers = sorted(added)
-    runs: list[list[int]] = []
-    for number in numbers:
-        if runs and number == runs[-1][-1] + 1 and added[number].strip():
-            runs[-1].append(number)
+def _clause_start(text: str, position: int) -> int:
+    """Where the clause holding ``position`` starts: after the last `.!?;,:` before it."""
+    return max(text.rfind(mark, 0, position) for mark in ".!?;,:") + 1
+
+
+# A skip verb inside a flag (`skip` in `--dangerously-skip-permissions`) is part of that
+# flag, which is matched (and negated) as a whole.
+_INSIDE_FLAG_RE = re.compile(r"--[\w-]*$")
+# A negator covers a list of skip verbs: `Never skip, bypass, or disable hooks`.
+_VERB = r"(?:skip|bypass|ignore|disable|avoid|suppress|silence)\b"
+_VERB_LIST_RE = re.compile(rf"{_VERB}(?:\s*,?\s*(?:(?:or|and|nor)\s+)?{_VERB})*", re.IGNORECASE)
+
+
+# `etc.` often ends a sentence, so it is read through only when a lowercase word follows.
+_ABBREVIATIONS = re.compile(r"\b((?i:e\.g\.|i\.e\.|vs\.)|etc\.(?=\s+[a-z]))")
+_HEADING_RE = re.compile(r"^\s*#{1,6}\s")
+_QUOTE_RE = re.compile(r"^\s*(>\s?)+")
+_BLOCK_START_RE = re.compile(r"^\s*([-*+]\s|\d+[.)]\s|#{1,6}\s|>|\|)")
+
+
+def _added_passages(lines: list[str], added: set[int]) -> Iterable[tuple[int, str]]:
+    """Skip-check matches that touch an added line, read across its whole paragraph.
+
+    Instructions are often hard-wrapped, so a sentence edited on one line (`Always run the`
+    becoming `Always skip the`) only reads as a skip instruction with its unchanged
+    continuation lines. Each unit (a bullet, a heading or a wrapped paragraph) holding an added
+    line is matched as one text; a match is reported when it covers an added line, so
+    untouched instructions stay quiet and neighbouring bullets never merge.
+    """
+    paragraphs: list[list[int]] = []
+    for number, line in enumerate(lines, start=1):
+        if not line.strip():
+            continue
+        # A bullet, heading, quote or table row starts its own unit; only wrapped
+        # continuation lines join the unit above them. Inside a blockquote the `>` marker
+        # is read past, so a wrapped quoted sentence is one unit too.
+        # A heading is a whole unit: the line after it starts a new one.
+        continues = (
+            paragraphs
+            and paragraphs[-1][-1] == number - 1
+            and not _HEADING_RE.match(lines[number - 2])
+        )
+        quoted = continues and _QUOTE_RE.match(line) and _QUOTE_RE.match(lines[number - 2])
+        if quoted:
+            continues = not _BLOCK_START_RE.match(_QUOTE_RE.sub("", line, count=1))
+        elif continues:
+            continues = not _BLOCK_START_RE.match(line)
+        if continues:
+            paragraphs[-1].append(number)
         else:
-            runs.append([number])
-    for run in runs:
-        text, starts = "", []
-        for number in run:
-            starts.append((len(text), number))
-            text += added[number].strip() + " "
+            paragraphs.append([number])
+    for paragraph in paragraphs:
+        if not added.intersection(paragraph):
+            continue
+        text, spans = "", []
+        for number in paragraph:
+            start = len(text)
+            text += _QUOTE_RE.sub("", lines[number - 1], count=1).strip() + " "
+            spans.append((start, len(text), number))
         reported: set[int] = set()
-        for match in _SKIP_CHECK_RE.finditer(text):
-            if _negated(text, match):
+        # "e.g." and "i.e." do not end a sentence; same-length stand-ins keep offsets exact.
+        searchable = _ABBREVIATIONS.sub(lambda m: m.group(0).replace(".", "_"), text)
+        # The gap to the target word is lazy, and the next search starts one character in,
+        # so a negated or unchanged match never hides a skip clause that follows it.
+        position, negated_until = 0, -1
+        while match := _SKIP_CHECK_RE.search(searchable, position):
+            position = match.start() + 1
+            if _INSIDE_FLAG_RE.search(searchable, max(0, match.start() - 80), match.start()):
                 continue
-            line_no = max(n for offset, n in starts if offset <= match.start())
-            if line_no in reported:
+            if match.start() < negated_until:
+                continue  # a later verb in a negated list
+            if _negated(searchable, match):
+                verbs = _VERB_LIST_RE.match(searchable, match.start())
+                negated_until = verbs.end() if verbs else match.start()
                 continue
-            reported.add(line_no)
-            first = next(i for i, (_, n) in enumerate(starts) if n == line_no)
-            end = next((o for o, _ in starts if o > match.end()), len(text))
-            yield line_no, text[starts[first][0] : end].strip()
+            # A match touches an edit when its clause does, so removing a negator on the line
+            # above (`must never` becoming `may`) is found as well.
+            clause = _clause_start(searchable, match.start())
+            covered = [n for s, e, n in spans if s < match.end() and e > clause]
+            touched = [n for n in covered if n in added]
+            if not touched or touched[0] in reported:
+                continue
+            reported.add(touched[0])
+            first, last = covered[0], covered[-1]
+            begin = next(s for s, _, n in spans if n == first)
+            finish = next(e for _, e, n in spans if n == last)
+            yield touched[0], text[begin:finish].strip()
 
 
 # --- skill frontmatter and Codex rule files -------------------------------------------------
@@ -690,7 +759,8 @@ def _rule_file_findings(
         else:
             continue
         if after is None:
-            yield ("unreadable", path), _unreadable_rules(path)
+            if base.get(path) != text:  # an unreadable file the PR did not touch is not its change
+                yield ("unreadable", path), _unreadable_rules(path)
             continue
         known = {rule.raw for rule in before if rule.decision == "allow"}
         for rule in after:
@@ -795,6 +865,10 @@ class _NoAliasLoader(yaml.SafeLoader):
 
 def _frontmatter_rules(text: str, path: str) -> list[Rule] | None:
     """Allow rules from skill frontmatter; None when the frontmatter cannot be read."""
+    # In a subagent (`.claude/agents/*.md`), `tools:` restricts which tools it may use; it
+    # pre-approves nothing, so a subagent file grants no allow rules at all.
+    if _AGENT_RE.search(path):
+        return []
     frontmatter = _FRONTMATTER_RE.match(text)
     if frontmatter is None:
         return []  # no closing `---` line: Claude Code reads no frontmatter either
@@ -831,7 +905,9 @@ def _tools_from_invalid_yaml(body: str, source: Source) -> list[Rule] | None:
     """`allowed-tools` from frontmatter YAML rejects: an inline value or a block list."""
     match = _TOOLS_LINE_RE.search(body)
     if match is None:
-        return None
+        # Invalid YAML that never mentions tools grants nothing (a colon in a description is
+        # enough to break YAML); one that mentions them somewhere we cannot read is refused.
+        return None if re.search(r"\b(allowed-)?tools\b", body) else []
     if match.group("value").strip():
         return parse_allowed_tools(match.group("value"), source)
     items: list[str] = []

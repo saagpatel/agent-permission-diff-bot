@@ -279,3 +279,57 @@ def test_trailing_comment_on_a_promise_catch_still_marks_it() -> None:
     result = scan_swallowed([new_file("web/x.ts", source)])
     assert result.findings == []
     assert result.deliberate[0].reason == "prefetch is optional"
+
+
+def test_promise_catch_that_only_sets_a_flag_swallows() -> None:
+    assert [r[0] for r in scan("web/x.ts", "fetch(url).catch(() => { ok = false; });\n")] == [
+        "SW-network"
+    ]
+
+
+def test_promise_catch_that_stores_the_error_keeps_it() -> None:
+    assert scan("web/x.ts", "fetch(url).catch((e) => { lastError = e; });\n") == []
+
+
+@pytest.mark.parametrize(
+    "handler", ["(e) => { recordError(e).acknowledged = true; }", "(e) => { e.seen = true; }"]
+)
+def test_promise_catch_whose_target_uses_the_error_keeps_it(handler: str) -> None:
+    assert scan("web/x.ts", f"fetch(url).catch({handler});\n") == []
+
+
+def test_promise_catch_that_sets_a_member_flag_swallows() -> None:
+    found = scan("web/x.ts", "fetch(url).catch(() => { this.state.failed = true; });\n")
+    assert [r[0] for r in found] == ["SW-network"]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "try { f(); } catch (e) { failed[key] = true; }\n",
+        "fetch(url).catch(() => { failed[key] = true; });\n",
+    ],
+)
+def test_a_subscript_flag_assignment_swallows_in_both_catch_forms(source: str) -> None:
+    assert len(scan("web/x.ts", source)) == 1
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "try { f(); } catch (e) { failed[e.code] = true; }\n",
+        "fetch(url).catch((e) => { failed[e] = true; });\n",
+    ],
+)
+def test_a_subscript_keyed_by_the_error_keeps_it(source: str) -> None:
+    assert scan("web/x.ts", source) == []
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["this.#failed", "state!.failed", "(this as any).failed", "(state satisfies S).failed"],
+)
+def test_wrapped_and_private_flag_targets_still_swallow(target: str) -> None:
+    handler = f"try {{ f(); }} catch (e) {{ {target} = true; }}"
+    source = f"class A {{ #failed = false; m() {{ {handler} }} }}\n"
+    assert len(scan("web/x.ts", source)) == 1

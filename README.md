@@ -319,22 +319,16 @@ skill frontmatter is reported as unreadable.
 
 The pull request checks in `agent_permission_diff_bot.checks` (part of the unreleased GitHub
 App) are **experimental**. Known gaps, tracked in
-[#60](https://github.com/saagpatel/agent-permission-diff-bot/issues/60):
+[#69](https://github.com/saagpatel/agent-permission-diff-bot/issues/69) and
+[#68](https://github.com/saagpatel/agent-permission-diff-bot/issues/68):
 
-- Skill frontmatter is loaded with YAML merge-key aliases resolved, so a small hostile file
-  can expand before the size checks run. Until analysis runs inside `run_limited`, treat a
-  check that does not finish as a failure (Config Guard already concludes `failure`).
-- Skip-check instructions are found in added lines; a weakening edited into one line of a
-  hard-wrapped sentence, or two instructions in one line where the first is negated, can
-  be missed.
-- Swallowed does not yet report flag assignments inside promise `.catch()` handlers.
+- Skip-check instructions are matched with a pattern per paragraph, bullet or heading, not
+  parsed, so unusual phrasings can be missed or misread. A match counts as new when any line
+  of its clause was edited.
 - The Swallowed probe (`probe-swallowed`, and the probe line in a finding) reads the flagged
   Python handler rather than running anything. It skips handlers whose `try` has a `finally`
   or `else`, or that assign anything but plain names, and it never runs the protected code;
   TypeScript handlers are not probed.
-- Known false positives: invalid-YAML skill frontmatter with no tools line, unreadable
-  rule files the PR did not touch, and a subagent's `tools:` restriction read as an allow
-  rule. `@mentions` in quoted PR text are not escaped.
 
 ## Analysis containment (experimental)
 

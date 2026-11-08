@@ -613,8 +613,50 @@ def _ts_plain_assignment(statement: Any, *forbidden: str) -> bool:
     expressions = [c for c in statement.named_children if c.type != "comment"]
     if len(expressions) != 1 or expressions[0].type != "assignment_expression":
         return False
+    left = expressions[0].child_by_field_name("left")
     right = expressions[0].child_by_field_name("right")
-    return right is not None and _ts_plain(right, *forbidden)
+    return (
+        left is not None
+        and _ts_plain_target(left, *forbidden)
+        and right is not None
+        and _ts_plain(right, *forbidden)
+    )
+
+
+_TS_WRAPPERS = frozenset(
+    {"non_null_expression", "parenthesized_expression", "as_expression", "satisfies_expression"}
+)
+
+
+def _ts_plain_target(node: Any, *forbidden: str) -> bool:
+    """`ok`, `this.failed`, `state.last.ok` or `failed[key]`: no call, and the caught error
+    is not used."""
+    if node.type == "identifier":
+        return _text(node) not in forbidden
+    if node.type == "this":
+        return True
+    if node.type in _TS_WRAPPERS and node.named_children:
+        # `state!.failed`, `(this as any).failed`, `(x satisfies T).ok`, `(ok)`
+        return _ts_plain_target(node.named_children[0], *forbidden)
+    if node.type == "member_expression":
+        target = node.child_by_field_name("object")
+        prop = node.child_by_field_name("property")
+        return (
+            target is not None
+            and prop is not None
+            and prop.type in {"property_identifier", "private_property_identifier"}
+            and _ts_plain_target(target, *forbidden)
+        )
+    if node.type == "subscript_expression":
+        target = node.child_by_field_name("object")
+        index = node.child_by_field_name("index")
+        return (
+            target is not None
+            and index is not None
+            and _ts_plain_target(target, *forbidden)
+            and _ts_plain(index, *forbidden)
+        )
+    return False
 
 
 def _ts_handler_swallows(handler: Any) -> bool:
@@ -634,6 +676,10 @@ def _ts_handler_swallows(handler: Any) -> bool:
                     values = [c for c in statement.named_children if c.type != "comment"]
                     if not values or _ts_plain(values[0], *names):
                         continue
+                if statement.type == "expression_statement" and _ts_plain_assignment(
+                    statement, *names
+                ):
+                    continue
                 return False
             return True
         return _ts_plain(body, *names)
