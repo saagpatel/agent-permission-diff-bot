@@ -398,3 +398,24 @@ def test_hook_folds_only_findings_about_its_script_and_lists_them_all() -> None:
     [hook] = [f for f in run_config_guard({}, head).findings if f.rule_id == "CG004"]
     also = [line for line in hook.allows if line.startswith("Also flagged")]
     assert also and "APD105" in also[0] and "APD012" in also[0]
+
+
+def test_yaml_merge_key_bomb_is_refused_before_it_expands() -> None:
+    import time
+
+    lines = ["a: &a {k0: v, k1: v, k2: v, k3: v, k4: v, k5: v, k6: v, k7: v, k8: v}"]
+    for level in range(1, 9):
+        refs = ", ".join(f"m{n}: {{<<: *{chr(96 + level)}}}" for n in range(9))
+        lines.append(f"{chr(97 + level)}: &{chr(97 + level)} {{{refs}}}")
+    lines.append("allowed-tools: Bash")
+    head = {".claude/skills/bomb/SKILL.md": "---\n" + "\n".join(lines) + "\n---\nHi.\n"}
+    started = time.monotonic()
+    [finding] = run_config_guard({}, head).findings
+    assert finding.rule_id == "CG007"
+    assert time.monotonic() - started < 2
+
+
+def test_an_anchor_without_an_alias_is_still_read() -> None:
+    text = "---\nname: &n deploy\nallowed-tools: Bash\n---\nBody.\n"
+    titles = [f.title for f in run_config_guard({}, {".claude/commands/x.md": text}).findings]
+    assert any(title.startswith("New allow rule `Bash`") for title in titles)

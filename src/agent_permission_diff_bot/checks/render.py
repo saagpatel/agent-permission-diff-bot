@@ -229,7 +229,10 @@ _PROSE_SPECIALS = re.compile(r"([\\*_\[\]!<>&~|])")
 
 
 def _escape_prose(text: str) -> str:
-    return _PROSE_SPECIALS.sub(r"\\\1", redact_text(text))
+    escaped = _PROSE_SPECIALS.sub(r"\\\1", redact_text(text))
+    # A word joiner after `@` keeps GitHub from turning quoted `@user` or `@org/team` into a
+    # mention that pings someone on every push; the text still reads the same.
+    return escaped.replace("@", "@\u2060")
 
 
 def _closing_run(text: str, start: int, length: int) -> int:
