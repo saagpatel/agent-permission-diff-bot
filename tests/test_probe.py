@@ -70,7 +70,20 @@ def test_exception_names_are_reported_as_written() -> None:
 
 @pytest.mark.parametrize(
     "body",
-    ["log.exception('x')", "raise", "return [i for i in x]", "return (y := 1)", "x.y", "f"],
+    [
+        "log.exception('x')",
+        "raise",
+        "return [i for i in x]",
+        "return (y := 1)",
+        "x.y",
+        "f",
+        "return 1 / 0",
+        "return x.y",
+        "return d[k]",
+        "result = -x",
+        "return {**d}",
+        "return f'{x}'",
+    ],
 )
 def test_handlers_that_could_run_code_are_not_probed(body: str) -> None:
     source = f"try:\n    a()\nexcept Exception:\n    {body}\n"
@@ -99,6 +112,12 @@ def test_assignments_it_cannot_follow_are_not_probed(body: str) -> None:
 def test_a_try_with_finally_or_else_is_not_probed(extra: str) -> None:
     source = f"try:\n    a()\nexcept OSError:\n    pass\n{extra}"
     assert _probe(source, 3)[0] == "not-probed"
+
+
+def test_literal_values_are_described() -> None:
+    source = "try:\n    a()\nexcept Exception:\n    return {'ok': False, 'code': -1}\n"
+    assert _probe(source, 3)[2] == "the caller gets `{'ok': False, 'code': -1}` instead of an error"
+    assert _probe("try:\n    a()\nexcept Exception:\n    return [x, ()]\n", 3)[0] == "vanished"
 
 
 def test_chained_assignments_are_followed() -> None:

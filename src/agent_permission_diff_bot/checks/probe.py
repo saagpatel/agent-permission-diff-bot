@@ -117,6 +117,11 @@ def _straight_line(handler: ast.ExceptHandler) -> bool:
             return False
         if isinstance(statement, ast.AnnAssign) and not isinstance(statement.target, ast.Name):
             return False
+        # Values are constants, names and literal lists, tuples and dicts of those: an
+        # operator, attribute read or subscript can raise or run code.
+        value = getattr(statement, "value", None)
+        if value is not None and not _inert(value):
+            return False
         for node in ast.walk(statement):
             if isinstance(
                 node,
@@ -133,6 +138,21 @@ def _straight_line(handler: ast.ExceptHandler) -> bool:
             ):
                 return False
     return True
+
+
+def _inert(value: ast.expr) -> bool:
+    if isinstance(value, (ast.Constant, ast.Name)):
+        return True
+    if isinstance(value, ast.UnaryOp) and isinstance(value.op, (ast.USub, ast.UAdd)):
+        operand = value.operand
+        return isinstance(operand, ast.Constant) and type(operand.value) in (int, float, complex)
+    if isinstance(value, (ast.Tuple, ast.List)):
+        return all(_inert(element) for element in value.elts)
+    if isinstance(value, ast.Dict):
+        return all(isinstance(key, ast.Constant) for key in value.keys) and all(
+            _inert(element) for element in value.values
+        )
+    return False
 
 
 def _injected_name(node: ast.expr | None) -> str:
