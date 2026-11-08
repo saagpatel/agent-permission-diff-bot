@@ -21,7 +21,9 @@ Local patches:
   unhashable literal, `RecursionError`, `ValueError` for a NUL byte on Python 3.11) is raised
   as `RulesParseError`, so callers refuse the file instead of crashing. `MemoryError` is
   left to propagate: under a memory cap it means the analysis did not finish, which the
-  caller must report as unfinished rather than as one unparseable file.
+  caller must report as unfinished rather than as one unparseable file. The exception is
+  CPython's parser overflow (`MemoryError` saying the source is "too complex to parse"),
+  which refuses the file like a syntax error.
 - `engine.py`: a rule with an option anywhere in its fixed words (`Bash(git -C . *)`,
   `Bash(gh release -R o/r *)`) is rated as the words before that option, since other
   options and any later subcommand can follow it; and a Codex suggestion is rated as the

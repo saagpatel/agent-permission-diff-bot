@@ -25,6 +25,12 @@ def parse_rules_text(text: str, source: Source) -> list[Rule]:
         tree = ast.parse(text, filename=source.label)
     except (SyntaxError, ValueError, RecursionError) as exc:
         raise RulesParseError(f"{source.label}: not parseable as rules: {getattr(exc, 'msg', type(exc).__name__)} (line {getattr(exc, 'lineno', '?')})") from exc
+    except MemoryError as exc:
+        # Local patch: CPython's parser raises MemoryError for over-nested source; that
+        # refuses the file. Any other MemoryError is exhaustion and propagates.
+        if "too complex to parse" not in str(exc):
+            raise
+        raise RulesParseError(f"{source.label}: not parseable as rules: nested too deeply") from exc
     rules: list[Rule] = []
     # Local patch: rules files can come from pull requests, and Codex reads them as
     # Starlark, so any shape this parser skipped could hide an allow rule. Only plain
