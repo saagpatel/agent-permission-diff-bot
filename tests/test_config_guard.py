@@ -419,3 +419,45 @@ def test_an_anchor_without_an_alias_is_still_read() -> None:
     text = "---\nname: &n deploy\nallowed-tools: Bash\n---\nBody.\n"
     titles = [f.title for f in run_config_guard({}, {".claude/commands/x.md": text}).findings]
     assert any(title.startswith("New allow rule `Bash`") for title in titles)
+
+
+def test_a_weakening_edited_into_one_line_of_a_wrapped_sentence_is_found() -> None:
+    base = {"AGENTS.md": "# Rules\nAlways run the\nunit tests before pushing.\n"}
+    head = {"AGENTS.md": "# Rules\nAlways skip the\nunit tests before pushing.\n"}
+    [finding] = run_config_guard(base, head).findings
+    assert finding.rule_id == "CG006" and finding.line == 2
+    assert "skip the unit tests" in finding.allows[0]
+
+
+def test_an_untouched_wrapped_instruction_stays_quiet() -> None:
+    base = {"AGENTS.md": "# Rules\nYou may skip the\nslow tests locally.\n"}
+    head = {"AGENTS.md": "# Rules\nYou may skip the\nslow tests locally.\nKeep commits small.\n"}
+    assert run_config_guard(base, head).findings == []
+
+
+def test_a_negated_sentence_does_not_hide_the_next_one() -> None:
+    head = {"AGENTS.md": "# Rules\nNever skip lint. Skip the tests.\n"}
+    [finding] = run_config_guard({"AGENTS.md": "# Rules\n"}, head).findings
+    assert "Skip the tests" in finding.allows[0]
+
+
+def test_invalid_yaml_skill_without_tools_is_not_unreadable() -> None:
+    text = "---\ndescription: Use when: deploying\n---\nBody.\n"
+    assert run_config_guard({}, {".claude/skills/deploy/SKILL.md": text}).findings == []
+
+
+def test_an_unreadable_rules_file_the_pr_did_not_touch_is_quiet() -> None:
+    path = ".codex/rules/x.rules"
+    broken = "prefix_rule(\n"
+    assert run_config_guard({path: broken}, {path: broken}).findings == []
+
+
+def test_a_subagent_tools_restriction_is_not_an_allow_rule() -> None:
+    text = "---\nname: reviewer\ntools: Bash, Read\n---\nReview code.\n"
+    assert run_config_guard({}, {".claude/agents/reviewer.md": text}).findings == []
+
+
+@pytest.mark.parametrize("value", ["acceptEdits", "default"])
+def test_removing_a_mode_that_asks_as_often_or_less_is_quiet(value: str) -> None:
+    base = {SETTINGS: settings(permissions={"defaultMode": value})}
+    assert run_config_guard(base, {SETTINGS: settings(permissions={})}).findings == []

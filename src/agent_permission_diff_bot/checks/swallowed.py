@@ -629,6 +629,10 @@ def _ts_handler_swallows(handler: Any) -> bool:
                     values = [c for c in statement.named_children if c.type != "comment"]
                     if not values or _ts_plain(values[0], *names):
                         continue
+                if statement.type == "expression_statement" and _ts_plain_assignment(
+                    statement, *names
+                ):
+                    continue
                 return False
             return True
         return _ts_plain(body, *names)

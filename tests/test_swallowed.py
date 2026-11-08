@@ -279,3 +279,13 @@ def test_trailing_comment_on_a_promise_catch_still_marks_it() -> None:
     result = scan_swallowed([new_file("web/x.ts", source)])
     assert result.findings == []
     assert result.deliberate[0].reason == "prefetch is optional"
+
+
+def test_promise_catch_that_only_sets_a_flag_swallows() -> None:
+    assert [r[0] for r in scan("web/x.ts", "fetch(url).catch(() => { ok = false; });\n")] == [
+        "SW-network"
+    ]
+
+
+def test_promise_catch_that_stores_the_error_keeps_it() -> None:
+    assert scan("web/x.ts", "fetch(url).catch((e) => { lastError = e; });\n") == []
