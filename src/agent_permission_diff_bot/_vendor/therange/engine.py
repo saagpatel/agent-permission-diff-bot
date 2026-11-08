@@ -163,6 +163,14 @@ def analyze_command(cmd: CommandRule, agent: str, kb: KnowledgeBase) -> list[Fin
                 effect="exec",
             )
         ]
+    # Local patch: an option right after the program (`git -C . *`, `git -c*`) can be
+    # followed by any other global option and any subcommand, so the rule reaches what
+    # the bare program reaches. Option arity is unknown, so stay conservative.
+    if cmd.shape != "exact" and cmd.fixed and (
+        (len(cmd.fixed) >= 2 and cmd.fixed[1].startswith("-"))
+        or (len(cmd.fixed) == 1 and cmd.partial.startswith("-"))
+    ):
+        cmd = CommandRule(shape="prefix", fixed=cmd.fixed[:1])
     findings: list[Finding] = []
     seen: set[str] = set()
     for cap in kb.capabilities:
@@ -288,7 +296,14 @@ def suggest(rule: Rule, findings: list[Finding], kb: KnowledgeBase) -> Suggestio
         if pins:
             residual: list[tuple[str, Finding]] = []
             for pin in pins:
-                for f in analyze_command(parse_command_pattern(pin), rule.agent, kb):
+                # Local patch: a Codex suggestion is emitted as a prefix_rule, which also
+                # matches trailing arguments, so rate it as a prefix, not an exact command.
+                pin_rule = (
+                    parse_command_pattern(pin)
+                    if rule.agent == "claude"
+                    else CommandRule(shape="prefix", fixed=tuple(pin.removesuffix(" *").split()))
+                )
+                for f in analyze_command(pin_rule, rule.agent, kb):
                     if SEVERITY_ORDER[f.effective_severity] <= SEVERITY_ORDER["medium"]:
                         residual.append((pin, f))
             text = "Replace with " + ", ".join(_format_rule(rule.agent, p) for p in pins) + "."
