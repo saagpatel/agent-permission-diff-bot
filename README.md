@@ -292,6 +292,20 @@ Acknowledged findings stay visible in JSON, Markdown, SARIF, and PR comments, bu
 excluded from gate decisions. Each acknowledgement must match the finding rule and all
 finding paths; expired acknowledgements are ignored.
 
+## Analysis containment (experimental)
+
+`agent_permission_diff_bot.limited.run_limited` runs a function in a freshly spawned child
+process under one deadline, a memory cap (`RLIMIT_AS`, enforced on Linux only) and a
+bounded JSON result (8 MiB, 200 levels deep by default), so hostile pull request input can
+exhaust only the child. It is **experimental** and not yet wired into the GitHub App.
+Known limits, tracked in the follow-up issue linked from its pull request:
+
+- The deadline is only as strong as Python threads allow: argument encoding and the
+  child's start-up run in a helper thread, and work that cannot be interrupted there can
+  keep the caller waiting until the shutdown grace period ends.
+- On macOS and Windows there is no enforced memory cap; only the deadline bounds the child.
+- Results come back as plain JSON data; callers convert them to their own types.
+
 ## GitHub Action
 
 The composite action expects the repository to be checked out with enough history to
