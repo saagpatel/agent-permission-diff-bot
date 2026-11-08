@@ -328,6 +328,10 @@ App) are **experimental**. Known gaps, tracked in
   hard-wrapped sentence, or two instructions in one line where the first is negated, can
   be missed.
 - Swallowed does not yet report flag assignments inside promise `.catch()` handlers.
+- The Swallowed probe (`probe-swallowed`, and the probe line in a finding) reads the flagged
+  Python handler rather than running anything. It skips handlers whose `try` has a `finally`
+  or `else`, or that assign anything but plain names, and it never runs the protected code;
+  TypeScript handlers are not probed.
 - Known false positives: invalid-YAML skill frontmatter with no tools line, unreadable
   rule files the PR did not touch, and a subagent's `tools:` restriction read as an allow
   rule. `@mentions` in quoted PR text are not escaped.
