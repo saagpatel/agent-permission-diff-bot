@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- Added a GitHub App (`agent-permission-diff app serve`) with two check runs and one
+  updated PR comment: Agent Config Guard (permission widening explained with the vendored
+  Range allow-rule engine) and Swallowed errors (new caught-and-dropped errors in Python and
+  TypeScript, ranked by what they could hide). `app replay` proves the flow offline.
 - Fixed permission identity, incomplete scan reporting, probe boundary truthfulness, URL and
   argument redaction, CLI validation, atomic report writes, and malformed server-card handling.
 - Pinned the development toolchain and CI actions, added mypy and aggregate `make` checks, and

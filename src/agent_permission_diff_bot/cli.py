@@ -68,6 +68,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_simulate(args)
         if args.command in {"server-card-diff", "mcp-server-card-diff"}:
             return _run_server_card_diff(args)
+        if args.command == "app" and args.app_command:
+            return _run_app(args)
     except (OSError, subprocess.CalledProcessError) as exc:
         detail = exc.strerror or str(exc) if isinstance(exc, OSError) else "Git operation failed"
         print(f"agent-permission-diff: {detail or 'input/output error'}", file=sys.stderr)
@@ -548,7 +550,44 @@ def _build_parser() -> argparse.ArgumentParser:
         default="report",
         help="Schema used with --validate-json. Default: report.",
     )
+    app = subparsers.add_parser(
+        "app", help="run the GitHub App (Config Guard and Swallowed); needs the app extra"
+    )
+    app_commands = app.add_subparsers(dest="app_command")
+    serve = app_commands.add_parser("serve", help="serve the webhook endpoint")
+    serve.add_argument("--host", default="127.0.0.1")
+    serve.add_argument("--port", type=int, default=8787)
+    replay = app_commands.add_parser(
+        "replay",
+        help="replay a recorded webhook against an in-memory GitHub (no network)",
+    )
+    replay.add_argument("recording", nargs="?", help="directory with event.json, base/, head/")
+    replay.add_argument("--git-repo", help="replay two refs of a local Git repo as a PR")
+    replay.add_argument("--base", default="main", help="base ref for --git-repo")
+    replay.add_argument("--head", default="HEAD", help="head ref for --git-repo")
+    replay.add_argument("--comment-out", help="also write the PR comment to this file")
     return parser
+
+
+def _run_app(args: argparse.Namespace) -> int:
+    try:
+        if args.app_command == "serve":
+            from agent_permission_diff_bot.app.server import main_serve
+
+            return main_serve(args.host, args.port)
+        from agent_permission_diff_bot.app.replay import main_replay
+    except ImportError as exc:
+        print(
+            f"agent-permission-diff: the app needs the `app` extra ({exc.name} is missing): "
+            'pip install "agent-permission-diff-bot[app]"',
+            file=sys.stderr,
+        )
+        return 2
+    try:
+        return main_replay(args.recording, args.git_repo, args.base, args.head, args.comment_out)
+    except ValueError as exc:
+        print(f"agent-permission-diff: {exc}", file=sys.stderr)
+        return 2
 
 
 if __name__ == "__main__":
