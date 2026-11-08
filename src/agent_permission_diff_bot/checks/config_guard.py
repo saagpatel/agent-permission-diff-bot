@@ -678,6 +678,10 @@ def _rule_file_findings(
             try:
                 before = _codex_rules(base.get(path, ""), path)
             except RulesParseError:
+                if base.get(path) != head.get(path):
+                    # The old rules cannot be read, so whatever this change removes from them
+                    # (a forbidden or prompt rule) cannot be seen: fail closed.
+                    yield ("unreadable-base", path), _unreadable_rules(path, previous=True)
                 before = []
             try:
                 after = _codex_rules(text, path)
@@ -732,7 +736,20 @@ def _removed_codex_gates(
         )
 
 
-def _unreadable_rules(path: str) -> CheckFinding:
+def _unreadable_rules(path: str, *, previous: bool = False) -> CheckFinding:
+    if previous:
+        return CheckFinding(
+            check="config-guard",
+            rule_id="CG007",
+            severity=Severity.HIGH,
+            title=f"The previous {md_code(path)} could not be parsed",
+            path=path,
+            allows=(
+                "Config Guard could not read the rules this change edits or deletes, so a "
+                "removed forbidden or prompt rule would go unseen.",
+            ),
+            fix="Review the rules removed from this file by hand, or simplify the old file first.",
+        )
     return CheckFinding(
         check="config-guard",
         rule_id="CG007",

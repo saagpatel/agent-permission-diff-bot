@@ -105,7 +105,11 @@ def test_rule_count_limit_per_file() -> None:
 
 @pytest.mark.parametrize(
     ("raw", "worst"),
-    [("Bash(gh release -R owner/repo *)", "high"), ("Bash(git submodule --quiet *)", "critical")],
+    [
+        ("Bash(gh release -R owner/repo *)", "high"),
+        ("Bash(git submodule --quiet *)", "critical"),
+        ("Bash(gh release -R*)", "high"),
+    ],
 )
 def test_options_between_subcommand_words_do_not_hide_reach(raw: str, worst: str) -> None:
     assert _worst(raw) == worst
