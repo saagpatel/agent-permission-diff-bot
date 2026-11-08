@@ -1,0 +1,47 @@
+{
+  "event": "pull_request",
+  "payload": {
+    "action": "opened",
+    "number": 7,
+    "pull_request": {
+      "number": 7,
+      "state": "open",
+      "title": "Keep the shop up when storage or the network fails",
+      "draft": false,
+      "base": {
+        "ref": "main",
+        "sha": "8aa235a0ab18dcc4f89ef59470fb5950431e5dac",
+        "repo": {
+          "full_name": "octo-demo/guard-demo",
+          "id": 9001
+        }
+      },
+      "head": {
+        "ref": "quiet-failures",
+        "sha": "7c9018d409529379cdbb8926c1a18be7dcea1821",
+        "repo": {
+          "full_name": "octo-demo/guard-demo",
+          "id": 9001
+        }
+      }
+    },
+    "repository": {
+      "id": 9001,
+      "name": "guard-demo",
+      "full_name": "octo-demo/guard-demo",
+      "private": true,
+      "owner": {
+        "login": "octo-demo",
+        "type": "Organization"
+      }
+    },
+    "installation": {
+      "id": 4242,
+      "node_id": "MDIzOkludGVncmF0aW9uSW5zdGFsbGF0aW9uNDI0Mg=="
+    },
+    "sender": {
+      "login": "demo-author",
+      "type": "User"
+    }
+  }
+}

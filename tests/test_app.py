@@ -995,3 +995,33 @@ def test_a_child_that_fails_or_answers_out_of_shape_leaves_both_checks_unfinishe
     guard, swallowed = analysis.run_analysis(inputs, analysis.AnalysisLimits())
     assert guard.crashed and swallowed.crashed
     assert conclusion(guard, None) == "failure"
+
+
+def test_fewer_prompts_reports_the_removed_deny_rule_and_the_wider_mode() -> None:
+    replayer = run("fewer-prompts")
+    assert conclusions(replayer) == {
+        "Agent Config Guard": "failure",
+        "Swallowed errors": "success",
+    }
+    [body] = bot_comments(replayer)
+    assert "Deny rule `Bash(git push *)` removed" in body
+    assert "`defaultMode` is now `acceptEdits`" in body
+
+
+def test_release_helpers_reports_the_skill_and_the_codex_rule() -> None:
+    replayer = run("release-helpers")
+    assert conclusions(replayer)["Agent Config Guard"] == "failure"
+    [body] = bot_comments(replayer)
+    assert "New allow rule `Bash(git push *)` while `release` runs" in body
+    assert "New Codex allow rule `prefix_rule(pattern=" in body
+
+
+def test_quiet_failures_carries_the_probe_and_the_promise_flag() -> None:
+    replayer = run("quiet-failures")
+    assert conclusions(replayer) == {
+        "Agent Config Guard": "success",
+        "Swallowed errors": "neutral",
+    }
+    [body] = bot_comments(replayer)
+    assert "Probe: injecting `OSError` into the `try` leaves no trace" in body
+    assert "web/api.ts" in body

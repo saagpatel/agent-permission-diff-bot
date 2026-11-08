@@ -362,9 +362,25 @@ comment, updated in place on every push:
   Python and TypeScript/JavaScript, ranked by what they could hide: auth, data loss, network.
 
 The App reads files through the API and never runs pull request code. It needs the `app`
-extra (`pip install "agent-permission-diff-bot[app]"`). Registration steps, settings, and a
-local replay that proves the whole flow without network access are in
-[docs/github-app.md](docs/github-app.md).
+extra (`pip install "agent-permission-diff-bot[app]"`). Settings, and a local replay that
+proves the whole flow without network access, are in [docs/github-app.md](docs/github-app.md).
+
+**Owner steps** (they touch your GitHub account and create a private key, so they are yours;
+the full walk-through is in [docs/github-app.md](docs/github-app.md#register-and-install-the-app-repository-owner)):
+
+1. Make a webhook secret in `~/.config/agent-config-guard/` and get a webhook URL (a
+   smee.io channel for a local run).
+2. Create a private GitHub App: Checks read and write, Contents read, Pull requests read and
+   write, Metadata read; events Pull request, Check run and Check suite.
+3. Generate its private key into `~/.config/agent-config-guard/app.pem` (mode 600) and
+   install the App on the repositories to check (for the demo, `agent-config-guard-demo`).
+4. Run `agent-permission-diff app serve` with `APDB_APP_ID`, `APDB_PRIVATE_KEY_PATH` and
+   `APDB_WEBHOOK_SECRET`, plus a smee forwarder to `http://127.0.0.1:8787/webhook`.
+5. Close and reopen a pull request (or push) to see the two check runs and the comment.
+
+An App that is already registered and installed needs only steps 4 and 5. No new
+permissions or events are needed for the current checks. The demo repository's seven pull
+requests cover every check; the table in the docs says which shows what.
 
 The App is **experimental**. Known limits, tracked in
 [#70](https://github.com/saagpatel/agent-permission-diff-bot/issues/70): pull requests with

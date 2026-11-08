@@ -15,7 +15,15 @@ import sys
 from pathlib import Path
 
 FIXTURES = Path(__file__).resolve().parent.parent / "tests" / "fixtures" / "app"
-SCENARIOS = ("broad-bash-allow", "silent-except", "ts-swallowed-catch", "hook-mcp-instructions")
+SCENARIOS = (
+    "broad-bash-allow",
+    "silent-except",
+    "ts-swallowed-catch",
+    "hook-mcp-instructions",
+    "fewer-prompts",
+    "release-helpers",
+    "quiet-failures",
+)
 
 
 def git(repo: Path, *args: str) -> None:

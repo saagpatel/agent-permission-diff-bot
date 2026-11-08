@@ -113,6 +113,27 @@ pasted anywhere else.
    runs and a single comment. **Re-run** on a check run, or **Re-run all checks**, also
    works, including for pull requests from forks.
 
+8. **Stop it** when you are done: Ctrl-C in both terminals. Nothing else keeps running.
+
+Once the App exists, steps 1 to 5 are done. To use it again later, only steps 6 and 7 are
+needed. The App needs no new permissions or events for anything in this repository so far:
+re-runs, base-branch changes and pushes all arrive through the events subscribed in step 3.
+
+### The demo pull requests
+
+Each demo pull request is one recorded scenario in `tests/fixtures/app/`, so
+`app replay tests/fixtures/app/<scenario>` shows the same result offline.
+
+| Demo PR | Scenario | What it shows |
+| --- | --- | --- |
+| #1 | `broad-bash-allow` | A new broad allow rule, expanded into what it really reaches (Config Guard fails). |
+| #2 | `silent-except` | A Python `except Exception: pass` around a write (Swallowed, data loss). |
+| #3 | `ts-swallowed-catch` | An empty TypeScript `catch` and an empty promise `.catch` (Swallowed). |
+| #4 | `hook-mcp-instructions` | A new startup hook, an MCP server with a credential, and a "skip the tests" line. |
+| #5 | `fewer-prompts` | A removed deny rule and a wider `defaultMode` (Config Guard fails). |
+| #6 | `release-helpers` | A skill whose `allowed-tools` grant `git push`, and a Codex `.rules` allow rule. |
+| #7 | `quiet-failures` | A Python handler with the probe's "what the caller gets" line, and a promise `.catch` that only sets a flag. |
+
 ### Settings
 
 | Variable | Meaning |
