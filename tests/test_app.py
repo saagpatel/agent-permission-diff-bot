@@ -328,3 +328,62 @@ def test_cli_app_command_runs_as_a_module() -> None:
     )
     assert completed.returncode == 0, completed.stderr
     assert "comment: none" in completed.stdout
+
+
+def test_a_late_webhook_for_an_older_push_cannot_overwrite_the_comment() -> None:
+    first = Recording.load(FIXTURES / "broad-bash-allow")
+    newer_head = dict(first.head)
+    newer_head[".claude/settings.json"] = first.head[".claude/settings.json"].replace(
+        '"Bash(git *)"', '"Bash(git diff *)"'
+    )
+    newer = json.loads(json.dumps(first.payload))
+    newer["action"] = "synchronize"
+    newer["pull_request"]["head"]["sha"] = commit_sha(newer_head)
+    replayer = Replayer(first)
+    assert replayer.send(Recording("pull_request", newer, first.base, newer_head)) == 202
+    assert replayer.send(first, advance_head=False) == 202
+    [body] = bot_comments(replayer)
+    assert "Bash(git diff *)" in body and "Bash(git *)" not in body
+
+
+def test_truncated_tree_fails_config_guard_closed() -> None:
+    from agent_permission_diff_bot.app.snapshot import collect_inputs
+    from agent_permission_diff_bot.checks.config_guard import run_config_guard
+
+    class Truncated:
+        def tree(self, sha: str) -> tuple[dict[str, dict[str, object]], bool]:
+            return {"README.md": {"sha": "1", "mode": "100644", "size": 3}}, True
+
+        def blob_text(self, sha: str) -> str:
+            return "hi\n"
+
+    files = [
+        {"filename": "README.md", "status": "modified", "sha": "1", "patch": "@@ -1 +1 @@\n+hi"}
+    ]
+    inputs = collect_inputs(Truncated(), "b" * 40, "h" * 40, files)
+    found = run_config_guard(inputs.base_files, inputs.head_files).findings
+    assert any(f.rule_id == "APD013" and f.severity >= 3 for f in found)
+
+
+def test_large_source_files_are_skipped_before_download() -> None:
+    from agent_permission_diff_bot.app.snapshot import collect_inputs
+
+    class Big:
+        def __init__(self) -> None:
+            self.downloads: list[str] = []
+
+        def tree(self, sha: str) -> tuple[dict[str, dict[str, object]], bool]:
+            return {"big.py": {"sha": "f" * 40, "mode": "100644", "size": 50 * 1024 * 1024}}, False
+
+        def blob_text(self, sha: str) -> str:
+            self.downloads.append(sha)
+            return ""
+
+    repo = Big()
+    files = [
+        {"filename": "big.py", "status": "modified", "sha": "f" * 40, "patch": "@@ -1 +1 @@\n+x"}
+    ]
+    inputs = collect_inputs(repo, "b" * 40, "h" * 40, files)
+    assert inputs.swallowed_files == []
+    assert repo.downloads == []
+    assert any("over 1 MiB" in note for note in inputs.swallowed_notes)

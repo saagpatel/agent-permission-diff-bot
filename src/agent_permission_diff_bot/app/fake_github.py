@@ -122,6 +122,7 @@ class FakeGitHub:
         body = json.loads(request.content) if request.content else {}
         routes: list[tuple[str, str, Any]] = [
             ("GET", rf"/pulls/{self.number}/files", self._pull_files),
+            ("GET", rf"/pulls/{self.number}", self._pull),
             ("GET", r"/compare/(?P<base>[0-9a-f]+)\.\.\.(?P<head>[0-9a-f]+)", self._compare),
             ("GET", r"/commits/(?P<sha>[0-9a-f]+)/pulls", self._commit_pulls),
             ("GET", r"/git/trees/(?P<sha>[0-9a-f]+)", self._tree),
@@ -166,6 +167,9 @@ class FakeGitHub:
             return httpx.Response(200, json=[])
         pull = self.pull_request_payload()["pull_request"]
         return httpx.Response(200, json=[pull])
+
+    def _pull(self, body: Any) -> httpx.Response:
+        return httpx.Response(200, json=self.pull_request_payload()["pull_request"])
 
     def _pull_files(self, body: Any) -> httpx.Response:
         # Like GitHub, the files list is relative to the merge base, not the base tip.

@@ -115,7 +115,14 @@ class Replayer:
         self.client = TestClient(create_app(settings, transport=self.github.transport()))
         self.recording = recording
 
-    def send(self, recording: Recording | None = None, *, signature: str | None = None) -> int:
+    def send(
+        self,
+        recording: Recording | None = None,
+        *,
+        signature: str | None = None,
+        advance_head: bool = True,
+    ) -> int:
+        """Deliver a webhook. ``advance_head=False`` replays a late delivery for an older push."""
         recording = recording or self.recording
         pulls = recording.payload.get("check_run", {}).get("pull_requests") or [{}]
         pull = recording.payload.get("pull_request") or pulls[0]
@@ -123,7 +130,8 @@ class Replayer:
             self.github.commits[str(pull["base"]["sha"])] = recording.base
             self.github.commits[str(pull["head"]["sha"])] = recording.head
             self.github.base_sha = str(pull["base"]["sha"])
-            self.github.head_sha = str(pull["head"]["sha"])
+            if advance_head or not self.github.head_sha:
+                self.github.head_sha = str(pull["head"]["sha"])
         body = json.dumps(recording.payload).encode()
         digest = hmac.new(self.secret.encode(), body, hashlib.sha256).hexdigest()
         response = self.client.post(

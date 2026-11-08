@@ -17,6 +17,7 @@ from typing import Any, Protocol
 
 from agent_permission_diff_bot.checks.config_guard import is_guard_path
 from agent_permission_diff_bot.checks.swallowed import (
+    MAX_FILE_BYTES,
     PYTHON_SUFFIXES,
     TS_SUFFIXES,
     ChangedFile,
@@ -78,6 +79,10 @@ def collect_inputs(
         notes.append("GitHub truncated a repository tree; unlisted files are marked unread.")
     base_files = _snapshot(repo, base_tree, [*changed, *previous], base_truncated, {})
     head_files = _snapshot(repo, head_tree, changed, head_truncated, head_blobs)
+    # A truncated tree can hide a startup config nobody changed, so it never passes.
+    for files, truncated in ((base_files, base_truncated), (head_files, head_truncated)):
+        if truncated:
+            _mark_incomplete(files, "(git tree)", "GitHub truncated the repository tree")
     if len(pull_files) >= MAX_PULL_FILES:
         limit_note = "GitHub lists at most 3,000 changed files; later files were not read."
         notes.append(limit_note)
@@ -86,7 +91,7 @@ def collect_inputs(
     return PullInputs(
         base_files=base_files,
         head_files=head_files,
-        swallowed_files=_swallowed_files(repo, pull_files, swallowed_notes),
+        swallowed_files=_swallowed_files(repo, pull_files, head_tree, swallowed_notes),
         guard_notes=notes,
         swallowed_notes=swallowed_notes,
     )
@@ -178,7 +183,10 @@ def _source_state(
 
 
 def _swallowed_files(
-    repo: TreeReader, pull_files: list[dict[str, Any]], notes: list[str]
+    repo: TreeReader,
+    pull_files: list[dict[str, Any]],
+    head_tree: Mapping[str, Mapping[str, Any]],
+    notes: list[str],
 ) -> list[ChangedFile]:
     out: list[ChangedFile] = []
     skipped_patch = 0
@@ -198,6 +206,10 @@ def _swallowed_files(
         if len(out) >= MAX_SWALLOWED_FILES:
             notes.append(f"Only the first {MAX_SWALLOWED_FILES} changed source files were scanned.")
             break
+        size = int((head_tree.get(path) or {}).get("size") or 0)
+        if size > MAX_FILE_BYTES:
+            notes.append(f"`{path}` is over 1 MiB and was not scanned.")
+            continue
         out.append(ChangedFile(path=path, text=repo.blob_text(str(item["sha"])), added=added))
     if skipped_patch:
         notes.append(

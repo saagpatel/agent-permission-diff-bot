@@ -12,7 +12,7 @@ import hmac
 import json
 import logging
 import threading
-from collections import defaultdict
+from collections import OrderedDict
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, Request, Response
@@ -30,6 +30,7 @@ from agent_permission_diff_bot.app.settings import AppSettings
 log = logging.getLogger(__name__)
 
 MAX_BODY_BYTES = 25 * 1024 * 1024
+MAX_TRACKED_PULLS = 1024
 
 
 def verify_signature(secret: str, body: bytes, header: str) -> bool:
@@ -42,20 +43,19 @@ def verify_signature(secret: str, body: bytes, header: str) -> bool:
 def create_app(settings: AppSettings, transport: httpx.BaseTransport | None = None) -> FastAPI:
     http = make_http(settings.api_url, transport)
     auth = AppAuth(app_id=settings.app_id, private_key=settings.private_key, http=http)
-    locks: defaultdict[tuple[int, int], threading.Lock] = defaultdict(threading.Lock)
-    latest: dict[tuple[int, int], str] = {}
-    state_guard = threading.Lock()
+    locks: OrderedDict[tuple[int, int], threading.Lock] = OrderedDict()
+    locks_guard = threading.Lock()
     app = FastAPI(title="Agent Permission Diff Bot", docs_url=None, redoc_url=None)
 
-    def remember(target: PullTarget, *, newest: bool) -> None:
-        with state_guard:
-            key = (target.repository_id, target.number)
-            if newest or key not in latest:
-                latest[key] = target.head_sha
-
-    def is_current(target: PullTarget) -> bool:
-        with state_guard:
-            return latest.get((target.repository_id, target.number)) == target.head_sha
+    def lock_for(target: PullTarget) -> threading.Lock:
+        """One lock per pull request, kept for the most recent MAX_TRACKED_PULLS only."""
+        key = (target.repository_id, target.number)
+        with locks_guard:
+            lock = locks.pop(key, None) or threading.Lock()
+            locks[key] = lock
+            while len(locks) > MAX_TRACKED_PULLS:
+                locks.popitem(last=False)
+            return lock
 
     def process(target: PullTarget) -> None:
         try:
@@ -65,18 +65,15 @@ def create_app(settings: AppSettings, transport: httpx.BaseTransport | None = No
             if resolved is None:
                 log.info("No open pull request for %s; nothing to re-run", target.head_sha[:7])
                 return
-            remember(resolved, newest=False)
-            with state_guard:
-                lock = locks[(resolved.repository_id, resolved.number)]
-            # One run per pull request at a time; only the newest push may write the comment.
-            with lock:
+            # One run per pull request at a time; only the PR's live head writes the comment.
+            with lock_for(resolved):
                 outcome = run_checks(
                     repo,
                     resolved,
                     app_id=settings.app_id,
                     guard_fail_on=settings.guard_fail_on,
                     swallowed_fail_on=settings.swallowed_fail_on,
-                    is_current=lambda: is_current(resolved),
+                    is_current=lambda: repo.pull_head(resolved.number) == resolved.head_sha,
                 )
         except Exception:
             log.exception("Checks for %s/%s#%s failed", target.owner, target.name, target.number)
@@ -121,8 +118,6 @@ def create_app(settings: AppSettings, transport: httpx.BaseTransport | None = No
         target = target_from_event(event, payload) if isinstance(payload, dict) else None
         if target is None:
             return JSONResponse({"status": "ignored"}, status_code=202)
-        if target.number and event == "pull_request":
-            remember(target, newest=True)
         background.add_task(process, target)
         return JSONResponse({"status": "queued", "head": target.head_sha[:7]}, status_code=202)
 

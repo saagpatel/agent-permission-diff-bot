@@ -128,6 +128,11 @@ class RepoClient:
         ).json()
         return str(data["merge_base_commit"]["sha"])
 
+    def pull_head(self, number: int) -> str:
+        """The pull request's head commit right now, whatever order webhooks arrived in."""
+        data = self._request("GET", f"/repos/{self.full_name}/pulls/{number}").json()
+        return str(data["head"]["sha"])
+
     def pulls_for_commit(self, sha: str) -> list[dict[str, Any]]:
         return list(self._paginate(f"/repos/{self.full_name}/commits/{sha}/pulls"))
 
