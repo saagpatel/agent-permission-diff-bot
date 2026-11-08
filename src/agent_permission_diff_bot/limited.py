@@ -3,12 +3,15 @@
 The child is spawned fresh, so a hostile input (a YAML alias bomb, an exponential pattern)
 can exhaust only the child:
 
-- One deadline covers everything: starting the child (including importing ``fn``'s module),
-  running ``fn``, and receiving its whole result. Past it, the child is killed.
-- The child encodes its own result and refuses one larger than ``max_result_bytes``; the
-  parent never reads more than that either.
-- The parent decodes the result with an unpickler that only rebuilds plain data and classes
-  from this package, so decoding runs no other code.
+- One deadline covers starting the child, handing it the arguments, running ``fn`` and
+  receiving the whole result. Starting the child sends only a reference to ``fn``; the
+  arguments travel over a separate pipe inside the deadline. Past the deadline the child
+  is killed, and the parent waits for its own I/O thread to finish before closing a pipe.
+- The result crosses as JSON text no larger than ``max_result_bytes``. JSON has no shared
+  references, no classes and no integer keys, so decoding it in the parent is linear in
+  its size and cannot re-expand a structure the child flattened. Callers get plain data:
+  dicts, lists, strings, numbers, booleans and ``None``. Dataclasses become dicts and enums
+  their values.
 - The memory cap uses ``RLIMIT_AS``, which Linux enforces. macOS accepts or refuses it
   without enforcing it, and Windows has no ``resource`` module; there only the deadline
   bounds the child.
@@ -17,11 +20,15 @@ can exhaust only the child:
 from __future__ import annotations
 
 import contextlib
-import io
+import dataclasses
+import enum
+import json
 import multiprocessing as mp
 import pickle
+import re
 import threading
 from collections.abc import Callable
+from itertools import accumulate
 from typing import Any
 
 try:
@@ -32,40 +39,49 @@ except ImportError:  # pragma: no cover - not POSIX
 DEFAULT_TIMEOUT_S = 20.0
 DEFAULT_MEMORY_BYTES = 1024 * 1024 * 1024
 DEFAULT_MAX_RESULT_BYTES = 8 * 1024 * 1024
-
-_ALLOWED_PREFIX = "agent_permission_diff_bot."
-_ALLOWED_BUILTINS = frozenset({"set", "frozenset", "complex", "bytearray", "range", "slice"})
+# Deepest JSON nesting a result may have, so the parent's decoder never recurses far.
+MAX_RESULT_DEPTH = 200
+_JSON_STRING = re.compile(r'"(?:\\.|[^"\\])*"')
+_JSON_BRACKET = re.compile(r"[\[\]{}]")
+# After a kill, how long the parent waits for its I/O thread to see the pipe close.
+_SHUTDOWN_GRACE_S = 5.0
 
 
 class LimitExceededError(RuntimeError):
     """The child timed out, ran out of memory, returned too much, or died."""
 
 
-class _PlainDataUnpickler(pickle.Unpickler):
-    """Rebuild plain data and this package's own classes; refuse every other global.
+class _IOStillRunningError(LimitExceededError):
+    """The deadline passed and the I/O thread did not stop; its pipes must stay open."""
 
-    Why pickle is acceptable here: the bytes come only from the child this module spawned,
-    running this package's code with the same privileges as the parent, so the child is
-    not a trust boundary to defend; the hostile part is the *input* it parsed. Even so, the
-    decoder resolves only top-level classes defined in this package (no dotted names, no
-    functions, nothing re-exported from other modules), so a result cannot name a callable
-    such as ``subprocess.run`` for unpickling to invoke.
-    """
 
-    def find_class(self, module: str, name: str) -> Any:
-        if module == "builtins" and name in _ALLOWED_BUILTINS:
-            return super().find_class(module, name)
-        if module.startswith(_ALLOWED_PREFIX) and "." not in name:
-            found = super().find_class(module, name)
-            if isinstance(found, type) and found.__module__ == module:
-                return found
-        raise pickle.UnpicklingError(f"{module}.{name} is not allowed in a result")
+def _to_json(value: Any) -> Any:
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return dataclasses.asdict(value)
+    if isinstance(value, enum.Enum):
+        return value.value
+    if isinstance(value, (set, frozenset, tuple)):
+        return list(value)
+    raise TypeError(f"{type(value).__name__} is not JSON data")
+
+
+def _encode(kind: str, payload: Any) -> bytes:
+    return json.dumps({"kind": kind, "payload": payload}, default=_to_json, allow_nan=False).encode(
+        "utf-8"
+    )
+
+
+def _json_depth(text: str) -> int:
+    """Deepest bracket nesting in JSON text, ignoring brackets inside strings."""
+    brackets = _JSON_BRACKET.findall(_JSON_STRING.sub("", text))
+    steps = (1 if bracket in "[{" else -1 for bracket in brackets)
+    return max(accumulate(steps), default=0)
 
 
 def _child(
-    conn: Any,
+    args_conn: Any,
+    result_conn: Any,
     fn: Callable[..., Any],
-    args: tuple[Any, ...],
     memory_bytes: int,
     max_result_bytes: int,
 ) -> None:
@@ -73,44 +89,52 @@ def _child(
         with contextlib.suppress(ValueError, OSError):
             resource.setrlimit(resource.RLIMIT_AS, (memory_bytes, memory_bytes))
     try:
+        # The parent's own arguments: pickle is the trusted direction here.
+        args = pickle.loads(args_conn.recv_bytes())
+        args_conn.close()
         try:
-            message: tuple[str, Any] = ("ok", fn(*args))
+            data = _encode("ok", fn(*args))
         except MemoryError:
-            message = ("limit", "memory limit exceeded")
+            data = _encode("limit", "memory limit exceeded")
+        except RecursionError:
+            data = _encode("limit", "result is nested too deeply")
         except Exception as exc:
-            message = ("error", f"{type(exc).__name__}: {exc}")
-        try:
-            data = pickle.dumps(message, protocol=pickle.HIGHEST_PROTOCOL)
-        except MemoryError:
-            data = pickle.dumps(("limit", "memory limit exceeded"))
-        except Exception as exc:
-            data = pickle.dumps(("error", f"result could not be encoded: {type(exc).__name__}"))
+            data = _encode("error", f"{type(exc).__name__}: {exc}")
         if len(data) > max_result_bytes:
-            data = pickle.dumps(("limit", f"result is larger than {max_result_bytes} bytes"))
-        conn.send_bytes(data)
+            data = _encode("limit", f"result is larger than {max_result_bytes} bytes")
+        elif _json_depth(data.decode("utf-8")) > MAX_RESULT_DEPTH + 1:  # +1: the envelope
+            data = _encode("limit", "result is nested too deeply")
+        result_conn.send_bytes(data)
     finally:
-        conn.close()
+        result_conn.close()
 
 
-def receive_within(conn: Any, timeout_s: float, max_bytes: int) -> bytes:
-    """Read one whole message from ``conn`` before ``timeout_s`` passes, or raise.
+def call_within(timeout_s: float, work: Callable[[], bytes], stop: Callable[[], None]) -> bytes:
+    """Run blocking pipe I/O under one deadline, without leaving it running afterwards.
 
-    ``Connection.poll`` only says the first bytes have arrived, so the read runs in a
-    helper thread and the deadline covers the complete transfer. On a timeout the caller
-    must close the sending side (kill the child) so the helper thread can finish.
+    ``work`` runs in a helper thread. If it has not finished by ``timeout_s``, ``stop`` is
+    called (it must make ``work``'s pending read or write fail, for example by killing the
+    child) and the helper thread is joined before this returns, so no read can land on a
+    file descriptor the caller closes and the OS reuses.
     """
     box: dict[str, Any] = {}
 
-    def read() -> None:
+    def run() -> None:
         try:
-            box["data"] = conn.recv_bytes(max_bytes)
-        except BaseException as exc:  # reported to the caller below
+            box["data"] = work()
+        except Exception as exc:  # reported to the caller below
             box["error"] = exc
 
-    reader = threading.Thread(target=read, name="run-limited-receive", daemon=True)
-    reader.start()
-    reader.join(timeout_s)
-    if reader.is_alive():
+    worker = threading.Thread(target=run, name="run-limited-io", daemon=True)
+    worker.start()
+    worker.join(timeout_s)
+    if worker.is_alive():
+        stop()
+        worker.join(_SHUTDOWN_GRACE_S)
+        if worker.is_alive():
+            raise _IOStillRunningError(
+                f"timed out after {timeout_s:g}s and the child could not be stopped"
+            )
         raise LimitExceededError(f"timed out after {timeout_s:g}s")
     if "error" in box:
         error = box["error"]
@@ -128,31 +152,60 @@ def run_limited(
     memory_bytes: int = DEFAULT_MEMORY_BYTES,
     max_result_bytes: int = DEFAULT_MAX_RESULT_BYTES,
 ) -> Any:
-    """Call a picklable top-level ``fn`` in a spawned child; raise on limits.
+    """Call a top-level ``fn`` in a spawned child and return its result as JSON data.
 
-    ``timeout_s`` includes starting the child and importing ``fn``'s module. Raises
+    ``fn`` must be importable by name, and its result JSON-serialisable (dataclasses and
+    enums are converted). ``timeout_s`` includes starting the child. Raises
     ``LimitExceededError`` when the deadline passes, the memory cap is hit, the result is
-    too large or of a type outside this package, or the child dies without a whole result;
-    and ``RuntimeError`` when ``fn`` itself raised.
+    too large or too deeply nested, or the child dies without a whole result; and
+    ``RuntimeError`` when ``fn`` raised or returned something that is not JSON data.
     """
     ctx = mp.get_context("spawn")
-    parent, child_conn = ctx.Pipe(duplex=False)
-    proc = ctx.Process(target=_child, args=(child_conn, fn, args, memory_bytes, max_result_bytes))
-    proc.start()
-    child_conn.close()
-    try:
-        data = receive_within(parent, timeout_s, max_result_bytes)
-    finally:
-        if proc.is_alive():
+    args_reader, args_writer = ctx.Pipe(duplex=False)
+    result_reader, result_writer = ctx.Pipe(duplex=False)
+    proc = ctx.Process(
+        target=_child,
+        args=(args_reader, result_writer, fn, memory_bytes, max_result_bytes),
+    )
+    arg_bytes = pickle.dumps(args, protocol=pickle.HIGHEST_PROTOCOL)
+
+    def work() -> bytes:
+        proc.start()
+        args_reader.close()
+        result_writer.close()
+        args_writer.send_bytes(arg_bytes)
+        args_writer.close()
+        received: bytes = result_reader.recv_bytes(max_result_bytes)
+        return received
+
+    def stop() -> None:
+        if proc.pid is not None:
             proc.kill()
-        proc.join()
-        parent.close()
+
+    io_finished = True
     try:
-        kind, payload = _PlainDataUnpickler(io.BytesIO(data)).load()
-    except (pickle.UnpicklingError, ValueError, TypeError, EOFError) as exc:
-        raise LimitExceededError(f"result could not be decoded safely: {exc}") from exc
+        data = call_within(timeout_s, work, stop)
+    except _IOStillRunningError:
+        # Leak the pipes rather than close a descriptor a live thread may still read.
+        io_finished = False
+        raise
+    finally:
+        if proc.pid is not None:
+            if proc.is_alive():
+                proc.kill()
+            proc.join(_SHUTDOWN_GRACE_S)
+        if io_finished:
+            for conn in (args_reader, args_writer, result_reader, result_writer):
+                conn.close()
+    try:
+        message = json.loads(data)
+        kind, payload = message["kind"], message["payload"]
+    except RecursionError as exc:
+        raise LimitExceededError("result is nested too deeply") from exc
+    except (ValueError, TypeError, KeyError) as exc:
+        raise LimitExceededError("result could not be decoded") from exc
     if kind == "ok":
         return payload
     if kind == "limit":
-        raise LimitExceededError(payload)
-    raise RuntimeError(payload)
+        raise LimitExceededError(str(payload))
+    raise RuntimeError(str(payload))
