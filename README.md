@@ -292,6 +292,46 @@ Acknowledged findings stay visible in JSON, Markdown, SARIF, and PR comments, bu
 excluded from gate decisions. Each acknowledgement must match the finding rule and all
 finding paths; expired acknowledgements are ignored.
 
+## Allow-rule reach explanations (experimental)
+
+Config Guard explains what a new allow rule really reaches (for example, that `Bash(git *)`
+also allows `git -c alias.x='!cmd' x`) with a vendored copy of the Range allow-rule engine and
+its cited knowledge base (`src/agent_permission_diff_bot/_vendor/therange/`). That engine was
+written for a user's own, trusted config; here it reads files from pull requests, so its output
+is **experimental**. Treat "what this now allows" as a lower bound. Known limits, tracked in
+[#56](https://github.com/saagpatel/agent-permission-diff-bot/issues/56):
+
+- An option between subcommand words, such as `Bash(gh release -R owner/repo *)` or
+  `Bash(git submodule --quiet *)`, can hide reach the engine would otherwise report. An
+  option right after the program (`Bash(git -C . *)`) is handled: it is rated as the bare
+  program.
+- Codex `.rules` files are read for plain `prefix_rule(...)` calls only. Aliased calls,
+  `**` keyword unpacking, tuple patterns and unknown decisions are skipped, not refused.
+- A few unusual literals (a very long hex integer) can fail as an error rather than an
+  unreadable-file finding, and an empty union element drops its rule.
+
+What does fail closed: a program the knowledge base does not know is reported as high
+("unknown reach"), never as safe; a rules file whose patterns expand past 256 commands or
+2,000 rules, or that cannot be parsed, is reported as unreadable; and aliased or oversized
+skill frontmatter is reported as unreadable.
+
+## Agent Config Guard and Swallowed checks (experimental)
+
+The pull request checks in `agent_permission_diff_bot.checks` (part of the unreleased GitHub
+App) are **experimental**. Known gaps, tracked in
+[#60](https://github.com/saagpatel/agent-permission-diff-bot/issues/60):
+
+- Skill frontmatter is loaded with YAML merge-key aliases resolved, so a small hostile file
+  can expand before the size checks run. Until analysis runs inside `run_limited`, treat a
+  check that does not finish as a failure (Config Guard already concludes `failure`).
+- Skip-check instructions are found in added lines; a weakening edited into one line of a
+  hard-wrapped sentence, or two instructions in one line where the first is negated, can
+  be missed.
+- Swallowed does not yet report flag assignments inside promise `.catch()` handlers.
+- Known false positives: invalid-YAML skill frontmatter with no tools line, unreadable
+  rule files the PR did not touch, and a subagent's `tools:` restriction read as an allow
+  rule. `@mentions` in quoted PR text are not escaped.
+
 ## Analysis containment (experimental)
 
 `agent_permission_diff_bot.limited.run_limited` runs a function in a freshly spawned child
