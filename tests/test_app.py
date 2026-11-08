@@ -213,3 +213,118 @@ def test_settings_errors_name_the_setting_not_the_value(tmp_path: Path) -> None:
     with pytest.raises(SettingsError, match=r"fail-on settings"):
         AppSettings.from_env({**env, "APDB_GUARD_FAIL_ON": "sometimes"})
     assert AppSettings.from_env({**env, "APDB_GUARD_FAIL_ON": "never"}).guard_fail_on is None
+
+
+def test_stale_branch_is_compared_with_its_merge_base_not_the_base_tip() -> None:
+    recording = Recording.load(FIXTURES / "clean")
+    branch_point = dict(recording.base)
+    branch_point[".claude/settings.json"] = recording.base[".claude/settings.json"].replace(
+        '"Bash(npm test)"', '"Bash(npm test)",\n      "Bash(git *)"'
+    )
+    head = dict(branch_point)
+    head["README.md"] = recording.head["README.md"]
+    payload = json.loads(json.dumps(recording.payload))
+    payload["pull_request"]["head"]["sha"] = commit_sha(head)
+    replayer = Replayer(Recording("pull_request", payload, recording.base, head))
+    replayer.github.merge_base_sha = commit_sha(branch_point)
+    replayer.github.commits[replayer.github.merge_base_sha] = branch_point
+    assert replayer.send() == 202
+    assert conclusions(replayer)["Agent Config Guard"] == "success"
+
+
+def test_padding_a_pr_with_agent_files_cannot_hide_a_settings_change() -> None:
+    recording = Recording.load(FIXTURES / "broad-bash-allow")
+    head = dict(recording.head)
+    for n in range(300):
+        head[f".claude/agents/a{n:03}.md"] = f"---\nname: a{n}\n---\nHelper {n}.\n"
+    payload = json.loads(json.dumps(recording.payload))
+    payload["pull_request"]["head"]["sha"] = commit_sha(head)
+    replayer = Replayer(Recording("pull_request", payload, recording.base, head))
+    assert replayer.send() == 202
+    assert conclusions(replayer)["Agent Config Guard"] == "failure"
+    [body] = bot_comments(replayer)
+    assert "Bash(git *)" in body
+
+
+def test_a_crashed_check_never_reads_as_all_clear(monkeypatch: pytest.MonkeyPatch) -> None:
+    import agent_permission_diff_bot.app.pipeline as pipeline
+
+    def boom(*args: object) -> object:
+        raise RuntimeError("synthetic crash")
+
+    monkeypatch.setattr(pipeline, "run_config_guard", boom)
+    replayer = run("clean")
+    assert conclusions(replayer)["Agent Config Guard"] == "failure"
+    [body] = bot_comments(replayer)
+    assert "did not finish" in body
+    assert "No new agent permission widening" not in body
+
+
+def test_an_older_push_finishing_late_does_not_overwrite_the_comment() -> None:
+    from agent_permission_diff_bot.app.github import RepoClient, make_http
+    from agent_permission_diff_bot.app.pipeline import run_checks
+
+    replayer = Replayer(Recording.load(FIXTURES / "broad-bash-allow"))
+    payload = replayer.recording.payload
+    target = target_from_event("pull_request", payload)
+    assert target is not None
+    replayer.github.set_pull(replayer.recording.base, replayer.recording.head)
+    http = make_http("https://api.github.test", replayer.github.transport())
+    repo = RepoClient(
+        http=http, owner="octo-demo", name="guard-demo", token="ghs_replay_installation_token"
+    )
+    outcome = run_checks(
+        repo,
+        target,
+        app_id="123456",
+        guard_fail_on=None,
+        swallowed_fail_on=None,
+        is_current=lambda: False,
+    )
+    assert outcome.comment_action == "stale"
+    assert bot_comments(replayer) == []
+    assert len(replayer.github.check_runs) == 2
+
+
+def test_rerun_from_a_fork_finds_the_pull_request_by_head_commit() -> None:
+    recording = Recording.load(FIXTURES / "silent-except")
+    head_sha = recording.payload["pull_request"]["head"]["sha"]
+    payload = {
+        "action": "rerequested",
+        "check_suite": {"head_sha": head_sha, "pull_requests": []},
+        "repository": recording.payload["repository"],
+        "installation": recording.payload["installation"],
+    }
+    replayer = Replayer(recording)
+    replayer.github.set_pull(recording.base, recording.head)
+    assert replayer.send(Recording("check_suite", payload, {}, {})) == 202
+    assert conclusions(replayer)["Swallowed errors"] == "neutral"
+
+
+def test_oversized_body_is_refused_before_it_is_read() -> None:
+    replayer = Replayer(Recording.load(FIXTURES / "clean"))
+    response = replayer.client.post(
+        "/webhook", content=b"{}", headers={"Content-Length": str(26 * 1024 * 1024)}
+    )
+    assert response.status_code == 413
+
+
+def test_cli_app_command_runs_as_a_module() -> None:
+    import subprocess
+    import sys
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "agent_permission_diff_bot.cli",
+            "app",
+            "replay",
+            str(FIXTURES / "clean"),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert "comment: none" in completed.stdout

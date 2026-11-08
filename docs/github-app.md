@@ -19,7 +19,10 @@ each push. Findings are ranked, and each one comes with a suggested fix.
 - It edits only a comment that carries its marker **and** was created by this App, so a
   copied marker in someone else's comment is left alone.
 - If reading the pull request fails, Config Guard reports `failure` ("did not finish")
-  rather than passing; Swallowed reports `neutral`.
+  rather than passing; Swallowed reports `neutral`. The comment says so too, and never shows
+  the all-clear line when a check crashed or read the pull request only partly.
+- When pushes arrive close together, only the newest push writes the comment; each push
+  still gets its own check runs.
 
 ### Marking a swallowed error as deliberate
 
@@ -65,7 +68,7 @@ pasted anywhere else.
      contents of `~/.config/agent-config-guard/webhook-secret`.
    - Repository permissions: **Checks: Read and write**, **Contents: Read-only**,
      **Pull requests: Read and write**, **Metadata: Read-only** (preset). Nothing else.
-   - Subscribe to events: **Pull request** and **Check run**.
+   - Subscribe to events: **Pull request**, **Check run** and **Check suite**.
    - Where can this GitHub App be installed: **Only on this account**.
    - Click **Create GitHub App** and note the **App ID** at the top of the next page.
 
@@ -95,7 +98,8 @@ pasted anywhere else.
 
 7. **Trigger the demo PRs.** Close and reopen each pull request in
    `agent-config-guard-demo` (or push to its branch). Each one should get the two check
-   runs and a single comment. The **Re-run** button on either check run also works.
+   runs and a single comment. **Re-run** on a check run, or **Re-run all checks**, also
+   works, including for pull requests from forks.
 
 ### Settings
 
@@ -137,7 +141,12 @@ them into the demo repository.
   helper function, is not reported; a probe run that proves a finding comes next.
 - Category ranking reads called names (`verify_token`, `db.commit`, `fetch`), so a
   wrapper with a neutral name ranks as "other".
-- Config Guard reads at most 300 agent-facing files per side and GitHub lists at most 3,000
-  changed files; the check run's coverage notes say when a limit was hit.
+- Config Guard reads startup configs first, then changed agent-facing files, up to 300 per
+  side; GitHub lists at most 3,000 changed files. Anything past a limit, or missing from a
+  truncated tree, is marked unread, which Config Guard reports as a finding rather than
+  passing. Both sides are compared from the pull request's merge base, so changes that
+  landed on the base branch later are not blamed on the pull request.
+- An allow rule the Range has no data on (an unknown program, an unrecognised tool) is
+  reported as high: unknown reach is not treated as safe.
 - Webhook deliveries are processed in the server process; a restart drops in-flight work
   (re-run the check). Hosting is not part of this slice.

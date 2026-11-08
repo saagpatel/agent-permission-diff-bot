@@ -569,10 +569,6 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-if __name__ == "__main__":
-    sys.exit(main())
-
-
 def _run_app(args: argparse.Namespace) -> int:
     try:
         if args.app_command == "serve":
@@ -592,3 +588,7 @@ def _run_app(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"agent-permission-diff: {exc}", file=sys.stderr)
         return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

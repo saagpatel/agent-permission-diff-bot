@@ -10,7 +10,7 @@ are checked from the tree before anything is downloaded.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Any, Protocol
@@ -40,6 +40,7 @@ from agent_permission_diff_bot.sources import (
 )
 
 MAX_GUARD_FILES = 300
+MAX_PULL_FILES = 3000
 MAX_SWALLOWED_FILES = 200
 
 
@@ -61,21 +62,27 @@ class PullInputs:
 def collect_inputs(
     repo: TreeReader, base_sha: str, head_sha: str, pull_files: list[dict[str, Any]]
 ) -> PullInputs:
+    """Inputs for both checks. ``base_sha`` should be the merge base, not the base tip."""
     notes: list[str] = []
     swallowed_notes: list[str] = []
     changed = [str(f["filename"]) for f in pull_files]
     previous = [str(f["previous_filename"]) for f in pull_files if f.get("previous_filename")]
-    if len(pull_files) >= 3000:
-        notes.append("GitHub lists at most 3,000 changed files; later files were not read.")
-        swallowed_notes.append(notes[-1])
+    head_blobs = {
+        str(f["filename"]): str(f["sha"])
+        for f in pull_files
+        if f.get("status") != "removed" and f.get("sha")
+    }
     base_tree, base_truncated = repo.tree(base_sha)
     head_tree, head_truncated = repo.tree(head_sha)
     if base_truncated or head_truncated:
-        notes.append(
-            "GitHub truncated a repository tree; unchanged startup configs may be missing."
-        )
-    base_files = _snapshot(repo, base_tree, [*changed, *previous], base_truncated, notes)
-    head_files = _snapshot(repo, head_tree, changed, head_truncated, notes)
+        notes.append("GitHub truncated a repository tree; unlisted files are marked unread.")
+    base_files = _snapshot(repo, base_tree, [*changed, *previous], base_truncated, {})
+    head_files = _snapshot(repo, head_tree, changed, head_truncated, head_blobs)
+    if len(pull_files) >= MAX_PULL_FILES:
+        limit_note = "GitHub lists at most 3,000 changed files; later files were not read."
+        notes.append(limit_note)
+        swallowed_notes.append(limit_note)
+        _mark_incomplete(head_files, "(pull request files)", limit_note)
     return PullInputs(
         base_files=base_files,
         head_files=head_files,
@@ -90,22 +97,35 @@ def _snapshot(
     tree: dict[str, dict[str, Any]],
     changed: Iterable[str],
     truncated: bool,
-    notes: list[str],
+    known_blobs: Mapping[str, str],
 ) -> dict[str, str]:
-    wanted = {path for path in changed if is_guard_path(path)}
-    wanted.update(path for path in tree if project_config_kind(path) is not None)
-    selected = sorted(
+    """Startup configs first, then changed agent-facing files.
+
+    Anything not read (over the file limit, missing from a truncated tree, too large) is
+    marked incomplete, which the engine reports as a finding: an unread file never passes.
+    """
+    changed = list(changed)
+    configs = sorted(path for path in tree if project_config_kind(path) is not None)
+    guard_changed = sorted(path for path in changed if is_guard_path(path))
+    ordered = [
         path
-        for path in wanted
-        if path in tree and not is_sensitive_path(path) and not _is_vendor_path(path)
-    )
-    if len(selected) > MAX_GUARD_FILES:
-        notes.append(f"Only the first {MAX_GUARD_FILES} agent-facing files were read.")
-        selected = selected[:MAX_GUARD_FILES]
+        for path in dict.fromkeys([*configs, *guard_changed])
+        if not is_sensitive_path(path) and not _is_vendor_path(path)
+    ]
     files: dict[str, str] = {}
-    for path in selected:
+    for index, path in enumerate(ordered):
+        if index >= MAX_GUARD_FILES:
+            _mark_incomplete(files, path, f"not read: over the {MAX_GUARD_FILES}-file limit")
+            continue
+        entry = tree.get(path)
+        if entry is None and path in known_blobs:
+            entry = {"sha": known_blobs[path], "mode": "100644"}
+        if entry is None:
+            if truncated:
+                _mark_incomplete(files, path, "not listed in a truncated Git tree")
+            continue
         limit = MAX_CONFIG_INPUT_BYTES if project_config_kind(path) else MAX_INPUT_BYTES
-        _read(repo, tree, path, limit, files)
+        _read(repo, entry, path, limit, files)
     cache: ConfigCache = {}
     for path in sorted(snapshot_hook_references(files, cache, tree.keys())):
         if path in files or is_sensitive_path(path):
@@ -113,7 +133,7 @@ def _snapshot(
         if ".git" in {part.casefold() for part in path.split("/")}:
             continue
         if path in tree:
-            _read(repo, tree, path, MAX_INPUT_BYTES, files)
+            _read(repo, tree[path], path, MAX_INPUT_BYTES, files)
         else:
             _mark_incomplete(files, path, "referenced input is absent from the selected Git tree")
     _source_state(files, tree, changed, truncated)
@@ -121,16 +141,19 @@ def _snapshot(
 
 
 def _read(
-    repo: TreeReader, tree: dict[str, dict[str, Any]], path: str, limit: int, files: dict[str, str]
+    repo: TreeReader, entry: Mapping[str, Any], path: str, limit: int, files: dict[str, str]
 ) -> None:
-    entry = tree[path]
     if int(entry.get("size") or 0) > limit:
         _mark_incomplete(files, path, _too_large_reason(limit))
         return
     if str(entry.get("mode", "")) in {"120000", "160000"}:
         _mark_incomplete(files, path, "input is a symlink or submodule in the selected Git tree")
         return
-    files[path] = repo.blob_text(str(entry["sha"]))
+    text = repo.blob_text(str(entry["sha"]))
+    if len(text.encode("utf-8", errors="surrogateescape")) > limit:
+        _mark_incomplete(files, path, _too_large_reason(limit))
+        return
+    files[path] = text
 
 
 def _source_state(

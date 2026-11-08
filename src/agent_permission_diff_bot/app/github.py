@@ -119,6 +119,18 @@ class RepoClient:
         }
         return entries, bool(data.get("truncated"))
 
+    def merge_base(self, base_sha: str, head_sha: str) -> str:
+        """The commit the PR branched from; the files list is relative to it."""
+        data = self._request(
+            "GET",
+            f"/repos/{self.full_name}/compare/{base_sha}...{head_sha}",
+            params={"per_page": 1},
+        ).json()
+        return str(data["merge_base_commit"]["sha"])
+
+    def pulls_for_commit(self, sha: str) -> list[dict[str, Any]]:
+        return list(self._paginate(f"/repos/{self.full_name}/commits/{sha}/pulls"))
+
     def blob_text(self, sha: str) -> str:
         data = self._request("GET", f"/repos/{self.full_name}/git/blobs/{sha}").json()
         raw = (

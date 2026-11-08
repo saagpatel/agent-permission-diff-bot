@@ -46,6 +46,7 @@ class CheckResult:
     findings: list[CheckFinding] = field(default_factory=list)
     deliberate: list[DeliberateCatch] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    crashed: bool = False
 
     @property
     def max_severity(self) -> Severity | None:

@@ -19,7 +19,12 @@ from fastapi import BackgroundTasks, FastAPI, Request, Response
 from fastapi.responses import JSONResponse
 
 from agent_permission_diff_bot.app.github import AppAuth, RepoClient, make_http
-from agent_permission_diff_bot.app.pipeline import PullTarget, run_checks, target_from_event
+from agent_permission_diff_bot.app.pipeline import (
+    PullTarget,
+    resolve_target,
+    run_checks,
+    target_from_event,
+)
 from agent_permission_diff_bot.app.settings import AppSettings
 
 log = logging.getLogger(__name__)
@@ -38,38 +43,53 @@ def create_app(settings: AppSettings, transport: httpx.BaseTransport | None = No
     http = make_http(settings.api_url, transport)
     auth = AppAuth(app_id=settings.app_id, private_key=settings.private_key, http=http)
     locks: defaultdict[tuple[int, int], threading.Lock] = defaultdict(threading.Lock)
-    locks_guard = threading.Lock()
+    latest: dict[tuple[int, int], str] = {}
+    state_guard = threading.Lock()
     app = FastAPI(title="Agent Permission Diff Bot", docs_url=None, redoc_url=None)
 
+    def remember(target: PullTarget, *, newest: bool) -> None:
+        with state_guard:
+            key = (target.repository_id, target.number)
+            if newest or key not in latest:
+                latest[key] = target.head_sha
+
+    def is_current(target: PullTarget) -> bool:
+        with state_guard:
+            return latest.get((target.repository_id, target.number)) == target.head_sha
+
     def process(target: PullTarget) -> None:
-        with locks_guard:
-            lock = locks[(target.repository_id, target.number)]
-        # One run per pull request at a time, so two quick pushes cannot post two comments.
-        with lock:
-            try:
-                token = auth.installation_token(target.installation_id, target.repository_id)
-                repo = RepoClient(http=http, owner=target.owner, name=target.name, token=token)
+        try:
+            token = auth.installation_token(target.installation_id, target.repository_id)
+            repo = RepoClient(http=http, owner=target.owner, name=target.name, token=token)
+            resolved = resolve_target(repo, target)
+            if resolved is None:
+                log.info("No open pull request for %s; nothing to re-run", target.head_sha[:7])
+                return
+            remember(resolved, newest=False)
+            with state_guard:
+                lock = locks[(resolved.repository_id, resolved.number)]
+            # One run per pull request at a time; only the newest push may write the comment.
+            with lock:
                 outcome = run_checks(
                     repo,
-                    target,
+                    resolved,
                     app_id=settings.app_id,
                     guard_fail_on=settings.guard_fail_on,
                     swallowed_fail_on=settings.swallowed_fail_on,
+                    is_current=lambda: is_current(resolved),
                 )
-            except Exception:
-                log.exception(
-                    "Checks for %s/%s#%s failed", target.owner, target.name, target.number
-                )
-                return
-            log.info(
-                "Checked %s/%s#%s at %s: %s, comment %s",
-                target.owner,
-                target.name,
-                target.number,
-                target.head_sha[:7],
-                outcome.conclusions,
-                outcome.comment_action,
-            )
+        except Exception:
+            log.exception("Checks for %s/%s#%s failed", target.owner, target.name, target.number)
+            return
+        log.info(
+            "Checked %s/%s#%s at %s: %s, comment %s",
+            resolved.owner,
+            resolved.name,
+            resolved.number,
+            resolved.head_sha[:7],
+            outcome.conclusions,
+            outcome.comment_action,
+        )
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
@@ -77,9 +97,17 @@ def create_app(settings: AppSettings, transport: httpx.BaseTransport | None = No
 
     @app.post("/webhook")
     async def webhook(request: Request, background: BackgroundTasks) -> Response:
-        body = await request.body()
-        if len(body) > MAX_BODY_BYTES:
+        declared = request.headers.get("content-length", "")
+        if declared.isdigit() and int(declared) > MAX_BODY_BYTES:
             return JSONResponse({"error": "payload too large"}, status_code=413)
+        chunks: list[bytes] = []
+        size = 0
+        async for chunk in request.stream():
+            size += len(chunk)
+            if size > MAX_BODY_BYTES:
+                return JSONResponse({"error": "payload too large"}, status_code=413)
+            chunks.append(chunk)
+        body = b"".join(chunks)
         signature = request.headers.get("x-hub-signature-256", "")
         if not verify_signature(settings.webhook_secret, body, signature):
             return JSONResponse({"error": "bad signature"}, status_code=401)
@@ -93,6 +121,8 @@ def create_app(settings: AppSettings, transport: httpx.BaseTransport | None = No
         target = target_from_event(event, payload) if isinstance(payload, dict) else None
         if target is None:
             return JSONResponse({"status": "ignored"}, status_code=202)
+        if target.number and event == "pull_request":
+            remember(target, newest=True)
         background.add_task(process, target)
         return JSONResponse({"status": "queued", "head": target.head_sha[:7]}, status_code=202)
 

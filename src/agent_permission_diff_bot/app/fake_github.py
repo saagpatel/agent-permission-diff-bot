@@ -50,6 +50,7 @@ class FakeGitHub:
     commits: dict[str, dict[str, str]] = field(default_factory=dict)
     base_sha: str = ""
     head_sha: str = ""
+    merge_base_sha: str = ""
     check_runs: dict[int, dict[str, Any]] = field(default_factory=dict)
     comments: dict[int, dict[str, Any]] = field(default_factory=dict)
     requests: list[str] = field(default_factory=list)
@@ -121,6 +122,8 @@ class FakeGitHub:
         body = json.loads(request.content) if request.content else {}
         routes: list[tuple[str, str, Any]] = [
             ("GET", rf"/pulls/{self.number}/files", self._pull_files),
+            ("GET", r"/compare/(?P<base>[0-9a-f]+)\.\.\.(?P<head>[0-9a-f]+)", self._compare),
+            ("GET", r"/commits/(?P<sha>[0-9a-f]+)/pulls", self._commit_pulls),
             ("GET", r"/git/trees/(?P<sha>[0-9a-f]+)", self._tree),
             ("GET", r"/git/blobs/(?P<sha>[0-9a-f]+)", self._blob),
             ("POST", r"/check-runs", self._create_run),
@@ -150,8 +153,23 @@ class FakeGitHub:
             return httpx.Response(422, json={"message": "token must be scoped to the repository"})
         return httpx.Response(201, json={"token": FAKE_TOKEN, "expires_at": "2099-01-01T00:00:00Z"})
 
+    def _compare(self, body: Any, base: str, head: str) -> httpx.Response:
+        if base not in self.commits or head not in self.commits:
+            return httpx.Response(404, json={"message": "Not Found"})
+        return httpx.Response(200, json={"merge_base_commit": {"sha": self._merge_base()}})
+
+    def _merge_base(self) -> str:
+        return self.merge_base_sha or self.base_sha
+
+    def _commit_pulls(self, body: Any, sha: str) -> httpx.Response:
+        if sha != self.head_sha:
+            return httpx.Response(200, json=[])
+        pull = self.pull_request_payload()["pull_request"]
+        return httpx.Response(200, json=[pull])
+
     def _pull_files(self, body: Any) -> httpx.Response:
-        base, head = self.commits[self.base_sha], self.commits[self.head_sha]
+        # Like GitHub, the files list is relative to the merge base, not the base tip.
+        base, head = self.commits[self._merge_base()], self.commits[self.head_sha]
         files = []
         for path in sorted(set(base) | set(head)):
             before, after = base.get(path), head.get(path)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from agent_permission_diff_bot.app.github import RepoClient
@@ -47,23 +47,34 @@ class RunOutcome:
 
 
 def target_from_event(event: str, payload: Mapping[str, Any]) -> PullTarget | None:
-    """The pull request an event asks us to check, or None when the event is not ours."""
+    """The pull request an event asks us to check, or None when the event is not ours.
+
+    A re-run of a check from a fork arrives with no ``pull_requests``; the target then has
+    ``number == 0`` and its pull request is looked up by head commit (``resolve_target``).
+    """
     installation = payload.get("installation") or {}
     repository = payload.get("repository") or {}
     if not installation.get("id") or not repository.get("id"):
         return None
     pull: Mapping[str, Any] | None = None
+    head_sha = ""
     if event == "pull_request" and payload.get("action") in PULL_REQUEST_ACTIONS:
         pull = payload.get("pull_request")
         if pull and pull.get("state") != "open":
             return None
-    elif event == "check_run" and payload.get("action") == "rerequested":
-        check_run = payload.get("check_run") or {}
-        pulls = check_run.get("pull_requests") or []
-        if check_run.get("name") not in CHECK_NAMES.values() or not pulls:
+    elif event in {"check_run", "check_suite"} and payload.get("action") == "rerequested":
+        source = payload.get(event) or {}
+        if event == "check_run" and source.get("name") not in CHECK_NAMES.values():
             return None
-        pull = pulls[0]
-    if not pull:
+        suite = source.get("check_suite") or {} if event == "check_run" else source
+        pulls = source.get("pull_requests") or suite.get("pull_requests") or []
+        pull = pulls[0] if pulls else None
+        head_sha = str(source.get("head_sha") or suite.get("head_sha") or "")
+        if pull is None and not head_sha:
+            return None
+    elif event != "pull_request":
+        return None
+    if not pull and not head_sha:
         return None
     owner = str(repository.get("owner", {}).get("login", ""))
     name = str(repository.get("name", ""))
@@ -72,10 +83,20 @@ def target_from_event(event: str, payload: Mapping[str, Any]) -> PullTarget | No
         repository_id=int(repository["id"]),
         owner=owner,
         name=name,
-        number=int(pull["number"]),
-        base_sha=str(pull["base"]["sha"]),
-        head_sha=str(pull["head"]["sha"]),
+        number=int(pull["number"]) if pull else 0,
+        base_sha=str(pull["base"]["sha"]) if pull else "",
+        head_sha=str(pull["head"]["sha"]) if pull else head_sha,
     )
+
+
+def resolve_target(repo: RepoClient, target: PullTarget) -> PullTarget | None:
+    """Fill in the open pull request for a re-run that arrived without one."""
+    if target.number:
+        return target
+    for pull in repo.pulls_for_commit(target.head_sha):
+        if pull.get("state") == "open" and pull.get("head", {}).get("sha") == target.head_sha:
+            return replace(target, number=int(pull["number"]), base_sha=str(pull["base"]["sha"]))
+    return None
 
 
 def run_checks(
@@ -85,6 +106,7 @@ def run_checks(
     app_id: str,
     guard_fail_on: Severity | None,
     swallowed_fail_on: Severity | None,
+    is_current: Callable[[], bool] = lambda: True,
 ) -> RunOutcome:
     outcome = RunOutcome()
     ref = RepoRef(full_name=repo.full_name, head_sha=target.head_sha)
@@ -97,9 +119,8 @@ def run_checks(
         "swallowed": swallowed_fail_on,
     }
     try:
-        inputs = collect_inputs(
-            repo, target.base_sha, target.head_sha, repo.pull_files(target.number)
-        )
+        merge_base = repo.merge_base(target.base_sha, target.head_sha)
+        inputs = collect_inputs(repo, merge_base, target.head_sha, repo.pull_files(target.number))
         results = [
             _guarded(
                 "config-guard", lambda: run_config_guard(inputs.base_files, inputs.head_files)
@@ -114,7 +135,7 @@ def run_checks(
         raise
     for result in results:
         check = result.check
-        if _crashed(result):
+        if result.crashed:
             verdict = "failure" if check == "config-guard" else "neutral"
         else:
             verdict = conclusion(result, fail_on[check])
@@ -123,26 +144,25 @@ def run_checks(
     outcome.results = results
     body = render_comment(results, ref)
     outcome.comment_body = body
+    if not is_current():
+        # A newer push arrived while this one ran; its run owns the comment.
+        outcome.comment_action = "stale"
+        return outcome
     outcome.comment_action = _upsert_comment(repo, target.number, body, app_id, results)
     return outcome
 
 
-_CRASH_NOTE = "The check did not finish: "
-
-
 def _guarded(name: CheckName, run: Callable[[], CheckResult]) -> CheckResult:
-    """Run one check; a crash becomes a visible note instead of silently passing."""
+    """Run one check; a crash becomes a visible result instead of silently passing."""
     try:
         return run()
     except Exception as exc:
         log.exception("The %s check crashed", name)
-        result = CheckResult(check=name)
-        result.notes.append(f"{_CRASH_NOTE}{type(exc).__name__}. Re-run the check to retry.")
+        result = CheckResult(check=name, crashed=True)
+        result.notes.append(
+            f"The check did not finish: {type(exc).__name__}. Re-run the check to retry."
+        )
         return result
-
-
-def _crashed(result: CheckResult) -> bool:
-    return any(note.startswith(_CRASH_NOTE) for note in result.notes)
 
 
 def _fail_runs(repo: RepoClient, run_ids: Mapping[CheckName, int], exc: Exception) -> None:
@@ -174,7 +194,7 @@ def _upsert_comment(
         None,
     )
     if existing is None:
-        if not any(r.findings or r.deliberate for r in results):
+        if not any(r.findings or r.deliberate or r.crashed for r in results):
             return "none"
         repo.create_comment(number, body)
         return "created"
