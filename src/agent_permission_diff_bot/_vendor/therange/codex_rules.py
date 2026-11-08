@@ -54,11 +54,22 @@ def _rules_from_call(node: ast.Call, source: Source, already: int) -> list[Rule]
     pattern_node = kwargs.get("pattern") or (node.args[0] if node.args else None)
     if pattern_node is None or ("pattern" in kwargs and node.args):
         raise RulesParseError(f"{where}: prefix_rule needs exactly one pattern")
+    # Every argument must be a literal: Codex evaluates the file as Starlark, so a call
+    # nested in any argument (even `justification`) would register a rule unseen here.
     try:
         pattern = ast.literal_eval(pattern_node)
         decision_raw = ast.literal_eval(kwargs["decision"]) if "decision" in kwargs else "allow"
+        extras = {key: ast.literal_eval(kwargs[key]) for key in ("justification", "match", "not_match") if key in kwargs}
     except (ValueError, TypeError, SyntaxError, RecursionError, MemoryError) as exc:
         raise RulesParseError(f"{where}: non-literal rule field") from exc
+    if "justification" in extras and not isinstance(extras["justification"], str):
+        raise RulesParseError(f"{where}: justification must be a string")
+    for key in ("match", "not_match"):
+        if key in extras and not (
+            isinstance(extras[key], list)
+            and all(isinstance(e, str) or (isinstance(e, list) and all(isinstance(w, str) for w in e)) for e in extras[key])
+        ):
+            raise RulesParseError(f"{where}: {key} must be a list of strings or lists of strings")
     if not isinstance(decision_raw, str) or decision_raw not in _DECISIONS:
         raise RulesParseError(f"{where}: unknown decision")
     if not isinstance(pattern, list) or not pattern or not all(

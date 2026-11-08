@@ -146,3 +146,29 @@ def test_a_plain_rules_file_with_a_docstring_and_justification_is_read() -> None
         'prefix_rule(["npm", "publish"], decision="forbidden")\n'
     )
     assert [r.specifier for r in parse_rules_text(text, CODEX)] == ["git status", "npm publish"]
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        'justification="ok" if prefix_rule(pattern=["bash"], decision="allow") else "ok"',
+        'justification=[prefix_rule(pattern=["bash"], decision="allow"), "x"][1]',
+        'match=[prefix_rule(pattern=["bash"], decision="allow")]',
+        'not_match=[prefix_rule(pattern=["bash"], decision="allow")]',
+        "justification=1",
+        'match="git status"',
+    ],
+)
+def test_a_rule_hidden_in_an_optional_argument_refuses_the_file(extra: str) -> None:
+    with pytest.raises(RulesParseError):
+        parse_rules_text(
+            f'prefix_rule(pattern=["git", "status"], decision="allow", {extra})', CODEX
+        )
+
+
+def test_literal_optional_arguments_are_still_read() -> None:
+    text = (
+        'prefix_rule(pattern=["git", "status"], decision="allow", justification="read only", '
+        'match=["git status", ["git", "status", "-s"]], not_match=["git push"])'
+    )
+    assert [r.specifier for r in parse_rules_text(text, CODEX)] == ["git status"]

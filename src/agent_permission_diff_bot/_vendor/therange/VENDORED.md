@@ -25,7 +25,8 @@ Local patches:
   options and any later subcommand can follow it; and a Codex suggestion is rated as the
   prefix rule it is emitted as, not as an exact command.
 - `codex_rules.py`: only plain top-level `prefix_rule(...)` calls with literal arguments
-  are read; any other statement, an aliased call, unpacked arguments, an unknown keyword or
+  are read, and every argument (including `justification`, `match` and `not_match`) must be
+  a literal of the expected type; any other statement, an aliased call, unpacked arguments, an unknown keyword or
   decision, or a pattern element that is not a string or a non-empty list of strings refuses
   the whole file, so a pull request cannot hide an allow rule from the parser.
 - `knowledge/commands.toml`: `fd --exec` is its own capability. It no longer shares
