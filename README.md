@@ -346,7 +346,7 @@ Known limits, tracked in the follow-up issue linked from its pull request:
 - On macOS and Windows there is no enforced memory cap; only the deadline bounds the child.
 - Results come back as plain JSON data; callers convert them to their own types.
 
-## GitHub App (unreleased)
+## GitHub App (unreleased, experimental)
 
 `agent-permission-diff app serve` runs a GitHub App with two check runs and one pull request
 comment, updated in place on every push:
@@ -362,6 +362,12 @@ The App reads files through the API and never runs pull request code. It needs t
 extra (`pip install "agent-permission-diff-bot[app]"`). Registration steps, settings, and a
 local replay that proves the whole flow without network access are in
 [docs/github-app.md](docs/github-app.md).
+
+The App is **experimental**. Known limits, tracked in
+[#62](https://github.com/saagpatel/agent-permission-diff-bot/issues/62): its analysis does
+not yet run inside `run_limited`, so pathological input is bounded by snapshot limits rather
+than a memory cap; pull requests with more than 300 changed files always fail Config Guard;
+and queued events live in the server process, so a restart drops them (re-run the check).
 
 ## GitHub Action
 
