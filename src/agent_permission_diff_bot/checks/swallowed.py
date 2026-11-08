@@ -31,7 +31,7 @@ from agent_permission_diff_bot.checks.model import (
     DeliberateCatch,
     rank,
 )
-from agent_permission_diff_bot.checks.probe import probe_handler
+from agent_permission_diff_bot.checks.probe import file_context, probe_handler
 from agent_permission_diff_bot.model import Severity
 from agent_permission_diff_bot.parsing import parser_overflow
 
@@ -409,6 +409,7 @@ def _python_catches(changed: ChangedFile, notes: list[str]) -> list[_Catch]:
         notes.append(f"`{changed.path}` is nested too deeply to parse as Python; not scanned.")
         return []
     catches: list[_Catch] = []
+    context = file_context(tree)
     for node in ast.walk(tree):
         if isinstance(node, (ast.Try, ast.TryStar)):
             names = tuple(_called_names(node.body))
@@ -427,7 +428,7 @@ def _python_catches(changed: ChangedFile, notes: list[str]) -> list[_Catch]:
                         broad=caught in _BROAD_PY or caught == "bare except",
                         narrow=_all_narrow(handler.type),
                         language="python",
-                        probe=probe_handler(node, handler).sentence(),
+                        probe=probe_handler(node, handler, context).sentence(),
                     )
                 )
         elif isinstance(node, (ast.With, ast.AsyncWith)):
