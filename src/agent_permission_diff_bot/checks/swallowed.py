@@ -240,7 +240,13 @@ def scan_swallowed(files: Iterable[ChangedFile]) -> CheckResult:
             )
         else:
             for changed in ts_files:
-                catches, comments = _ts_catches(changed, parser)
+                try:
+                    catches, comments = _ts_catches(changed, parser)
+                except RecursionError:
+                    # A pathologically nested file is refused on its own, like one that
+                    # does not parse, so the other files' findings still stand.
+                    result.notes.append(f"`{changed.path}` is nested too deeply; not scanned.")
+                    continue
                 _classify(changed, catches, comments, findings, result.deliberate)
     result.findings = rank(findings)
     return result
@@ -731,26 +737,34 @@ def _ts_bound_names(node: Any) -> set[str]:
     """Names a parameter (or parameter list) binds, the caught error and its parts.
 
     `{ message }` binds `message`; `{ message = fallback }` binds `message` but not
-    `fallback`; `{ [key]: text }` binds `text` but not `key`.
+    `fallback`; `{ [key]: text }` binds `text` but not `key`. Iterative, so a deeply nested
+    pattern in a pull request cannot exhaust the interpreter stack.
     """
-    if node.type in {"identifier", "shorthand_property_identifier_pattern"}:
-        return {_text(node)}
-    if node.type == "pair_pattern":
-        value = node.child_by_field_name("value")
-        return _ts_bound_names(value) if value is not None else set()
-    if node.type in {"object_assignment_pattern", "assignment_pattern"}:
-        left = node.child_by_field_name("left")
-        return _ts_bound_names(left) if left is not None else set()
-    if node.type in {"required_parameter", "optional_parameter"}:
-        pattern = node.child_by_field_name("pattern")
-        return _ts_bound_names(pattern) if pattern is not None else set()
     found: set[str] = set()
-    for index, child in enumerate(node.children):
-        if not child.is_named or node.field_name_for_child(index) in _TS_NOT_BOUND_FIELDS:
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if current.type in {"identifier", "shorthand_property_identifier_pattern"}:
+            found.add(_text(current))
             continue
-        if child.type == "type_annotation":
+        only = {
+            "pair_pattern": "value",
+            "object_assignment_pattern": "left",
+            "assignment_pattern": "left",
+            "required_parameter": "pattern",
+            "optional_parameter": "pattern",
+        }.get(current.type)
+        if only is not None:
+            child = current.child_by_field_name(only)
+            if child is not None:
+                stack.append(child)
             continue
-        found |= _ts_bound_names(child)
+        for index, child in enumerate(current.children):
+            if not child.is_named or child.type == "type_annotation":
+                continue
+            if current.field_name_for_child(index) in _TS_NOT_BOUND_FIELDS:
+                continue
+            stack.append(child)
     return found
 
 
