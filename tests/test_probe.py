@@ -36,15 +36,20 @@ def test_pass_lets_execution_continue_as_if_it_succeeded() -> None:
 
 
 def test_a_constant_return_shows_what_the_caller_gets() -> None:
-    source = "try:\n    verify(token)\nexcept Exception:\n    return None\n"
-    outcome, injected, detail = _probe(f"def f():\n{textwrap.indent(source, '    ')}", 4)
-    assert (outcome, injected) == ("vanished", "Exception")
-    assert detail == "the caller gets `None` instead of an error"
+    source = (
+        "def f():\n    try:\n        verify(token)\n    except Exception:\n        return None\n"
+    )
+    assert _probe(source, 4)[2] == "the caller gets `None` instead of an error"
 
 
-def test_a_returned_name_is_described_not_evaluated() -> None:
+def test_a_returned_name_is_described_and_assignments_are_followed() -> None:
     source = "def f():\n    try:\n        a()\n    except Exception:\n        return cached\n"
     assert _probe(source, 4)[2] == "the caller gets the value of `cached` instead of an error"
+    chained = (
+        "def f():\n    try:\n        a()\n    except Exception:\n"
+        "        previous = result\n        result = None\n        return previous\n"
+    )
+    assert _probe(chained, 4)[2] == "the caller gets the value of `result` instead of an error"
 
 
 def test_continue_and_break_in_loops() -> None:
@@ -53,61 +58,63 @@ def test_continue_and_break_in_loops() -> None:
     assert "stops early" in _probe(loop.format("break"), 4)[2]
 
 
-def test_flag_assignments_and_attribute_sets_run_harmlessly() -> None:
-    source = "try:\n    a()\nexcept Exception:\n    self.failed = True\n    cache[key] = None\n"
-    assert _probe(source, 3)[0] == "vanished"
-
-
-def test_custom_and_bare_exceptions_get_stand_ins() -> None:
+def test_exception_names_are_reported_as_written() -> None:
     assert _probe("try:\n    a()\nexcept requests.RequestException:\n    pass\n", 3)[1] == (
         "requests.RequestException"
     )
-    assert _probe("try:\n    a()\nexcept:\n    pass\n", 3)[1] == "RuntimeError"
+    assert _probe("try:\n    a()\nexcept (UnicodeDecodeError, ValueError):\n    pass\n", 3)[1] == (
+        "UnicodeDecodeError"
+    )
+    assert _probe("try:\n    a()\nexcept:\n    pass\n", 3)[1] == "an error (bare except)"
 
 
 @pytest.mark.parametrize(
     "body",
-    ["log.exception('x')", "raise", "return [i for i in x]", "return (y := 1)"],
+    ["log.exception('x')", "raise", "return [i for i in x]", "return (y := 1)", "x.y", "f"],
 )
-def test_handlers_with_calls_or_raises_are_never_run(body: str) -> None:
+def test_handlers_that_could_run_code_are_not_probed(body: str) -> None:
     source = f"try:\n    a()\nexcept Exception:\n    {body}\n"
     assert _probe(source, 3)[0] == "not-probed"
 
 
-def test_the_probe_runs_without_builtins() -> None:
-    # A swallowing handler cannot call anything, but even a name like `open` resolves to an
-    # inert stand-in in the probe, never the real builtin.
-    source = "try:\n    a()\nexcept Exception:\n    return open\n"
-    assert _probe(source, 3)[2] == "the caller gets the value of `open` instead of an error"
+@pytest.mark.parametrize(
+    "body",
+    [
+        'x.__init__.__globals__["marker"] = "changed"',
+        "x.__class__.__getitem__ = y",
+        "a, *b = c",
+    ],
+)
+def test_nothing_in_the_handler_is_executed(body: str) -> None:
+    # These would escape a sandbox or loop forever if run; the probe only reads them.
+    source = f"try:\n    a()\nexcept Exception:\n    {body}\n"
+    assert _probe(source, 3)[0] == "vanished"
 
 
 def test_swallowed_findings_carry_the_probe_result() -> None:
-    source = (
-        "def f():\n    try:\n        db.commit()\n    except Exception:\n        return False\n"
-    )
-    [finding] = scan_swallowed(
-        [ChangedFile("x.py", source, changed_lines_between("", source))]
-    ).findings
-    assert "Probe: injecting `Exception` into the `try` left no trace" in finding.allows[1]
-    assert "the caller gets `False`" in finding.allows[1]
+    source = "def f():\n    try:\n        db.commit()\n    except Exception:\n        return 0\n"
+    changed = ChangedFile("x.py", source, changed_lines_between("", source))
+    [finding] = scan_swallowed([changed]).findings
+    assert "Probe: injecting `Exception` into the `try` leaves no trace" in finding.allows[1]
+    assert "the caller gets `0`" in finding.allows[1]
 
 
 def test_cli_probe(tmp_path: Path) -> None:
     target = tmp_path / "store.py"
     target.write_text("try:\n    save()\nexcept OSError:\n    pass\n", encoding="utf-8")
+    command = [sys.executable, "-m", "agent_permission_diff_bot.cli", "probe-swallowed"]
     done = subprocess.run(
-        [
-            sys.executable,
-            "-m",
-            "agent_permission_diff_bot.cli",
-            "probe-swallowed",
-            str(target),
-            "--line",
-            "3",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
+        [*command, str(target), "--line", "3"], capture_output=True, text=True, check=False
     )
     assert done.returncode == 0, done.stderr
-    assert "Injecting `OSError` into the try left no trace" in done.stdout
+    assert "injecting `OSError` into the `try` leaves no trace" in done.stdout
+
+
+def test_cli_probe_refuses_non_utf8(tmp_path: Path) -> None:
+    target = tmp_path / "bad.py"
+    target.write_bytes(b"\xff\xfe")
+    command = [sys.executable, "-m", "agent_permission_diff_bot.cli", "probe-swallowed"]
+    done = subprocess.run(
+        [*command, str(target), "--line", "1"], capture_output=True, text=True, check=False
+    )
+    assert done.returncode == 2 and "not UTF-8" in done.stderr

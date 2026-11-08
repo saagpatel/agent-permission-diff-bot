@@ -605,23 +605,17 @@ def _run_app(args: argparse.Namespace) -> int:
 
 def _run_probe(args: argparse.Namespace) -> int:
     from agent_permission_diff_bot.checks.probe import probe_python_handler
-    from agent_permission_diff_bot.limited import LimitExceededError, run_limited
 
-    source = Path(args.file).read_text(encoding="utf-8")
     try:
-        result = run_limited(probe_python_handler, source, args.line, timeout_s=10)
-    except (LimitExceededError, RuntimeError) as exc:
-        print(f"agent-permission-diff: the probe did not finish: {exc}", file=sys.stderr)
+        source = Path(args.file).read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        print(f"agent-permission-diff: {args.file} is not UTF-8 text", file=sys.stderr)
         return 2
-    if result["outcome"] == "not-probed":
-        print(f"agent-permission-diff: not probed: {result['detail']}", file=sys.stderr)
+    result = probe_python_handler(source, args.line)
+    if result.outcome == "not-probed":
+        print(f"agent-permission-diff: not probed: {result.detail}", file=sys.stderr)
         return 2
-    sentence = (
-        f"Injecting `{result['injected']}` into the try left no trace; {result['detail']}."
-        if result["outcome"] == "vanished"
-        else f"Injecting `{result['injected']}` escaped the handler ({result['detail']})."
-    )
-    print(f"{args.file}:{args.line}: {sentence}")
+    print(f"{args.file}:{args.line}: {result.sentence()}")
     return 0
 
 
