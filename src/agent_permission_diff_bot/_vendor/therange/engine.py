@@ -163,14 +163,18 @@ def analyze_command(cmd: CommandRule, agent: str, kb: KnowledgeBase) -> list[Fin
                 effect="exec",
             )
         ]
-    # Local patch: an option right after the program (`git -C . *`, `git -c*`) can be
-    # followed by any other global option and any subcommand, so the rule reaches what
-    # the bare program reaches. Option arity is unknown, so stay conservative.
-    if cmd.shape != "exact" and cmd.fixed and (
-        (len(cmd.fixed) >= 2 and cmd.fixed[1].startswith("-"))
-        or (len(cmd.fixed) == 1 and cmd.partial.startswith("-"))
-    ):
-        cmd = CommandRule(shape="prefix", fixed=cmd.fixed[:1])
+    # Local patch: an option anywhere in the fixed words (`git -C . *`, `gh release -R o/r *`,
+    # `git submodule --quiet *`) can be followed by other options and any later subcommand,
+    # so the rule reaches what the words before that option reach. Option arity is
+    # unknown, so stay conservative and cut the rule at the first option.
+    if cmd.shape != "exact" and cmd.fixed:
+        first_option = next(
+            (i for i, word in enumerate(cmd.fixed) if i >= 1 and word.startswith("-")), None
+        )
+        if first_option is not None:
+            cmd = CommandRule(shape="prefix", fixed=cmd.fixed[:first_option])
+        elif cmd.partial.startswith("-"):
+            cmd = CommandRule(shape="prefix", fixed=cmd.fixed)
     findings: list[Finding] = []
     seen: set[str] = set()
     for cap in kb.capabilities:
