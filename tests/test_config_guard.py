@@ -508,3 +508,12 @@ def test_quoted_bullets_stay_apart() -> None:
     base = {"AGENTS.md": "# Rules\n> - Never skip lint\n"}
     head = {"AGENTS.md": "# Rules\n> - Never skip lint\n> - Run the tests first\n"}
     assert run_config_guard(base, head).findings == []
+
+
+@pytest.mark.parametrize("head_text", [None, "", "\n"])
+def test_deleting_rules_from_a_file_the_parser_refuses_fails_closed(head_text: str | None) -> None:
+    path = ".codex/rules/default.rules"
+    base = {path: 'version = "1"\nprefix_rule(pattern=["git", "push"], decision="forbidden")\n'}
+    head = {} if head_text is None else {path: head_text}
+    found = run_config_guard(base, head).findings
+    assert any(f.rule_id == "CG007" and "previous" in f.title for f in found)
