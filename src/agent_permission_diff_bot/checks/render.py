@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import quote
@@ -148,13 +149,23 @@ def _comment_item(
     location = (
         f"[{md_code(where)}]({repo.link(finding.path, finding.line)})" if finding.path else ""
     )
-    allows = "; ".join(_clean(item, 220) for item in finding.allows[:max_allows])
+    allows = _join_items(_clean(item, 220) for item in finding.allows[:max_allows])
     label = "Now allows" if finding.check == "config-guard" else "Risk"
     return [
         f"{index}. {_ICON[finding.severity]} **{_clean(finding.title, 140)}** {location}",
         f"   - {label}: {allows}",
         f"   - Fix: {_clean(finding.fix, 400)}",
     ]
+
+
+def _join_items(items: Iterable[str]) -> str:
+    """Join with `; `, or a space after an item that already ends a sentence."""
+    joined = ""
+    for item in items:
+        if joined:
+            joined += " " if joined.endswith((".", "!", "?")) else "; "
+        joined += item
+    return joined
 
 
 def _annotation(finding: CheckFinding) -> dict[str, Any]:
