@@ -653,9 +653,22 @@ def _negated(text: str, match: re.Match[str]) -> bool:
 
 
 def _token_start(text: str, match: re.Match[str]) -> int:
-    """Where the matched instruction starts: at the `--` of a flag such as `--skip-hooks`."""
+    """Where the matched instruction starts: at the `--` of a flag such as `--skip-hooks`.
+
+    A `--` is a flag only when it starts a token and the verb after it either continues the
+    flag's name (`--skip-hooks`) or ends the token (`never pass --skip.`). `pass--skip` and
+    `pass --skip the review` use `--` as a dash between words.
+    """
     start = match.start()
-    return start - 2 if text[max(0, start - 2) : start] == "--" else start
+    dashes = start - 2
+    if dashes < 0 or text[dashes:start] != "--":
+        return start
+    if dashes > 0 and text[dashes - 1].isalnum():
+        return start
+    verb = _SKIP_WORD_RE.match(text, start)
+    if verb is None or not _FLAG_TAIL_RE.match(text, verb.end()):
+        return start
+    return dashes
 
 
 def _clause_start(text: str, position: int) -> int:
@@ -664,17 +677,22 @@ def _clause_start(text: str, position: int) -> int:
 
 
 # A verb inside `--dangerously-skip-permissions` or `--dangerously-bypass-approvals-and-sandbox`
-# belongs to that flag, which has its own branch and is matched (and negated) as a whole. Any
-# other flag holding a skip verb (`--skip-hooks`, `--bypass-checks`) is read as the
-# instruction it is.
-_INSIDE_FLAG_RE = re.compile(r"--dangerously-$", re.IGNORECASE)
+# belongs to that flag, which has its own branch and is matched (and negated) as a whole. A
+# verb right after `--no-` is negated by the flag itself (`--no-skip-hooks`). Any other flag
+# holding a skip verb (`--skip-hooks`, `--bypass-checks`, `--ignore-scripts`, which skips
+# npm's `pre`/`post` and `prepare` scripts) is read as the instruction it is.
+_INSIDE_FLAG_RE = re.compile(r"--(?:dangerously|no)-$", re.IGNORECASE)
+_SKIP_WORD_RE = re.compile(_SKIP_WORD, re.IGNORECASE)
+# After the verb, a flag's name goes on with `-`, or the token ends (punctuation, a closing
+# code or quote mark, another flag, or the end of the text).
+_FLAG_TAIL_RE = re.compile(r"-|[`'\")\].,;:!?]|\s*(?:$|--)")
 # A negator covers a list of skip verbs joined by at least one conjunction: `Never skip,
 # bypass, or disable hooks`, `never skip or bypass or disable hooks`. A comma alone does not
 # make a list (`Never skip, disable the hooks`).
-# Flags count as items too: `Never pass --no-verify or --skip-hooks`.
-_LIST_ITEM = rf"(?:--[\w-]+|{_SKIP_WORD})"
+# Flags count as items too, in code spans or not: `Never pass --no-verify or --skip-hooks`.
+_LIST_ITEM = rf"(?:--[\w-]+|{_SKIP_WORD})`?"
 _VERB_LIST_RE = re.compile(
-    rf"{_LIST_ITEM}(?:(?:\s*,\s*{_LIST_ITEM})*(?:\s*,?\s*(?:or|and|nor)\s+{_LIST_ITEM})+)?",
+    rf"{_LIST_ITEM}(?:(?:\s*,\s*`?{_LIST_ITEM})*(?:\s*,?\s*(?:or|and|nor)\s+`?{_LIST_ITEM})+)?",
     re.IGNORECASE,
 )
 
