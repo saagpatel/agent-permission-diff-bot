@@ -602,7 +602,7 @@ def _ts_catch(changed: ChangedFile, node: Any, protected: Any, caught: str) -> _
 def _ts_block_swallows(block: Any, clause: Any) -> bool:
     param = clause.child_by_field_name("parameter")
     # Every name the parameter binds, so `catch ({ message }) { last = message; }` keeps it.
-    names = sorted(_ts_identifiers(param)) if param is not None else []
+    names = sorted(_ts_bound_names(param)) if param is not None else []
     for statement in block.named_children:
         if statement.type in {"comment", "empty_statement"}:
             continue
@@ -687,7 +687,7 @@ def _ts_handler_swallows(handler: Any) -> bool:
         params = handler.child_by_field_name("parameters") or handler.child_by_field_name(
             "parameter"
         )
-        names = _ts_identifiers(params) if params is not None else set()
+        names = _ts_bound_names(params) if params is not None else set()
         if body.type == "statement_block":
             for statement in body.named_children:
                 if statement.type in {"comment", "empty_statement"}:
@@ -722,15 +722,35 @@ def _ts_plain(node: Any, *forbidden: str) -> bool:
     return False
 
 
-def _ts_identifiers(node: Any) -> set[str]:
+# In a destructuring pattern these fields hold expressions (a default value, a computed
+# key) or a type, not names the pattern binds.
+_TS_NOT_BOUND_FIELDS = frozenset({"right", "value", "key", "type"})
+
+
+def _ts_bound_names(node: Any) -> set[str]:
+    """Names a parameter (or parameter list) binds, the caught error and its parts.
+
+    `{ message }` binds `message`; `{ message = fallback }` binds `message` but not
+    `fallback`; `{ [key]: text }` binds `text` but not `key`.
+    """
+    if node.type in {"identifier", "shorthand_property_identifier_pattern"}:
+        return {_text(node)}
+    if node.type == "pair_pattern":
+        value = node.child_by_field_name("value")
+        return _ts_bound_names(value) if value is not None else set()
+    if node.type in {"object_assignment_pattern", "assignment_pattern"}:
+        left = node.child_by_field_name("left")
+        return _ts_bound_names(left) if left is not None else set()
+    if node.type in {"required_parameter", "optional_parameter"}:
+        pattern = node.child_by_field_name("pattern")
+        return _ts_bound_names(pattern) if pattern is not None else set()
     found: set[str] = set()
-    stack = [node]
-    while stack:
-        current = stack.pop()
-        # `{ message }` in a destructured parameter binds `message` too.
-        if current.type in {"identifier", "shorthand_property_identifier_pattern"}:
-            found.add(_text(current))
-        stack.extend(current.children)
+    for index, child in enumerate(node.children):
+        if not child.is_named or node.field_name_for_child(index) in _TS_NOT_BOUND_FIELDS:
+            continue
+        if child.type == "type_annotation":
+            continue
+        found |= _ts_bound_names(child)
     return found
 
 

@@ -333,9 +333,7 @@ def test_an_interrupt_while_the_io_thread_starts_still_stops_it(
 def test_a_thread_that_may_not_have_started_keeps_its_pipes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import agent_permission_diff_bot.limited as limited
-
-    monkeypatch.setattr(limited, "_SHUTDOWN_GRACE_S", 0.1)
+    monkeypatch.setattr("agent_permission_diff_bot.limited._SHUTDOWN_GRACE_S", 0.1)
 
     def interrupted_before_launch(self: threading.Thread) -> None:
         raise KeyboardInterrupt
@@ -358,3 +356,27 @@ def test_a_host_that_refuses_a_thread_is_not_running(monkeypatch: pytest.MonkeyP
     with pytest.raises(RuntimeError):
         call_within(10, lambda: b"", lambda: None, io_state=io_state)
     assert io_state["running"] is False
+
+
+def test_a_runtime_error_after_launch_is_not_a_refusal(monkeypatch: pytest.MonkeyPatch) -> None:
+    reader, writer = _pipe()
+    original_start = threading.Thread.start
+
+    def interrupted(self: threading.Thread) -> None:
+        original_start(self)
+        raise LimitExceededError("raised by a signal handler during start-up")
+
+    monkeypatch.setattr(threading.Thread, "start", interrupted)
+    io_state: dict[str, bool] = {}
+    stopped: list[bool] = []
+
+    def stop() -> None:
+        stopped.append(True)
+        writer.close()
+
+    with pytest.raises(LimitExceededError):
+        call_within(10, lambda: reader.recv_bytes(1000), stop, io_state=io_state)
+    monkeypatch.undo()
+    assert stopped == [True], "a launched thread is stopped"
+    assert io_state["running"] is False
+    reader.close()

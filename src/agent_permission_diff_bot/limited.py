@@ -156,6 +156,7 @@ def call_within(
     # the thread launched but not yet reported alive.
     finished = threading.Event()
     refused = False  # the host could not start a thread at all
+    stopped = False  # the timeout path already called ``stop``
 
     def run() -> None:
         try:
@@ -170,11 +171,14 @@ def call_within(
     try:
         try:
             worker.start()
-        except RuntimeError:
-            refused = True
+        except RuntimeError as exc:
+            # Only the host's own refusal means no thread exists; anything else (a signal
+            # handler raising during start-up) may have left one running.
+            refused = type(exc) is RuntimeError and "can't start new thread" in str(exc)
             raise
         worker.join(max(0.0, deadline - time.monotonic()))
         if worker.is_alive():
+            stopped = True
             stop()
             worker.join(_SHUTDOWN_GRACE_S)
             if worker.is_alive():
@@ -182,11 +186,12 @@ def call_within(
                     f"timed out after {timeout_s:g}s and the child could not be stopped"
                 )
             raise LimitExceededError(f"timed out after {timeout_s:g}s")
-    except BaseException as exc:
-        # An interrupt while starting or waiting must not leave the I/O running behind the
-        # caller's cleanup. The timeout paths above already stopped it. ``stop`` is safe
-        # when nothing started yet: it cancels the work before the child is launched.
-        if not isinstance(exc, LimitExceededError) and not refused:
+    except BaseException:
+        # An interrupt (or any error) while starting or waiting must not leave the I/O
+        # running behind the caller's cleanup. The timeout path above already stopped it.
+        # ``stop`` is safe when nothing started yet: it cancels the work before the child
+        # is launched.
+        if not stopped and not refused:
             stop()
             finished.wait(_SHUTDOWN_GRACE_S)
         raise

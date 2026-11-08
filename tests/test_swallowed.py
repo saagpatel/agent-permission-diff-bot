@@ -370,3 +370,20 @@ def test_expression_body_and_compound_flag_sets_swallow(source: str) -> None:
 )
 def test_a_flag_set_that_uses_the_error_keeps_it(source: str) -> None:
     assert scan("web/x.ts", source) == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "try { verifyToken(t); } catch ({ message = fallback }) { last = fallback; }\n",
+        "try { verifyToken(t); } catch ({ [key]: message }) { last = key; }\n",
+        "verifyToken(t).catch(({ message = fallback }) => { last = fallback; });\n",
+    ],
+)
+def test_defaults_and_computed_keys_are_not_the_error(source: str) -> None:
+    assert len(scan("web/x.ts", source)) == 1
+
+
+def test_a_typed_destructured_error_is_still_the_error() -> None:
+    source = "try { f(); } catch ({ message }: any) { last = message; }\n"
+    assert scan("web/x.ts", source) == []
