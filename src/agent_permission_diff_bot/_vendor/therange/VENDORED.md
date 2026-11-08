@@ -20,9 +20,14 @@ Local patches:
 - `codex_rules.py`: every parse failure of an untrusted file (`TypeError` from an
   unhashable literal, `RecursionError`, `ValueError` for a NUL byte on Python 3.11) is raised
   as `RulesParseError`, so callers refuse the file instead of crashing.
-- `engine.py`: a rule with an option right after the program (`Bash(git -C . *)`) is rated
-  as the bare program, since any global option and subcommand can follow it; and a Codex
-  suggestion is rated as the prefix rule it is emitted as, not as an exact command.
+- `engine.py`: a rule with an option anywhere in its fixed words (`Bash(git -C . *)`,
+  `Bash(gh release -R o/r *)`) is rated as the words before that option, since other
+  options and any later subcommand can follow it; and a Codex suggestion is rated as the
+  prefix rule it is emitted as, not as an exact command.
+- `codex_rules.py`: only plain top-level `prefix_rule(...)` calls with literal arguments
+  are read; any other statement, an aliased call, unpacked arguments, an unknown keyword or
+  decision, or a pattern element that is not a string or a non-empty list of strings refuses
+  the whole file, so a pull request cannot hide an allow rule from the parser.
 - `knowledge/commands.toml`: `fd --exec` is its own capability. It no longer shares
   `find`'s Claude Code safeguard, which does not cover fd.
 - Trailing blank lines at end of file are removed so `git diff --check` stays clean.

@@ -26,35 +26,63 @@ def parse_rules_text(text: str, source: Source) -> list[Rule]:
     except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
         raise RulesParseError(f"{source.label}: not parseable as rules: {getattr(exc, 'msg', type(exc).__name__)} (line {getattr(exc, 'lineno', '?')})") from exc
     rules: list[Rule] = []
-    for node in ast.walk(tree):
+    # Local patch: rules files can come from pull requests, and Codex reads them as
+    # Starlark, so any shape this parser skipped could hide an allow rule. Only plain
+    # top-level `prefix_rule(...)` calls with literal arguments are accepted; anything
+    # else (assignments, aliases, `**kwargs`, loops, other calls) refuses the whole file.
+    for statement in tree.body:
+        if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Constant):
+            continue  # a docstring or bare string
+        node = statement.value if isinstance(statement, ast.Expr) else None
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "prefix_rule"):
-            continue
-        kwargs = {kw.arg: kw.value for kw in node.keywords if kw.arg}
-        pattern_node = kwargs.get("pattern") or (node.args[0] if node.args else None)
-        if pattern_node is None:
-            continue
-        try:
-            pattern = ast.literal_eval(pattern_node)
-            decision_raw = ast.literal_eval(kwargs["decision"]) if "decision" in kwargs else "allow"
-        except (ValueError, TypeError, SyntaxError, RecursionError, MemoryError) as exc:
-            raise RulesParseError(f"{source.label}: line {node.lineno}: non-literal rule field") from exc
-        decision = _DECISIONS.get(str(decision_raw))
-        if decision is None or not isinstance(pattern, list) or not pattern:
-            continue
-        for words in expand_pattern(pattern):
-            if len(rules) >= MAX_RULES_PER_FILE:
-                raise RulesParseError(f"{source.label}: more than {MAX_RULES_PER_FILE} rules")
-            rules.append(
-                Rule(
-                    agent="codex",
-                    decision=decision,
-                    raw=canonical(words, str(decision_raw)),
-                    source=source,
-                    tool="shell",
-                    specifier=" ".join(words),
-                    command=CommandRule(shape="prefix", fixed=words),
-                )
+            raise RulesParseError(f"{source.label}: line {statement.lineno}: only prefix_rule(...) calls are read")
+        rules.extend(_rules_from_call(node, source, len(rules)))
+    return rules
+
+
+_KEYWORDS = {"pattern", "decision", "justification", "match", "not_match"}
+
+
+def _rules_from_call(node: ast.Call, source: Source, already: int) -> list[Rule]:
+    where = f"{source.label}: line {node.lineno}"
+    if any(isinstance(arg, ast.Starred) for arg in node.args) or any(kw.arg is None for kw in node.keywords):
+        raise RulesParseError(f"{where}: unpacked arguments are not read")
+    names = [kw.arg for kw in node.keywords]
+    if len(node.args) > 1 or set(names) - _KEYWORDS or len(names) != len(set(names)):
+        raise RulesParseError(f"{where}: unexpected prefix_rule arguments")
+    kwargs = {kw.arg: kw.value for kw in node.keywords}
+    pattern_node = kwargs.get("pattern") or (node.args[0] if node.args else None)
+    if pattern_node is None or ("pattern" in kwargs and node.args):
+        raise RulesParseError(f"{where}: prefix_rule needs exactly one pattern")
+    try:
+        pattern = ast.literal_eval(pattern_node)
+        decision_raw = ast.literal_eval(kwargs["decision"]) if "decision" in kwargs else "allow"
+    except (ValueError, TypeError, SyntaxError, RecursionError, MemoryError) as exc:
+        raise RulesParseError(f"{where}: non-literal rule field") from exc
+    if not isinstance(decision_raw, str) or decision_raw not in _DECISIONS:
+        raise RulesParseError(f"{where}: unknown decision")
+    if not isinstance(pattern, list) or not pattern or not all(
+        isinstance(element, str)
+        or (isinstance(element, list) and element and all(isinstance(e, str) for e in element))
+        for element in pattern
+    ):
+        raise RulesParseError(f"{where}: a pattern is a list of words or non-empty lists of words")
+    decision = _DECISIONS[decision_raw]
+    rules: list[Rule] = []
+    for words in expand_pattern(pattern):
+        if already + len(rules) >= MAX_RULES_PER_FILE:
+            raise RulesParseError(f"{source.label}: more than {MAX_RULES_PER_FILE} rules")
+        rules.append(
+            Rule(
+                agent="codex",
+                decision=decision,
+                raw=canonical(words, decision_raw),
+                source=source,
+                tool="shell",
+                specifier=" ".join(words),
+                command=CommandRule(shape="prefix", fixed=words),
             )
+        )
     return rules
 
 

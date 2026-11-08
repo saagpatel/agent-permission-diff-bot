@@ -101,3 +101,48 @@ def test_rule_count_limit_per_file() -> None:
     small = ", ".join('["a", "b"]' for _ in range(4))  # 16 rules per call
     calls = f'prefix_rule(pattern=[{small}], decision="allow")\n' * 125  # 2,000 rules
     assert len(parse_rules_text(calls, CODEX)) == 2000
+
+
+@pytest.mark.parametrize(
+    ("raw", "worst"),
+    [("Bash(gh release -R owner/repo *)", "high"), ("Bash(git submodule --quiet *)", "critical")],
+)
+def test_options_between_subcommand_words_do_not_hide_reach(raw: str, worst: str) -> None:
+    assert _worst(raw) == worst
+
+
+def test_codex_prefix_with_an_option_between_subcommands_is_rated_like_the_subcommand() -> None:
+    [rule] = parse_rules_text(
+        'prefix_rule(pattern=["gh", "release", "-R", "o/r"], decision="allow")', CODEX
+    )
+    severities = {f.effective_severity for f in engine.analyze_rule(rule, load_kb())}
+    assert "high" in severities
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        'r = prefix_rule\nr(pattern=["bash"], decision="allow")',
+        'prefix_rule(**{"pattern": ["bash"], "decision": "allow"})',
+        'prefix_rule(*[["bash"]])',
+        'prefix_rule(pattern=("bash",), decision="allow")',
+        'prefix_rule(pattern=["bash"], decision="maybe")',
+        'prefix_rule(pattern=["bash"], decision="allow", sneaky=1)',
+        'prefix_rule(pattern=["git", []], decision="allow")',
+        f'prefix_rule(pattern=[0x{"f" * 4000}], decision="allow")',
+        'for _ in range(1):\n    prefix_rule(pattern=["bash"], decision="allow")',
+        'other_rule(pattern=["bash"])',
+    ],
+)
+def test_rule_shapes_that_could_hide_an_allow_rule_refuse_the_file(text: str) -> None:
+    with pytest.raises(RulesParseError):
+        parse_rules_text(text, CODEX)
+
+
+def test_a_plain_rules_file_with_a_docstring_and_justification_is_read() -> None:
+    text = (
+        '"""Project rules."""\n'
+        'prefix_rule(pattern=["git", "status"], decision="allow", justification="read only")\n'
+        'prefix_rule(["npm", "publish"], decision="forbidden")\n'
+    )
+    assert [r.specifier for r in parse_rules_text(text, CODEX)] == ["git status", "npm publish"]
