@@ -315,6 +315,37 @@ What does fail closed: a program the knowledge base does not know is reported as
 2,000 rules, or that cannot be parsed, is reported as unreadable; and aliased or oversized
 skill frontmatter is reported as unreadable.
 
+## Agent Config Guard and Swallowed checks (experimental)
+
+The pull request checks in `agent_permission_diff_bot.checks` (part of the unreleased GitHub
+App) are **experimental**. Known gaps, tracked in
+[#60](https://github.com/saagpatel/agent-permission-diff-bot/issues/60):
+
+- Skill frontmatter is loaded with YAML merge-key aliases resolved, so a small hostile file
+  can expand before the size checks run. Until analysis runs inside `run_limited`, treat a
+  check that does not finish as a failure (Config Guard already concludes `failure`).
+- Skip-check instructions are found in added lines; a weakening edited into one line of a
+  hard-wrapped sentence, or two instructions in one line where the first is negated, can
+  be missed.
+- Swallowed does not yet report flag assignments inside promise `.catch()` handlers.
+- Known false positives: invalid-YAML skill frontmatter with no tools line, unreadable
+  rule files the PR did not touch, and a subagent's `tools:` restriction read as an allow
+  rule. `@mentions` in quoted PR text are not escaped.
+
+## Analysis containment (experimental)
+
+`agent_permission_diff_bot.limited.run_limited` runs a function in a freshly spawned child
+process under one deadline, a memory cap (`RLIMIT_AS`, enforced on Linux only) and a
+bounded JSON result (8 MiB, 200 levels deep by default), so hostile pull request input can
+exhaust only the child. It is **experimental** and not yet wired into the GitHub App.
+Known limits, tracked in the follow-up issue linked from its pull request:
+
+- The deadline is only as strong as Python threads allow: argument encoding and the
+  child's start-up run in a helper thread, and work that cannot be interrupted there can
+  keep the caller waiting until the shutdown grace period ends.
+- On macOS and Windows there is no enforced memory cap; only the deadline bounds the child.
+- Results come back as plain JSON data; callers convert them to their own types.
+
 ## GitHub Action
 
 The composite action expects the repository to be checked out with enough history to
