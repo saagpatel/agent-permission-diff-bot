@@ -253,3 +253,20 @@ def test_guard_paths() -> None:
     assert is_guard_path(".claude/skills/deploy/SKILL.md")
     assert is_guard_path(".codex/rules/default.rules")
     assert not is_guard_path("src/app.py")
+
+
+def test_exponential_codex_union_is_refused_not_expanded() -> None:
+    union = ", ".join('["a", "b"]' for _ in range(40))
+    head = {".codex/rules/bomb.rules": f'prefix_rule(pattern=[{union}], decision="allow")\n'}
+    [finding] = run_config_guard({}, head).findings
+    assert finding.rule_id == "CG007"
+
+
+def test_yaml_alias_bomb_in_skill_frontmatter_is_refused_not_expanded() -> None:
+    lines = ['a: &a ["lol","lol","lol","lol","lol","lol","lol","lol","lol"]']
+    for prev, name in zip("abcdefgh", "bcdefghi", strict=True):
+        lines.append(f"{name}: &{name} [{', '.join(f'*{prev}' for _ in range(9))}]")
+    lines.append("allowed-tools: [*i]")
+    head = {".claude/skills/bomb/SKILL.md": "---\n" + "\n".join(lines) + "\n---\nHi.\n"}
+    [finding] = run_config_guard({}, head).findings
+    assert finding.rule_id == "CG007"

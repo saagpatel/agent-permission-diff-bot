@@ -637,6 +637,9 @@ def _unreadable_rules(path: str) -> CheckFinding:
     )
 
 
+MAX_FRONTMATTER_CHARS = 64 * 1024
+MAX_TOOL_ENTRIES = 500
+MAX_TOOL_CHARS = 2000
 _TOOLS_LINE_RE = re.compile(r"^(allowed-tools|tools):\s*(?P<value>.+)$", re.MULTILINE)
 
 
@@ -647,6 +650,8 @@ def _frontmatter_rules(text: str, path: str) -> list[Rule] | None:
     parts = text.split("---", 2)
     if len(parts) < 3:
         return []
+    if len(parts[1]) > MAX_FRONTMATTER_CHARS:
+        return None
     source = Source("claude", "skill allowed-tools", path, path)
     try:
         data = yaml.safe_load(parts[1])
@@ -657,7 +662,19 @@ def _frontmatter_rules(text: str, path: str) -> list[Rule] | None:
     if not isinstance(data, Mapping):
         return None if data is not None else []
     value = data.get("allowed-tools", data.get("tools"))
-    return parse_allowed_tools(value, source) if value else []
+    if not value:
+        return []
+    # Only plain strings are read. YAML aliases can make a tiny file stand for a huge
+    # nested list; anything that is not a short string or flat list of short strings is
+    # reported as unreadable instead of being expanded.
+    items = [value] if isinstance(value, str) else value
+    if (
+        not isinstance(items, list)
+        or len(items) > MAX_TOOL_ENTRIES
+        or not all(isinstance(item, str) and len(item) <= MAX_TOOL_CHARS for item in items)
+    ):
+        return None
+    return parse_allowed_tools(value, source)
 
 
 def _codex_rules(text: str, path: str) -> list[Rule]:
