@@ -412,4 +412,3 @@ def _reorder_example(fixed: tuple[str, ...]) -> str:
         rest[0] = "-" + flags[::-1]
         return " ".join((prog, *rest))
     return " ".join((prog, "-R" if prog in ("chmod", "chown") else "-v", *rest))
-

@@ -14,6 +14,7 @@ Local patches:
 - `sources.py`: replaced by the two documentation constants `engine.py`
   imports. Upstream `sources.py` reads local agent configuration and is not
   vendored.
+- Trailing blank lines at end of file are removed so `git diff --check` stays clean.
 
 Formatting and lint are excluded for this directory so a re-sync stays a plain
 copy. To re-sync, copy the files above from upstream and reapply the two patches.
