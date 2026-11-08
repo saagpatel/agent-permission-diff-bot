@@ -52,6 +52,7 @@ def test_skip_instructions_are_reported(line: str) -> None:
         "Never skip and bypass nor disable hooks.",
         "Pass --no-skip-hooks so the hooks run.",
         "Never use `--no-verify` or `--skip-hooks`.",
+        "Never pass --skip.",
         "Never pass --skip, even for the tests.",
         "Never pass `--skip` to the tests.",
     ],
