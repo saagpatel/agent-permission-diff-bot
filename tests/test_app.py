@@ -504,10 +504,12 @@ def test_runs_for_one_pull_request_queue_instead_of_parking_threads() -> None:
     worker.start()
     assert started.wait(5)
     began = time.monotonic()
-    assert runs.submit((1, 1), ("b", "main"), lambda: order.append("second")) is False
-    assert runs.submit((1, 1), ("b", "main"), lambda: order.append("second again")) is False
+    queued = runs.submit((1, 1), ("b", "main"), lambda: order.append("second"))
+    queued_again = runs.submit((1, 1), ("b", "main"), lambda: order.append("second again"))
+    assert queued is False and queued_again is False
     assert time.monotonic() - began < 1, "a busy pull request never blocks the caller"
-    assert runs.submit((1, 2), ("c", "main"), lambda: order.append("other PR")) is True
+    ran_now = runs.submit((1, 2), ("c", "main"), lambda: order.append("other PR"))
+    assert ran_now is True
     release.set()
     worker.join(5)
     assert order == ["other PR", "first", "second again"]
