@@ -21,7 +21,7 @@ from agent_permission_diff_bot.checks.swallowed import (
     PYTHON_SUFFIXES,
     TS_SUFFIXES,
     ChangedFile,
-    added_lines_from_patch,
+    changed_lines_from_patch,
 )
 from agent_permission_diff_bot.persistence import (
     ConfigCache,
@@ -200,8 +200,8 @@ def _swallowed_files(
         if not patch:
             skipped_patch += 1
             continue
-        added = added_lines_from_patch(str(patch))
-        if not added:
+        changed = changed_lines_from_patch(str(patch))
+        if not changed:
             continue
         if len(out) >= MAX_SWALLOWED_FILES:
             notes.append(f"Only the first {MAX_SWALLOWED_FILES} changed source files were scanned.")
@@ -210,7 +210,8 @@ def _swallowed_files(
         if size > MAX_FILE_BYTES:
             notes.append(f"`{path}` is over 1 MiB and was not scanned.")
             continue
-        out.append(ChangedFile(path=path, text=repo.blob_text(str(item["sha"])), added=added))
+        text = repo.blob_text(str(item["sha"]))
+        out.append(ChangedFile(path=path, text=text, changed=changed))
     if skipped_patch:
         notes.append(
             f"{skipped_patch} source file(s) had no patch from GitHub (too large) "
