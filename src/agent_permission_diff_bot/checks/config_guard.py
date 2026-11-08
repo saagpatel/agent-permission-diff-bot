@@ -79,7 +79,7 @@ _MODE_TEXT = {
 _SKIP_CHECK_RE = re.compile(
     r"(\b(skip|bypass|ignore|disable|avoid|suppress|silence)\b|\bdo(n'?t| not)\s+run\b|"
     r"\bnever\s+run\b|\bno need to (run|wait for)\b|\bwithout (running|waiting for)\b)"
-    r"(?:[^.!?;\n]|\.(?=\S)){0,60}\b(tests?|reviews?|approvals?|secrets?|permissions?|polic(y|ies)|"
+    r"(?:[^.!?;\n]|\.(?=\S)){0,60}?\b(tests?|reviews?|approvals?|secrets?|permissions?|polic(y|ies)|"
     r"guard(rail)?s?|hooks?|checks?|lint\w*|ci|type.?check\w*|verification|pre-commit)\b"
     r"|--no-verify\b|--dangerously-skip-permissions\b",
     re.IGNORECASE,
@@ -644,7 +644,9 @@ def _negated(text: str, match: re.Match[str]) -> bool:
     return bool(_NEGATOR_RE.search(before))
 
 
-_ABBREVIATIONS = re.compile(r"\b(e\.g\.|i\.e\.|etc\.|vs\.)", re.IGNORECASE)
+# `etc.` often ends a sentence, so it is read through only when a lowercase word follows.
+_ABBREVIATIONS = re.compile(r"\b((?i:e\.g\.|i\.e\.|vs\.)|etc\.(?=\s+[a-z]))")
+_HEADING_RE = re.compile(r"^\s*#{1,6}\s")
 _QUOTE_RE = re.compile(r"^\s*(>\s?)+")
 _BLOCK_START_RE = re.compile(r"^\s*([-*+]\s|\d+[.)]\s|#{1,6}\s|>|\|)")
 
@@ -654,7 +656,7 @@ def _added_passages(lines: list[str], added: set[int]) -> Iterable[tuple[int, st
 
     Instructions are often hard-wrapped, so a sentence edited on one line (`Always run the`
     becoming `Always skip the`) only reads as a skip instruction with its unchanged
-    continuation lines. Each unit (a bullet, heading or wrapped paragraph) holding an added
+    continuation lines. Each unit (a bullet, a heading or a wrapped paragraph) holding an added
     line is matched as one text; a match is reported when it covers an added line, so
     untouched instructions stay quiet and neighbouring bullets never merge.
     """
@@ -665,7 +667,12 @@ def _added_passages(lines: list[str], added: set[int]) -> Iterable[tuple[int, st
         # A bullet, heading, quote or table row starts its own unit; only wrapped
         # continuation lines join the unit above them. Inside a blockquote the `>` marker
         # is read past, so a wrapped quoted sentence is one unit too.
-        continues = paragraphs and paragraphs[-1][-1] == number - 1
+        # A heading is a whole unit: the line after it starts a new one.
+        continues = (
+            paragraphs
+            and paragraphs[-1][-1] == number - 1
+            and not _HEADING_RE.match(lines[number - 2])
+        )
         quoted = continues and _QUOTE_RE.match(line) and _QUOTE_RE.match(lines[number - 2])
         if quoted:
             continues = not _BLOCK_START_RE.match(_QUOTE_RE.sub("", line, count=1))
@@ -686,7 +693,11 @@ def _added_passages(lines: list[str], added: set[int]) -> Iterable[tuple[int, st
         reported: set[int] = set()
         # "e.g." and "i.e." do not end a sentence; same-length stand-ins keep offsets exact.
         searchable = _ABBREVIATIONS.sub(lambda m: m.group(0).replace(".", "_"), text)
-        for match in _SKIP_CHECK_RE.finditer(searchable):
+        # The gap to the target word is lazy, and the next search starts one character in,
+        # so a negated or unchanged match never hides a skip clause that follows it.
+        position = 0
+        while match := _SKIP_CHECK_RE.search(searchable, position):
+            position = match.start() + 1
             if _negated(searchable, match):
                 continue
             covered = [n for s, e, n in spans if s < match.end() and e > match.start()]

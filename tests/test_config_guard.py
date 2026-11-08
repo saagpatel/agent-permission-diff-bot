@@ -517,3 +517,33 @@ def test_deleting_rules_from_a_file_the_parser_refuses_fails_closed(head_text: s
     head = {} if head_text is None else {path: head_text}
     found = run_config_guard(base, head).findings
     assert any(f.rule_id == "CG007" and "previous" in f.title for f in found)
+
+
+def test_an_unchanged_negated_clause_does_not_hide_an_edited_one_after_a_comma() -> None:
+    base = {"AGENTS.md": "# Rules\nNever skip lint when you push,\nand always run the tests.\n"}
+    head = {"AGENTS.md": "# Rules\nNever skip lint when you push,\nand skip the tests.\n"}
+    [finding] = run_config_guard(base, head).findings
+    assert finding.rule_id == "CG006" and finding.line == 3
+
+
+def test_a_negated_match_is_searched_again_from_inside() -> None:
+    head = {"AGENTS.md": "# Rules\nNever skip anything, skip the tests.\n"}
+    [finding] = run_config_guard({"AGENTS.md": "# Rules\n"}, head).findings
+    assert finding.rule_id == "CG006"
+
+
+def test_a_heading_does_not_absorb_the_line_below_it() -> None:
+    base = {"AGENTS.md": "## Never skip lint\n"}
+    head = {"AGENTS.md": "## Never skip lint\nSkip the tests for docs.\n"}
+    [finding] = run_config_guard(base, head).findings
+    assert finding.line == 2 and "“Skip the tests for docs.”" in finding.allows[0]
+    base = {"AGENTS.md": "## Skip lint\n"}
+    head = {"AGENTS.md": "## Skip lint\nRun the tests.\n"}
+    assert run_config_guard(base, head).findings == []
+
+
+def test_etc_at_the_end_of_a_sentence_ends_it() -> None:
+    head = {"AGENTS.md": "# R\nAvoid big PRs, renames etc. Run the tests.\n"}
+    assert run_config_guard({"AGENTS.md": "# R\n"}, head).findings == []
+    head = {"AGENTS.md": "# R\nNever ignore warnings etc. Skip the tests.\n"}
+    assert len(run_config_guard({"AGENTS.md": "# R\n"}, head).findings) == 1

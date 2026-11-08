@@ -608,8 +608,32 @@ def _ts_plain_assignment(statement: Any, *forbidden: str) -> bool:
     expressions = [c for c in statement.named_children if c.type != "comment"]
     if len(expressions) != 1 or expressions[0].type != "assignment_expression":
         return False
+    left = expressions[0].child_by_field_name("left")
     right = expressions[0].child_by_field_name("right")
-    return right is not None and _ts_plain(right, *forbidden)
+    return (
+        left is not None
+        and _ts_plain_target(left, *forbidden)
+        and right is not None
+        and _ts_plain(right, *forbidden)
+    )
+
+
+def _ts_plain_target(node: Any, *forbidden: str) -> bool:
+    """`ok`, `this.failed` or `state.last.ok`: no call, and the caught error is not used."""
+    if node.type == "identifier":
+        return _text(node) not in forbidden
+    if node.type == "this":
+        return True
+    if node.type == "member_expression":
+        target = node.child_by_field_name("object")
+        prop = node.child_by_field_name("property")
+        return (
+            target is not None
+            and prop is not None
+            and prop.type == "property_identifier"
+            and _ts_plain_target(target, *forbidden)
+        )
+    return False
 
 
 def _ts_handler_swallows(handler: Any) -> bool:

@@ -289,3 +289,15 @@ def test_promise_catch_that_only_sets_a_flag_swallows() -> None:
 
 def test_promise_catch_that_stores_the_error_keeps_it() -> None:
     assert scan("web/x.ts", "fetch(url).catch((e) => { lastError = e; });\n") == []
+
+
+@pytest.mark.parametrize(
+    "handler", ["(e) => { recordError(e).acknowledged = true; }", "(e) => { e.seen = true; }"]
+)
+def test_promise_catch_whose_target_uses_the_error_keeps_it(handler: str) -> None:
+    assert scan("web/x.ts", f"fetch(url).catch({handler});\n") == []
+
+
+def test_promise_catch_that_sets_a_member_flag_swallows() -> None:
+    found = scan("web/x.ts", "fetch(url).catch(() => { this.state.failed = true; });\n")
+    assert [r[0] for r in found] == ["SW-network"]
