@@ -28,6 +28,7 @@ import multiprocessing as mp
 import pickle
 import re
 import threading
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -128,14 +129,27 @@ def _child(
         result_conn.close()
 
 
-def call_within(timeout_s: float, work: Callable[[], bytes], stop: Callable[[], None]) -> bytes:
+def call_within(
+    timeout_s: float,
+    work: Callable[[], bytes],
+    stop: Callable[[], None],
+    *,
+    started: float | None = None,
+    io_state: dict[str, bool] | None = None,
+) -> bytes:
     """Run blocking pipe I/O under one deadline, without leaving it running afterwards.
 
-    ``work`` runs in a helper thread. If it has not finished by ``timeout_s``, ``stop`` is
-    called (it must make ``work``'s pending read or write fail, for example by killing the
-    child) and the helper thread is joined before this returns, so no read can land on a
-    file descriptor the caller closes and the OS reuses.
+    The deadline is ``started + timeout_s`` (``started`` defaults to now, on the monotonic
+    clock), and a result that arrives after it is a timeout too: a helper thread holding
+    the interpreter lock can delay this thread past the deadline, so finishing is not
+    enough. ``work`` runs in the helper thread. On a timeout, or if this thread is
+    interrupted while waiting (``KeyboardInterrupt``, a signal handler's ``SystemExit``),
+    ``stop`` is called (it must make ``work``'s pending read or write fail, for example by
+    killing the child) and the helper thread is joined. ``io_state["running"]`` says
+    whether it is still running afterwards; if it is, its pipes must not be closed.
     """
+    deadline = (time.monotonic() if started is None else started) + timeout_s
+    state = {} if io_state is None else io_state
     box: dict[str, Any] = {}
 
     def run() -> None:
@@ -145,15 +159,29 @@ def call_within(timeout_s: float, work: Callable[[], bytes], stop: Callable[[], 
             box["error"] = exc
 
     worker = threading.Thread(target=run, name="run-limited-io", daemon=True)
+    state["running"] = True
     worker.start()
-    worker.join(timeout_s)
-    if worker.is_alive():
-        stop()
-        worker.join(_SHUTDOWN_GRACE_S)
+    try:
+        worker.join(max(0.0, deadline - time.monotonic()))
         if worker.is_alive():
-            raise _IOStillRunningError(
-                f"timed out after {timeout_s:g}s and the child could not be stopped"
-            )
+            stop()
+            worker.join(_SHUTDOWN_GRACE_S)
+            if worker.is_alive():
+                raise _IOStillRunningError(
+                    f"timed out after {timeout_s:g}s and the child could not be stopped"
+                )
+            raise LimitExceededError(f"timed out after {timeout_s:g}s")
+    except BaseException as exc:
+        # An interrupt while waiting must not leave the I/O running behind the caller's
+        # cleanup. The timeout paths above already stopped it.
+        if not isinstance(exc, LimitExceededError) and worker.is_alive():
+            stop()
+            worker.join(_SHUTDOWN_GRACE_S)
+        raise
+    finally:
+        state["running"] = worker.is_alive()
+    if time.monotonic() > deadline:
+        stop()
         raise LimitExceededError(f"timed out after {timeout_s:g}s")
     if "error" in box:
         error = box["error"]
@@ -180,9 +208,17 @@ def run_limited(
     ``ChildStartError`` when the host cannot start the child; and ``RuntimeError`` when
     ``fn`` raised or returned something that is not JSON data.
     """
+    started = time.monotonic()
     ctx = mp.get_context("spawn")
-    args_reader, args_writer = ctx.Pipe(duplex=False)
-    result_reader, result_writer = ctx.Pipe(duplex=False)
+    pipes: list[Any] = []
+    try:
+        for _ in range(2):
+            pipes.extend(ctx.Pipe(duplex=False))
+    except OSError as exc:
+        for conn in pipes:
+            conn.close()
+        raise ChildStartError(f"could not create pipes for the analysis process: {exc}") from exc
+    args_reader, args_writer, result_reader, result_writer = pipes
     proc = ctx.Process(
         target=_child,
         args=(args_reader, result_writer, fn, memory_bytes, max_result_bytes),
@@ -214,20 +250,17 @@ def run_limited(
         if proc.pid is not None:
             proc.kill()
 
-    io_finished = True
+    io_state: dict[str, bool] = {}
     try:
-        data = call_within(timeout_s, work, stop)
-    except _IOStillRunningError:
-        # Leak the pipes rather than close a descriptor a live thread may still read.
-        io_finished = False
-        raise
+        data = call_within(timeout_s, work, stop, started=started, io_state=io_state)
     finally:
         if proc.pid is not None:
             if proc.is_alive():
                 proc.kill()
             proc.join(_SHUTDOWN_GRACE_S)
-        if io_finished:
-            for conn in (args_reader, args_writer, result_reader, result_writer):
+        # Leak the pipes rather than close a descriptor a live I/O thread may still read.
+        if not io_state.get("running", False):
+            for conn in pipes:
                 conn.close()
     try:
         message = json.loads(data)

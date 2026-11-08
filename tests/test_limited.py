@@ -249,3 +249,57 @@ def test_a_host_that_cannot_start_the_child_is_not_a_verdict(
     monkeypatch.setattr(SpawnProcess, "start", refuse)
     with pytest.raises(ChildStartError, match="could not start"):
         run_limited(_double, 1)
+
+
+def test_a_result_that_arrives_after_the_deadline_is_a_timeout() -> None:
+    # sum() over a range runs in C and keeps the interpreter lock, so this thread cannot
+    # reach its wait before the deadline; finishing late must still be a timeout.
+    def hold_the_lock() -> bytes:
+        sum(range(30_000_000))
+        return b"late"
+
+    stopped: list[bool] = []
+    with pytest.raises(LimitExceededError, match="timed out"):
+        call_within(0.01, hold_the_lock, lambda: stopped.append(True))
+    assert stopped == [True]
+
+
+def test_pipe_creation_failure_is_a_start_error_and_closes_what_was_made(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from multiprocessing.context import BaseContext
+
+    original = BaseContext.Pipe
+    made: list[Any] = []
+
+    def flaky_pipe(self: BaseContext, duplex: bool = True) -> Any:
+        if made:
+            raise OSError(24, "Too many open files")
+        pair = original(self, duplex)
+        made.extend(pair)
+        return pair
+
+    monkeypatch.setattr(BaseContext, "Pipe", flaky_pipe)
+    with pytest.raises(ChildStartError, match="could not create pipes"):
+        run_limited(_double, 1)
+    assert made and all(conn.closed for conn in made)
+
+
+def test_an_interrupt_while_waiting_stops_the_io_first(monkeypatch: pytest.MonkeyPatch) -> None:
+    reader, writer = _pipe()
+    original_join = threading.Thread.join
+    calls = {"n": 0}
+
+    def interrupted_join(self: threading.Thread, timeout: float | None = None) -> None:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise KeyboardInterrupt
+        original_join(self, timeout)
+
+    monkeypatch.setattr(threading.Thread, "join", interrupted_join)
+    io_state: dict[str, bool] = {}
+    with pytest.raises(KeyboardInterrupt):
+        call_within(10, lambda: reader.recv_bytes(1000), writer.close, io_state=io_state)
+    monkeypatch.undo()
+    assert io_state["running"] is False, "the reader stopped before control returned"
+    reader.close()
