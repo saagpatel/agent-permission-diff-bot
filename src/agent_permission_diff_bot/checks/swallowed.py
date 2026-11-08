@@ -601,7 +601,8 @@ def _ts_catch(changed: ChangedFile, node: Any, protected: Any, caught: str) -> _
 
 def _ts_block_swallows(block: Any, clause: Any) -> bool:
     param = clause.child_by_field_name("parameter")
-    param_name = _text(param) if param is not None and param.type == "identifier" else ""
+    # Every name the parameter binds, so `catch ({ message }) { last = message; }` keeps it.
+    names = sorted(_ts_identifiers(param)) if param is not None else []
     for statement in block.named_children:
         if statement.type in {"comment", "empty_statement"}:
             continue
@@ -609,9 +610,9 @@ def _ts_block_swallows(block: Any, clause: Any) -> bool:
             continue
         if statement.type == "return_statement":
             values = [c for c in statement.named_children if c.type != "comment"]
-            if not values or _ts_plain(values[0], param_name):
+            if not values or _ts_plain(values[0], *names):
                 continue
-        if statement.type == "expression_statement" and _ts_plain_assignment(statement, param_name):
+        if statement.type == "expression_statement" and _ts_plain_assignment(statement, *names):
             continue
         return False
     return True
@@ -620,16 +621,26 @@ def _ts_block_swallows(block: Any, clause: Any) -> bool:
 def _ts_plain_assignment(statement: Any, *forbidden: str) -> bool:
     """`ok = false;` or `this.failed = true;`: a flag set, the error itself dropped."""
     expressions = [c for c in statement.named_children if c.type != "comment"]
-    if len(expressions) != 1 or expressions[0].type != "assignment_expression":
-        return False
-    left = expressions[0].child_by_field_name("left")
-    right = expressions[0].child_by_field_name("right")
-    return (
-        left is not None
-        and _ts_plain_target(left, *forbidden)
-        and right is not None
-        and _ts_plain(right, *forbidden)
-    )
+    return len(expressions) == 1 and _ts_flag_set(expressions[0], *forbidden)
+
+
+def _ts_flag_set(node: Any, *forbidden: str) -> bool:
+    """`ok = false`, `failed ||= true`, `errors += 1` or `errors++` on a plain target."""
+    while node.type == "parenthesized_expression" and node.named_children:
+        node = node.named_children[0]
+    if node.type in {"assignment_expression", "augmented_assignment_expression"}:
+        left = node.child_by_field_name("left")
+        right = node.child_by_field_name("right")
+        return (
+            left is not None
+            and _ts_plain_target(left, *forbidden)
+            and right is not None
+            and _ts_plain(right, *forbidden)
+        )
+    if node.type == "update_expression":
+        argument = node.child_by_field_name("argument")
+        return argument is not None and _ts_plain_target(argument, *forbidden)
+    return False
 
 
 _TS_WRAPPERS = frozenset(
@@ -691,7 +702,8 @@ def _ts_handler_swallows(handler: Any) -> bool:
                     continue
                 return False
             return True
-        return _ts_plain(body, *names)
+        # `() => null` or a flag set as the whole body: `() => (failed = true)`
+        return _ts_plain(body, *names) or _ts_flag_set(body, *names)
     return handler.type == "identifier" and _text(handler) in {"noop", "_noop", "ignore"}
 
 
@@ -715,7 +727,8 @@ def _ts_identifiers(node: Any) -> set[str]:
     stack = [node]
     while stack:
         current = stack.pop()
-        if current.type == "identifier":
+        # `{ message }` in a destructured parameter binds `message` too.
+        if current.type in {"identifier", "shorthand_property_identifier_pattern"}:
             found.add(_text(current))
         stack.extend(current.children)
     return found

@@ -160,8 +160,9 @@ def call_within(
 
     worker = threading.Thread(target=run, name="run-limited-io", daemon=True)
     state["running"] = True
-    worker.start()
     try:
+        # Started inside the try, so an interrupt that lands right after it still stops it.
+        worker.start()
         worker.join(max(0.0, deadline - time.monotonic()))
         if worker.is_alive():
             stop()

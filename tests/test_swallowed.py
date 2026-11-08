@@ -344,3 +344,29 @@ def test_python_nested_too_deeply_to_parse_is_refused_not_unfinished() -> None:
     result = scan_swallowed([ChangedFile("deep.py", text, frozenset(range(1, 6)))])
     assert not result.crashed and result.findings == []
     assert any("not scanned" in note for note in result.notes)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "p.catch(() => (failed = true));\n",
+        "p.catch(() => failed = true);\n",
+        "try { f(); } catch (e) { failed ||= true; }\n",
+        "try { f(); } catch (e) { errors += 1; }\n",
+        "try { f(); } catch (e) { errors++; }\n",
+    ],
+)
+def test_expression_body_and_compound_flag_sets_swallow(source: str) -> None:
+    assert len(scan("web/x.ts", source)) == 1
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "try { f(); } catch ({ message }) { last = message; }\n",
+        "try { f(); } catch (e) { counts[e.code]++; }\n",
+        "p.catch((e) => (last = e));\n",
+    ],
+)
+def test_a_flag_set_that_uses_the_error_keeps_it(source: str) -> None:
+    assert scan("web/x.ts", source) == []
