@@ -55,12 +55,16 @@ class AppSettings:
             api_url=env.get("APDB_GITHUB_API_URL", DEFAULT_API_URL).rstrip("/"),
             guard_fail_on=parse_fail_on(env.get("APDB_GUARD_FAIL_ON", "high")),
             swallowed_fail_on=parse_fail_on(env.get("APDB_SWALLOWED_FAIL_ON", "never")),
-            analysis_timeout_s=_positive(env, "APDB_ANALYSIS_TIMEOUT_S", 60.0),
-            analysis_memory_mb=_whole(env, "APDB_ANALYSIS_MEMORY_MB", 1024, minimum=256),
+            analysis_timeout_s=_positive(env, "APDB_ANALYSIS_TIMEOUT_S", 60.0, maximum=3600.0),
+            analysis_memory_mb=_whole(
+                env, "APDB_ANALYSIS_MEMORY_MB", 1024, minimum=256, maximum=1024 * 1024
+            ),
         )
 
 
-def _positive(env: Mapping[str, str], name: str, default: float) -> float:
+def _positive(
+    env: Mapping[str, str], name: str, default: float, *, maximum: float = math.inf
+) -> float:
     raw = env.get(name, "").strip()
     if not raw:
         return default
@@ -70,11 +74,13 @@ def _positive(env: Mapping[str, str], name: str, default: float) -> float:
         raise SettingsError(f"{name} must be a positive number.") from exc
     if not math.isfinite(value) or value <= 0:
         raise SettingsError(f"{name} must be a positive, finite number.")
+    if value > maximum:
+        raise SettingsError(f"{name} must be at most {maximum:g}.")
     return value
 
 
-def _whole(env: Mapping[str, str], name: str, default: int, *, minimum: int) -> int:
-    value = _positive(env, name, float(default))
+def _whole(env: Mapping[str, str], name: str, default: int, *, minimum: int, maximum: int) -> int:
+    value = _positive(env, name, float(default), maximum=float(maximum))
     if not value.is_integer() or value < minimum:
         raise SettingsError(f"{name} must be a whole number of at least {minimum}.")
     return int(value)

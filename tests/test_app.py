@@ -848,6 +848,8 @@ def test_malformed_results_are_refused(data: dict[str, object]) -> None:
         ("APDB_ANALYSIS_MEMORY_MB", "0.5"),
         ("APDB_ANALYSIS_MEMORY_MB", "32"),
         ("APDB_ANALYSIS_MEMORY_MB", "128"),
+        ("APDB_ANALYSIS_MEMORY_MB", "2000000"),
+        ("APDB_ANALYSIS_TIMEOUT_S", "1e10"),
     ],
 )
 def test_analysis_limits_must_be_sane(tmp_path: Path, name: str, value: str) -> None:
@@ -947,3 +949,49 @@ def test_running_out_of_memory_in_one_check_is_not_a_single_check_crash(
     monkeypatch.setattr(analysis, "scan_swallowed", exhausted)
     with pytest.raises(MemoryError):
         analysis.analyze({}, {}, [])
+
+
+@pytest.mark.parametrize("target", ["startup-config", "rules"])
+def test_running_out_of_memory_inside_a_parser_ends_the_analysis(
+    monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    import ast
+
+    from agent_permission_diff_bot import persistence
+    from agent_permission_diff_bot.app import analysis
+
+    def exhausted(*args: object, **kwargs: object) -> object:
+        raise MemoryError
+
+    if target == "startup-config":
+        monkeypatch.setattr(persistence.json, "loads", exhausted)
+        head = {".claude/settings.json": "{}"}
+    else:
+        monkeypatch.setattr(ast, "parse", exhausted)
+        head = {".codex/rules/default.rules": "prefix_rule(pattern=['git'])\n"}
+    with pytest.raises(MemoryError):
+        analysis.analyze({}, head, [])
+
+
+@pytest.mark.parametrize("returned", ["start-error", "empty", "swapped"])
+def test_a_child_that_fails_or_answers_out_of_shape_leaves_both_checks_unfinished(
+    monkeypatch: pytest.MonkeyPatch, returned: str
+) -> None:
+    from agent_permission_diff_bot.app import analysis
+    from agent_permission_diff_bot.app.snapshot import PullInputs
+    from agent_permission_diff_bot.checks.render import conclusion
+    from agent_permission_diff_bot.limited import ChildStartError
+
+    def fake(*args: object, **kwargs: object) -> object:
+        if returned == "start-error":
+            raise ChildStartError("could not start the analysis process: EAGAIN")
+        if returned == "empty":
+            return []
+        guard, swallowed = analysis.analyze({}, {}, [])
+        return [asdict(swallowed), asdict(guard)]
+
+    monkeypatch.setattr(analysis, "run_limited", fake)
+    inputs = PullInputs(base_files={}, head_files={}, swallowed_files=[])
+    guard, swallowed = analysis.run_analysis(inputs, analysis.AnalysisLimits())
+    assert guard.crashed and swallowed.crashed
+    assert conclusion(guard, None) == "failure"

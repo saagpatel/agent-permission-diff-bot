@@ -23,7 +23,7 @@ class RulesParseError(ValueError):
 def parse_rules_text(text: str, source: Source) -> list[Rule]:
     try:
         tree = ast.parse(text, filename=source.label)
-    except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
+    except (SyntaxError, ValueError, RecursionError) as exc:
         raise RulesParseError(f"{source.label}: not parseable as rules: {getattr(exc, 'msg', type(exc).__name__)} (line {getattr(exc, 'lineno', '?')})") from exc
     rules: list[Rule] = []
     # Local patch: rules files can come from pull requests, and Codex reads them as
@@ -60,7 +60,7 @@ def _rules_from_call(node: ast.Call, source: Source, already: int) -> list[Rule]
         pattern = ast.literal_eval(pattern_node)
         decision_raw = ast.literal_eval(kwargs["decision"]) if "decision" in kwargs else "allow"
         extras = {key: ast.literal_eval(kwargs[key]) for key in ("justification", "match", "not_match") if key in kwargs}
-    except (ValueError, TypeError, SyntaxError, RecursionError, MemoryError) as exc:
+    except (ValueError, TypeError, SyntaxError, RecursionError) as exc:
         raise RulesParseError(f"{where}: non-literal rule field") from exc
     if "justification" in extras and not isinstance(extras["justification"], str):
         raise RulesParseError(f"{where}: justification must be a string")
