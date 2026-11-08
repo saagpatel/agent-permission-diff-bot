@@ -1,0 +1,47 @@
+{
+  "event": "pull_request",
+  "payload": {
+    "action": "opened",
+    "number": 6,
+    "pull_request": {
+      "number": 6,
+      "state": "open",
+      "title": "Docs tweak",
+      "draft": false,
+      "base": {
+        "ref": "main",
+        "sha": "8aa235a0ab18dcc4f89ef59470fb5950431e5dac",
+        "repo": {
+          "full_name": "octo-demo/guard-demo",
+          "id": 9001
+        }
+      },
+      "head": {
+        "ref": "risky-change",
+        "sha": "74c2d3f1bf9d478d44a3bd4a01611e0815d0ef2f",
+        "repo": {
+          "full_name": "octo-demo/guard-demo",
+          "id": 9001
+        }
+      }
+    },
+    "repository": {
+      "id": 9001,
+      "name": "guard-demo",
+      "full_name": "octo-demo/guard-demo",
+      "private": true,
+      "owner": {
+        "login": "octo-demo",
+        "type": "Organization"
+      }
+    },
+    "installation": {
+      "id": 4242,
+      "node_id": "MDIzOkludGVncmF0aW9uSW5zdGFsbGF0aW9uNDI0Mg=="
+    },
+    "sender": {
+      "login": "demo-author",
+      "type": "User"
+    }
+  }
+}
