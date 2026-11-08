@@ -51,6 +51,8 @@ class FakeGitHub:
     base_sha: str = ""
     head_sha: str = ""
     merge_base_sha: str = ""
+    # Like GitHub for a commit that only exists in a fork: the commit-to-PR lookup is empty.
+    fork_lookup_empty: bool = False
     check_runs: dict[int, dict[str, Any]] = field(default_factory=dict)
     comments: dict[int, dict[str, Any]] = field(default_factory=dict)
     requests: list[str] = field(default_factory=list)
@@ -123,6 +125,7 @@ class FakeGitHub:
         routes: list[tuple[str, str, Any]] = [
             ("GET", rf"/pulls/{self.number}/files", self._pull_files),
             ("GET", rf"/pulls/{self.number}", self._pull),
+            ("GET", r"/pulls", self._open_pulls),
             ("GET", r"/compare/(?P<base>[0-9a-f]+)\.\.\.(?P<head>[0-9a-f]+)", self._compare),
             ("GET", r"/commits/(?P<sha>[0-9a-f]+)/pulls", self._commit_pulls),
             ("GET", r"/git/trees/(?P<sha>[0-9a-f]+)", self._tree),
@@ -166,7 +169,12 @@ class FakeGitHub:
     def _merge_base(self) -> str:
         return self.merge_base_sha or self.base_sha
 
+    def _open_pulls(self, body: Any) -> httpx.Response:
+        return httpx.Response(200, json=[self.pull_request_payload()["pull_request"]])
+
     def _commit_pulls(self, body: Any, sha: str) -> httpx.Response:
+        if self.fork_lookup_empty:
+            return httpx.Response(200, json=[])
         if sha != self.head_sha:
             return httpx.Response(200, json=[])
         pull = self.pull_request_payload()["pull_request"]

@@ -46,56 +46,89 @@ class RunOutcome:
     results: list[CheckResult] = field(default_factory=list)
 
 
+class PayloadError(ValueError):
+    """A signed webhook whose payload is not shaped the way GitHub sends it."""
+
+
 def target_from_event(event: str, payload: Mapping[str, Any]) -> PullTarget | None:
     """The pull request an event asks us to check, or None when the event is not ours.
 
-    A re-run of a check from a fork arrives with no ``pull_requests``; the target then has
-    ``number == 0`` and its pull request is looked up by head commit (``resolve_target``).
+    Raises ``PayloadError`` for a payload of a handled event that is missing the fields
+    GitHub always sends, so the server can answer 400 instead of failing.
+
+    - ``pull_request`` opened, pushed to, reopened or marked ready; and ``edited`` when the
+      base branch changed, because the same head can widen permissions against a new base
+      while its old check run still says it passed.
+    - ``check_run`` / ``check_suite`` re-runs, for the commit whose check was re-run. A
+      re-run from a fork arrives with no ``pull_requests``; the target then has
+      ``number == 0`` and its pull request is looked up by that commit (``resolve_target``).
     """
     installation = payload.get("installation") or {}
     repository = payload.get("repository") or {}
+    if not isinstance(installation, Mapping) or not isinstance(repository, Mapping):
+        raise PayloadError("installation and repository must be objects")
     if not installation.get("id") or not repository.get("id"):
         return None
-    pull: Mapping[str, Any] | None = None
+    pull: Any = None
     head_sha = ""
-    if event == "pull_request" and payload.get("action") in PULL_REQUEST_ACTIONS:
-        pull = payload.get("pull_request")
-        if pull and pull.get("state") != "open":
+    action = payload.get("action")
+    if event == "pull_request":
+        changes = payload.get("changes") or {}
+        retargeted = action == "edited" and isinstance(changes, Mapping) and "base" in changes
+        if action not in PULL_REQUEST_ACTIONS and not retargeted:
             return None
-    elif event in {"check_run", "check_suite"} and payload.get("action") == "rerequested":
-        source = payload.get(event) or {}
+        pull = payload.get("pull_request")
+        if not isinstance(pull, Mapping):
+            raise PayloadError("pull_request must be an object")
+        if pull.get("state") != "open":
+            return None
+    elif event in {"check_run", "check_suite"} and action == "rerequested":
+        source = payload.get(event)
+        if not isinstance(source, Mapping):
+            raise PayloadError(f"{event} must be an object")
         if event == "check_run" and source.get("name") not in CHECK_NAMES.values():
             return None
-        suite = source.get("check_suite") or {} if event == "check_run" else source
+        suite = (source.get("check_suite") or {}) if event == "check_run" else source
         pulls = source.get("pull_requests") or suite.get("pull_requests") or []
-        pull = pulls[0] if pulls else None
+        pull = pulls[0] if isinstance(pulls, list) and pulls else None
+        # The commit whose check was clicked, not whatever the pull request points at now.
         head_sha = str(source.get("head_sha") or suite.get("head_sha") or "")
         if pull is None and not head_sha:
             return None
-    elif event != "pull_request":
+    else:
         return None
-    if not pull and not head_sha:
-        return None
-    owner = str(repository.get("owner", {}).get("login", ""))
-    name = str(repository.get("name", ""))
-    return PullTarget(
-        installation_id=int(installation["id"]),
-        repository_id=int(repository["id"]),
-        owner=owner,
-        name=name,
-        number=int(pull["number"]) if pull else 0,
-        base_sha=str(pull["base"]["sha"]) if pull else "",
-        head_sha=str(pull["head"]["sha"]) if pull else head_sha,
-    )
+    owner = repository.get("owner") or {}
+    try:
+        return PullTarget(
+            installation_id=int(installation["id"]),
+            repository_id=int(repository["id"]),
+            owner=str(owner.get("login", "")) if isinstance(owner, Mapping) else "",
+            name=str(repository.get("name", "")),
+            number=int(pull["number"]) if pull else 0,
+            base_sha=str(pull["base"]["sha"]) if pull else "",
+            head_sha=head_sha or str(pull["head"]["sha"]),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise PayloadError(f"pull request fields are missing or malformed: {exc}") from exc
 
 
 def resolve_target(repo: RepoClient, target: PullTarget) -> PullTarget | None:
-    """Fill in the open pull request for a re-run that arrived without one."""
+    """Fill in the open pull request for a re-run that arrived without one.
+
+    GitHub's commit-to-pull-request lookup can come back empty for a commit that only
+    exists in a fork, so the open pull requests are searched by head commit as well.
+    """
     if target.number:
         return target
-    for pull in repo.pulls_for_commit(target.head_sha):
-        if pull.get("state") == "open" and pull.get("head", {}).get("sha") == target.head_sha:
-            return replace(target, number=int(pull["number"]), base_sha=str(pull["base"]["sha"]))
+    for candidates in (
+        lambda: repo.pulls_for_commit(target.head_sha),
+        lambda: repo.open_pulls(),
+    ):
+        for pull in candidates():
+            if pull.get("state") == "open" and pull.get("head", {}).get("sha") == target.head_sha:
+                return replace(
+                    target, number=int(pull["number"]), base_sha=str(pull["base"]["sha"])
+                )
     return None
 
 
@@ -141,23 +174,45 @@ def run_checks(
         _fail_runs(repo, run_ids, exc)
         _report_unfinished(repo, target, ref, app_id, is_current, exc)
         raise
-    for result in results:
-        check = result.check
-        if result.crashed:
-            verdict = "failure" if check == "config-guard" else "neutral"
-        else:
-            verdict = conclusion(result, fail_on[check])
-        repo.complete_check_run(run_ids[check], verdict, render_check_output(result, ref))
-        outcome.conclusions[CHECK_NAMES[check]] = verdict
+    completed: set[CheckName] = set()
+    try:
+        for result in results:
+            check = result.check
+            if result.crashed:
+                verdict = "failure" if check == "config-guard" else "neutral"
+            else:
+                verdict = conclusion(result, fail_on[check])
+            repo.complete_check_run(run_ids[check], verdict, render_check_output(result, ref))
+            completed.add(check)
+            outcome.conclusions[CHECK_NAMES[check]] = verdict
+    except Exception as exc:
+        # Whatever failed to complete is marked failed, so nothing stays "in progress".
+        log.exception("Completing check runs for %s#%s failed", repo.full_name, target.number)
+        _fail_runs(repo, {c: i for c, i in run_ids.items() if c not in completed}, exc)
+        raise
     outcome.results = results
     body = render_comment(results, ref)
     outcome.comment_body = body
-    if not is_current():
+    if not _still_current(is_current):
         # A newer push arrived while this one ran; its run owns the comment.
         outcome.comment_action = "stale"
         return outcome
     outcome.comment_action = _upsert_comment(repo, target.number, body, app_id, results)
     return outcome
+
+
+def _still_current(is_current: Callable[[], bool]) -> bool:
+    """Whether this run's head is still the pull request's head.
+
+    If GitHub cannot say, the comment is written anyway: it names the commit it describes,
+    and a newer run (serialized behind this one) rewrites it, whereas skipping would leave
+    an older result standing next to these check runs.
+    """
+    try:
+        return is_current()
+    except Exception:
+        log.exception("Could not read the pull request's head; writing the comment anyway")
+        return True
 
 
 def _guarded(name: CheckName, run: Callable[[], CheckResult]) -> CheckResult:
@@ -188,7 +243,7 @@ def _report_unfinished(
         CheckResult(check="swallowed", crashed=True, notes=[note]),
     ]
     try:
-        if is_current():
+        if _still_current(is_current):
             _upsert_comment(repo, target.number, render_comment(results, ref), app_id, results)
     except Exception:
         log.exception("Could not update the comment after a read failure")

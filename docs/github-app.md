@@ -23,6 +23,9 @@ each push. Findings are ranked, and each one comes with a suggested fix.
   the all-clear line when a check crashed or read the pull request only partly.
 - When pushes arrive close together, only the newest push writes the comment; each push
   still gets its own check runs.
+- Changing a pull request's base branch runs both checks again against the new base, so a
+  head that passed against a permissive branch cannot keep that result after being
+  retargeted. A re-run checks the commit whose check was re-run.
 
 ### Marking a swallowed error as deliberate
 

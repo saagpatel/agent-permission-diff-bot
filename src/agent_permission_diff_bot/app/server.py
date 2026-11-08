@@ -7,12 +7,15 @@ file contents through the API, so fork pull requests are safe to analyze.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import hmac
 import json
 import logging
 import threading
 from collections import OrderedDict
+from collections.abc import Iterator
+from typing import Any
 
 import httpx
 from fastapi import BackgroundTasks, FastAPI, Request, Response
@@ -20,6 +23,7 @@ from fastapi.responses import JSONResponse
 
 from agent_permission_diff_bot.app.github import AppAuth, RepoClient, make_http
 from agent_permission_diff_bot.app.pipeline import (
+    PayloadError,
     PullTarget,
     resolve_target,
     run_checks,
@@ -43,29 +47,47 @@ def verify_signature(secret: str, body: bytes, header: str) -> bool:
 class PullLocks:
     """One lock per pull request, remembering only the most recent ``limit`` of them.
 
-    The oldest idle locks are forgotten first; a held lock is never dropped, so two runs
-    for one pull request can never overlap even after many other pull requests.
+    ``holding`` reserves the entry under the same guard that hands it out, before the lock
+    is acquired, and only entries nobody has reserved are forgotten. So a lock can never
+    be dropped between being handed out and being taken, and two runs for one pull
+    request never overlap.
     """
 
     def __init__(self, limit: int = MAX_TRACKED_PULLS) -> None:
         self.limit = limit
-        self._locks: OrderedDict[tuple[int, int], threading.Lock] = OrderedDict()
+        self._entries: OrderedDict[tuple[int, int], list[Any]] = OrderedDict()
         self._guard = threading.Lock()
 
-    def lock_for(self, repository_id: int, number: int) -> threading.Lock:
+    @contextlib.contextmanager
+    def holding(self, repository_id: int, number: int) -> Iterator[None]:
         key = (repository_id, number)
+        entry = self._reserve(key)
+        try:
+            with entry[0]:
+                yield
+        finally:
+            self._release(key)
+
+    def _reserve(self, key: tuple[int, int]) -> list[Any]:
         with self._guard:
-            lock = self._locks.pop(key, None) or threading.Lock()
-            self._locks[key] = lock
-            for old_key in list(self._locks):
-                if len(self._locks) <= self.limit:
+            entry = self._entries.pop(key, None) or [threading.Lock(), 0]
+            entry[1] += 1
+            self._entries[key] = entry
+            for old_key in list(self._entries):
+                if len(self._entries) <= self.limit:
                     break
-                if old_key != key and not self._locks[old_key].locked():
-                    del self._locks[old_key]
-            return lock
+                if self._entries[old_key][1] == 0:
+                    del self._entries[old_key]
+            return entry
+
+    def _release(self, key: tuple[int, int]) -> None:
+        with self._guard:
+            entry = self._entries.get(key)
+            if entry is not None:
+                entry[1] -= 1
 
     def __len__(self) -> int:
-        return len(self._locks)
+        return len(self._entries)
 
 
 def create_app(settings: AppSettings, transport: httpx.BaseTransport | None = None) -> FastAPI:
@@ -83,7 +105,7 @@ def create_app(settings: AppSettings, transport: httpx.BaseTransport | None = No
                 log.info("No open pull request for %s; nothing to re-run", target.head_sha[:7])
                 return
             # One run per pull request at a time; only the PR's live head writes the comment.
-            with locks.lock_for(resolved.repository_id, resolved.number):
+            with locks.holding(resolved.repository_id, resolved.number):
                 outcome = run_checks(
                     repo,
                     resolved,
@@ -130,9 +152,14 @@ def create_app(settings: AppSettings, transport: httpx.BaseTransport | None = No
             return JSONResponse({"status": "pong"})
         try:
             payload = json.loads(body)
-        except json.JSONDecodeError:
+        except ValueError:  # JSONDecodeError, or UnicodeDecodeError for non-UTF-8 bytes
             return JSONResponse({"error": "body is not JSON"}, status_code=400)
-        target = target_from_event(event, payload) if isinstance(payload, dict) else None
+        if not isinstance(payload, dict):
+            return JSONResponse({"error": "body is not a JSON object"}, status_code=400)
+        try:
+            target = target_from_event(event, payload)
+        except PayloadError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
         if target is None:
             return JSONResponse({"status": "ignored"}, status_code=202)
         background.add_task(process, target)

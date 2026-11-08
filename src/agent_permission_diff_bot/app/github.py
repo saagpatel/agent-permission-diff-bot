@@ -143,6 +143,9 @@ class RepoClient:
         data = self._request("GET", f"/repos/{self.full_name}/pulls/{number}").json()
         return str(data["head"]["sha"])
 
+    def open_pulls(self) -> list[dict[str, Any]]:
+        return list(self._paginate(f"/repos/{self.full_name}/pulls", {"state": "open"}))
+
     def pulls_for_commit(self, sha: str) -> list[dict[str, Any]]:
         return list(self._paginate(f"/repos/{self.full_name}/commits/{sha}/pulls"))
 

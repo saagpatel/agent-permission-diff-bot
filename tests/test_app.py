@@ -486,15 +486,43 @@ def test_a_source_file_missing_from_a_truncated_tree_is_read_with_a_cap() -> Non
 
 
 def test_held_locks_are_never_evicted() -> None:
+    import threading
+
     from agent_permission_diff_bot.app.server import PullLocks
 
     locks = PullLocks(limit=2)
-    held = locks.lock_for(1, 1)
-    held.acquire()
+    entered, release = threading.Event(), threading.Event()
+
+    def hold() -> None:
+        with locks.holding(1, 1):
+            entered.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    assert entered.wait(5)
     for number in range(2, 10):
-        locks.lock_for(1, number)
-    assert locks.lock_for(1, 1) is held
-    held.release()
+        with locks.holding(1, number):
+            pass
+    assert (1, 1) in locks._entries
+    release.set()
+    holder.join(5)
+
+
+def test_a_lock_handed_out_but_not_yet_taken_is_not_evicted() -> None:
+    from agent_permission_diff_bot.app.server import PullLocks
+
+    locks = PullLocks(limit=2)
+    entry = locks._reserve((1, 1))  # handed out; the caller has not acquired it yet
+    for number in range(2, 10):
+        with locks.holding(1, number):
+            pass
+    assert locks._entries[(1, 1)] is entry
+    locks._release((1, 1))
+    for number in range(10, 13):
+        with locks.holding(1, number):
+            pass
+    assert (1, 1) not in locks._entries, "idle entries are still forgotten"
 
 
 def test_serve_without_settings_exits_cleanly(
@@ -506,3 +534,154 @@ def test_serve_without_settings_exits_cleanly(
         monkeypatch.delenv(name, raising=False)
     assert main(["app", "serve"]) == 2
     assert "APDB_APP_ID" in capsys.readouterr().err
+
+
+def _edited(recording: Recording, *, base_changed: bool) -> Recording:
+    payload = json.loads(json.dumps(recording.payload))
+    payload["action"] = "edited"
+    payload["changes"] = (
+        {"base": {"ref": {"from": "dev"}}} if base_changed else {"title": {"from": "x"}}
+    )
+    return Recording("pull_request", payload, recording.base, recording.head)
+
+
+def test_retargeting_the_base_branch_runs_the_checks_again() -> None:
+    recording = Recording.load(FIXTURES / "broad-bash-allow")
+    replayer = Replayer(recording)
+    assert replayer.send(_edited(recording, base_changed=True)) == 202
+    assert conclusions(replayer)["Agent Config Guard"] == "failure"
+
+
+def test_editing_only_the_title_does_not_run_the_checks() -> None:
+    recording = Recording.load(FIXTURES / "broad-bash-allow")
+    replayer = Replayer(recording)
+    assert replayer.send(_edited(recording, base_changed=False)) == 202
+    assert replayer.github.check_runs == {}
+
+
+def test_hook_script_reads_count_against_the_file_limit() -> None:
+    from agent_permission_diff_bot.app.snapshot import MAX_GUARD_FILES, collect_inputs
+    from agent_permission_diff_bot.checks.config_guard import run_config_guard
+
+    hooks = [
+        {"hooks": [{"type": "command", "command": f"bash scripts/s{n}.sh"}]} for n in range(500)
+    ]
+    settings = json.dumps({"hooks": {"SessionStart": hooks}})
+    tree = {".claude/settings.json": {"sha": "cfg", "mode": "100644", "size": len(settings)}}
+    tree.update(
+        {f"scripts/s{n}.sh": {"sha": f"s{n}", "mode": "100644", "size": 10} for n in range(500)}
+    )
+
+    class Repo:
+        def __init__(self) -> None:
+            self.reads = 0
+
+        def tree(self, sha: str) -> tuple[dict[str, dict[str, object]], bool]:
+            return tree, False
+
+        def blob_text(self, sha: str, max_bytes: int) -> str:
+            self.reads += 1
+            return settings if sha == "cfg" else "#!/bin/sh\ntrue\n"
+
+    repo = Repo()
+    changed = [
+        {
+            "filename": ".claude/settings.json",
+            "status": "modified",
+            "sha": "cfg",
+            "patch": "@@ -1 +1 @@\n+x",
+        }
+    ]
+    inputs = collect_inputs(repo, "b" * 40, "h" * 40, changed)
+    assert repo.reads <= 2 * MAX_GUARD_FILES, "base and head snapshots each stay within the limit"
+    found = run_config_guard(inputs.base_files, inputs.head_files).findings
+    assert any(f.rule_id == "APD013" for f in found), "unread scripts are reported, not ignored"
+
+
+def test_a_failed_completion_never_strands_a_check_run_in_progress() -> None:
+    replayer = Replayer(Recording.load(FIXTURES / "broad-bash-allow"))
+    original = replayer.github._update_run
+    failed: list[str] = []
+
+    def flaky(body: object, id: str) -> httpx.Response:
+        if not failed:
+            failed.append(id)
+            return httpx.Response(502)
+        return original(body, id)
+
+    replayer.github._update_run = flaky  # type: ignore[method-assign]
+    assert replayer.send() == 202
+    assert all(run_["status"] == "completed" for run_ in replayer.github.check_runs.values())
+
+
+def test_the_comment_is_written_even_if_the_live_head_cannot_be_read() -> None:
+    replayer = Replayer(Recording.load(FIXTURES / "broad-bash-allow"))
+    replayer.github._pull = lambda body: httpx.Response(502)  # type: ignore[method-assign]
+    assert replayer.send() == 202
+    [body] = bot_comments(replayer)
+    assert "Bash(git *)" in body
+
+
+def test_a_rerun_checks_the_commit_that_was_clicked() -> None:
+    recording = Recording.load(FIXTURES / "silent-except")
+    pull = recording.payload["pull_request"]
+    clicked = commit_sha(recording.base)
+    payload = {
+        "action": "rerequested",
+        "check_run": {
+            "name": "Swallowed errors",
+            "head_sha": clicked,
+            "pull_requests": [
+                {"number": pull["number"], "base": pull["base"], "head": pull["head"]}
+            ],
+        },
+        "repository": recording.payload["repository"],
+        "installation": recording.payload["installation"],
+    }
+    replayer = Replayer(recording)
+    replayer.github.set_pull(recording.base, recording.head)
+    replayer.github.commits[clicked] = recording.base
+    replayer.send(
+        Recording("check_run", payload, recording.base, recording.head), advance_head=False
+    )
+    assert {run_["head_sha"] for run_ in replayer.github.check_runs.values()} == {clicked}
+
+
+def test_a_fork_rerun_falls_back_to_the_open_pull_requests() -> None:
+    recording = Recording.load(FIXTURES / "silent-except")
+    head_sha = recording.payload["pull_request"]["head"]["sha"]
+    payload = {
+        "action": "rerequested",
+        "check_suite": {"head_sha": head_sha, "pull_requests": []},
+        "repository": recording.payload["repository"],
+        "installation": recording.payload["installation"],
+    }
+    replayer = Replayer(recording)
+    replayer.github.set_pull(recording.base, recording.head)
+    replayer.github.fork_lookup_empty = True
+    assert replayer.send(Recording("check_suite", payload, {}, {})) == 202
+    assert conclusions(replayer)["Swallowed errors"] == "neutral"
+
+
+def _signed_post(replayer: Replayer, event: str, body: bytes) -> int:
+    import hashlib
+    import hmac
+
+    digest = hmac.new(replayer.secret.encode(), body, hashlib.sha256).hexdigest()
+    response = replayer.client.post(
+        "/webhook",
+        content=body,
+        headers={"X-GitHub-Event": event, "X-Hub-Signature-256": f"sha256={digest}"},
+    )
+    return response.status_code
+
+
+def test_signed_but_malformed_payloads_get_a_clear_400() -> None:
+    recording = Recording.load(FIXTURES / "clean")
+    replayer = Replayer(recording)
+    assert _signed_post(replayer, "pull_request", b"\xff\xfe not utf-8") == 400
+    assert _signed_post(replayer, "pull_request", b"[1, 2]") == 400
+    broken = json.loads(json.dumps(recording.payload))
+    del broken["pull_request"]["head"]
+    assert _signed_post(replayer, "pull_request", json.dumps(broken).encode()) == 400
+    assert replayer.github.check_runs == {}

@@ -130,6 +130,7 @@ def _snapshot(
         if not is_sensitive_path(path) and not _is_vendor_path(path)
     ]
     files: dict[str, str] = {}
+    reads = 0
     for index, path in enumerate(ordered):
         if index >= MAX_GUARD_FILES:
             _mark_incomplete(files, path, f"not read: over the {MAX_GUARD_FILES}-file limit")
@@ -142,6 +143,7 @@ def _snapshot(
                 _mark_incomplete(files, path, "not listed in a truncated Git tree")
             continue
         limit = MAX_CONFIG_INPUT_BYTES if project_config_kind(path) else MAX_INPUT_BYTES
+        reads += 1
         _read(repo, entry, path, limit, files)
     cache: ConfigCache = {}
     for path in sorted(snapshot_hook_references(files, cache, tree.keys())):
@@ -149,10 +151,15 @@ def _snapshot(
             continue
         if ".git" in {part.casefold() for part in path.split("/")}:
             continue
-        if path in tree:
-            _read(repo, tree[path], path, MAX_INPUT_BYTES, files)
-        else:
+        if path not in tree:
             _mark_incomplete(files, path, "referenced input is absent from the selected Git tree")
+        elif reads >= MAX_GUARD_FILES:
+            # Scripts a config refers to count against the same limit as the files
+            # themselves, so one config cannot make the App read without bound.
+            _mark_incomplete(files, path, f"not read: over the {MAX_GUARD_FILES}-file limit")
+        else:
+            reads += 1
+            _read(repo, tree[path], path, MAX_INPUT_BYTES, files)
     _source_state(files, tree, changed, truncated)
     return files
 
