@@ -345,8 +345,9 @@ threshold. It is **experimental**. Known limits, tracked in
   keep the caller waiting until the shutdown grace period ends.
 - On macOS and Windows there is no enforced memory cap; only the deadline bounds the child.
 - Results come back as plain JSON data; callers convert them to their own types.
-- A `MemoryError` is read as the memory cap, so a file nested too deeply for Python's parser
-  makes the analysis unfinished rather than being refused on its own.
+- A `MemoryError` is read as the memory cap, except CPython's parser overflow ("too complex
+  to parse"), which refuses that one file. Python 3.11 gives the overflow no message, so
+  there an over-nested file makes the analysis unfinished instead.
 
 ## GitHub App (unreleased, experimental)
 

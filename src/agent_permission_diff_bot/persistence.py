@@ -15,6 +15,7 @@ from itertools import pairwise
 from pathlib import PurePosixPath
 
 from agent_permission_diff_bot.model import Finding, PermissionAtom, PermissionChange, Severity
+from agent_permission_diff_bot.parsing import parser_overflow
 
 PROJECT_CONFIGS = {
     ".claude/settings.json": "claude",
@@ -466,8 +467,14 @@ def _inline_file_loads(name: str, code: str) -> set[str]:
         if len(code.encode("utf-8", errors="surrogatepass")) > MAX_INLINE_BYTES:
             return set()
         return _parse_inline_file_loads(name, code)
-    except (MemoryError, RecursionError):
+    except RecursionError:
         return set()
+    except MemoryError as exc:
+        # Over-nested inline code cannot run either, so it loads nothing; real exhaustion
+        # propagates so a memory-capped analysis is reported unfinished.
+        if parser_overflow(exc):
+            return set()
+        raise
 
 
 def _parse_inline_file_loads(name: str, code: str) -> set[str]:

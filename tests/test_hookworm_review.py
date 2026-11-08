@@ -542,10 +542,17 @@ def test_inline_parser_limits_large_code_and_contains_memory_or_recursion_failur
     assert referenced_paths("node -e " + json.dumps("x" * 100_000)) == set()
 
     def memory_failure(_: str) -> object:
-        raise MemoryError("simulated parser pressure")
+        raise MemoryError("Parser stack overflowed - Python source too complex to parse")
 
     monkeypatch.setattr("agent_permission_diff_bot.persistence.ast.parse", memory_failure)
     assert referenced_paths("python -c 'print(1)' ") == set()
+
+    def exhausted(_: str) -> object:
+        raise MemoryError
+
+    monkeypatch.setattr("agent_permission_diff_bot.persistence.ast.parse", exhausted)
+    with pytest.raises(MemoryError):
+        referenced_paths("python -c 'print(1)' ")
 
     def recursion_failure(_: str) -> object:
         raise RecursionError("simulated parser depth")
@@ -554,10 +561,16 @@ def test_inline_parser_limits_large_code_and_contains_memory_or_recursion_failur
     assert referenced_paths("python -c 'print(1)' ") == set()
 
 
-@pytest.mark.parametrize("failure", [MemoryError, RecursionError])
+@pytest.mark.parametrize(
+    "failure",
+    [
+        MemoryError("Parser stack overflowed - Python source too complex to parse"),
+        RecursionError("simulated parser depth"),
+    ],
+)
 def test_inline_parser_failure_keeps_unrelated_findings(monkeypatch, failure) -> None:
     def fail(_: str) -> object:
-        raise failure("simulated parser failure")
+        raise failure
 
     monkeypatch.setattr("agent_permission_diff_bot.persistence.ast.parse", fail)
     report = build_report(

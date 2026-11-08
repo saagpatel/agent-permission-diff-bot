@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 
@@ -587,3 +588,10 @@ def test_a_negator_covers_a_list_of_skip_verbs(line: str) -> None:
 def test_a_negated_verb_list_does_not_cover_a_later_clause() -> None:
     head = {"AGENTS.md": "# R\nNever skip or disable lint, but skip the tests.\n"}
     assert len(run_config_guard({"AGENTS.md": "# R\n"}, head).findings) == 1
+
+
+@pytest.mark.skipif(sys.version_info < (3, 12), reason="3.11 gives the overflow no message")
+def test_a_rules_file_nested_too_deeply_is_refused_not_unfinished() -> None:
+    text = "x = " + "-" * 200_000 + "1\n"
+    found = run_config_guard({}, {".codex/rules/deep.rules": text}).findings
+    assert found and all(f.path == ".codex/rules/deep.rules" for f in found)
