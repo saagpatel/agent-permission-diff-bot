@@ -23,8 +23,8 @@ class RulesParseError(ValueError):
 def parse_rules_text(text: str, source: Source) -> list[Rule]:
     try:
         tree = ast.parse(text, filename=source.label)
-    except SyntaxError as exc:
-        raise RulesParseError(f"{source.label}: not parseable as rules: {exc.msg} (line {exc.lineno})") from exc
+    except (SyntaxError, ValueError, RecursionError, MemoryError) as exc:
+        raise RulesParseError(f"{source.label}: not parseable as rules: {getattr(exc, 'msg', type(exc).__name__)} (line {getattr(exc, 'lineno', '?')})") from exc
     rules: list[Rule] = []
     for node in ast.walk(tree):
         if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id == "prefix_rule"):
@@ -36,7 +36,7 @@ def parse_rules_text(text: str, source: Source) -> list[Rule]:
         try:
             pattern = ast.literal_eval(pattern_node)
             decision_raw = ast.literal_eval(kwargs["decision"]) if "decision" in kwargs else "allow"
-        except ValueError as exc:
+        except (ValueError, TypeError, SyntaxError, RecursionError, MemoryError) as exc:
             raise RulesParseError(f"{source.label}: line {node.lineno}: non-literal rule field") from exc
         decision = _DECISIONS.get(str(decision_raw))
         if decision is None or not isinstance(pattern, list) or not pattern:

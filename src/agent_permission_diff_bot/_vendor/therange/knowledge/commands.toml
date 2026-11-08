@@ -794,20 +794,34 @@ doc = "https://code.claude.com/docs/en/permissions#exec-wrappers-and-find-action
 claude_mitigated = "Claude Code refuses to auto-approve exec wrappers through a prefix rule."
 
 [[capability]]
-id = "find.exec"
-paths = [["find"], ["fd"]]
+id = "fd.exec"
+paths = [["fd"]]
 position = "after"
 kind = "flag"
-triggers = ["-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprintf", "-fls", "--exec", "-x", "--exec-batch", "-X"]
+triggers = ["--exec", "-x", "--exec-batch", "-X"]
+effect = "exec"
+severity = "critical"
+title = "`fd --exec` runs a command for every match"
+explain = "fd's `--exec` and `--exec-batch` run an arbitrary command per match or once for all matches. Claude Code's find safeguard does not cover fd."
+example = "fd -x touch /tmp/proof"
+narrower = "Use the Glob tool, or allow `fd` only as an exact command."
+doc = "https://github.com/sharkdp/fd#command-execution"
+
+[[capability]]
+id = "find.exec"
+paths = [["find"]]
+position = "after"
+kind = "flag"
+triggers = ["-exec", "-execdir", "-ok", "-okdir", "-delete", "-fprint", "-fprintf", "-fls"]
 effect = "exec"
 severity = "critical"
 title = "`find -exec` runs a command; `-delete` and `-fprint` write"
-explain = "find actions run arbitrary commands per match, delete files, or write output files anywhere. fd's `--exec` does the same."
+explain = "find actions run arbitrary commands per match, delete files, or write output files anywhere."
 example = "find . -maxdepth 0 -exec touch /tmp/proof ';'"
 narrower = "Use the Glob tool, or allow `find` only as an exact command."
 doc = "https://www.gnu.org/software/findutils/manual/html_node/find_html/Run-Commands.html"
 demo = "find-exec"
-claude_mitigated = "Claude Code refuses to auto-approve `find` with -exec, -delete, -fprint and similar through a prefix rule (fd is not covered)."
+claude_mitigated = "Claude Code refuses to auto-approve `find` with -exec, -delete, -fprint and similar through a prefix rule."
 
 # ---------------------------------------------------------------- text tools that execute or write
 

@@ -44,3 +44,60 @@ def test_exponential_codex_union_is_refused() -> None:
     union = ", ".join('["a", "b"]' for _ in range(40))
     with pytest.raises(RulesParseError):
         parse_rules_text(f'prefix_rule(pattern=[{union}], decision="allow")', codex)
+
+
+CODEX = Source(agent="codex", kind="codex rules", label="r", path="r")
+
+
+def _worst(raw: str) -> str:
+    rule = parse_rule(raw, "allow", SOURCE)
+    order = ["critical", "high", "medium", "low", "info"]
+    found = [f.effective_severity for f in engine.analyze_rule(rule, load_kb())]
+    return min(found, key=order.index) if found else "none"
+
+
+def test_fd_exec_is_not_covered_by_the_find_safeguard() -> None:
+    assert _worst("Bash(fd *)") == "critical"
+    assert _worst("Bash(find *)") != "critical"
+
+
+@pytest.mark.parametrize("raw", ["Bash(git -C . *)", "Bash(git -c*)", "Bash(git --no-pager *)"])
+def test_global_option_prefix_still_reaches_what_git_reaches(raw: str) -> None:
+    assert _worst(raw) == "critical"
+
+
+def test_codex_prefix_with_a_global_option_is_rated_like_the_program() -> None:
+    [rule] = parse_rules_text('prefix_rule(pattern=["git", "-C", "."], decision="allow")', CODEX)
+    severities = {f.effective_severity for f in engine.analyze_rule(rule, load_kb())}
+    assert "critical" in severities
+
+
+def test_codex_suggestions_are_rated_as_the_prefix_rules_they_are() -> None:
+    [rule] = parse_rules_text('prefix_rule(pattern=["npm"], decision="allow")', CODEX)
+    kb = load_kb()
+    suggestion = engine.suggest(rule, engine.analyze_rule(rule, kb), kb)
+    residual = {(pin, f.effective_severity) for pin, f in suggestion.residual}
+    assert ("npm test", "critical") in residual
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        'prefix_rule(pattern=[{[]: 1}], decision="allow")',
+        'prefix_rule(pattern=["a"], decision={[1]})',
+        'prefix_rule(pattern=["a"])\x00',
+    ],
+)
+def test_malformed_untrusted_rules_are_refused_not_crashing(text: str) -> None:
+    with pytest.raises(RulesParseError):
+        parse_rules_text(text, CODEX)
+
+
+def test_rule_count_limit_per_file() -> None:
+    union = ", ".join('["a", "b"]' for _ in range(8))  # 256 rules per call
+    call = f'prefix_rule(pattern=[{union}], decision="allow")\n'
+    with pytest.raises(RulesParseError):
+        parse_rules_text(call * 8, CODEX)  # 2,048 rules
+    small = ", ".join('["a", "b"]' for _ in range(4))  # 16 rules per call
+    calls = f'prefix_rule(pattern=[{small}], decision="allow")\n' * 125  # 2,000 rules
+    assert len(parse_rules_text(calls, CODEX)) == 2000
