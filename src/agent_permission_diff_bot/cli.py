@@ -68,6 +68,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_simulate(args)
         if args.command in {"server-card-diff", "mcp-server-card-diff"}:
             return _run_server_card_diff(args)
+        if args.command == "probe-swallowed":
+            return _run_probe(args)
         if args.command == "app" and args.app_command:
             return _run_app(args)
     except (OSError, subprocess.CalledProcessError) as exc:
@@ -550,6 +552,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default="report",
         help="Schema used with --validate-json. Default: report.",
     )
+    probe = subparsers.add_parser(
+        "probe-swallowed",
+        help="inject the caught error into one Python handler and show what the caller gets",
+    )
+    probe.add_argument("file", help="Python source file")
+    probe.add_argument("--line", type=int, required=True, help="line of the except clause")
     app = subparsers.add_parser(
         "app", help="run the GitHub App (Config Guard and Swallowed); needs the app extra"
     )
@@ -593,6 +601,22 @@ def _run_app(args: argparse.Namespace) -> int:
     except ValueError as exc:
         print(f"agent-permission-diff: {exc}", file=sys.stderr)
         return 2
+
+
+def _run_probe(args: argparse.Namespace) -> int:
+    from agent_permission_diff_bot.checks.probe import probe_python_handler
+
+    try:
+        source = Path(args.file).read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        print(f"agent-permission-diff: {args.file} is not UTF-8 text", file=sys.stderr)
+        return 2
+    result = probe_python_handler(source, args.line)
+    if result.outcome == "not-probed":
+        print(f"agent-permission-diff: not probed: {result.detail}", file=sys.stderr)
+        return 2
+    print(f"{args.file}:{args.line}: {result.sentence()}")
+    return 0
 
 
 if __name__ == "__main__":
