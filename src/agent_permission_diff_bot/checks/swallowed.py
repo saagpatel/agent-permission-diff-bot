@@ -33,6 +33,7 @@ from agent_permission_diff_bot.checks.model import (
 )
 from agent_permission_diff_bot.checks.probe import parent_map, probe_handler
 from agent_permission_diff_bot.model import Severity
+from agent_permission_diff_bot.parsing import parser_overflow
 
 MAX_FILE_BYTES = 1024 * 1024
 PYTHON_SUFFIXES = (".py", ".pyi")
@@ -392,6 +393,14 @@ def _python_catches(changed: ChangedFile, notes: list[str]) -> list[_Catch]:
         tree = ast.parse(changed.text, filename=changed.path)
     except SyntaxError as exc:
         notes.append(f"`{changed.path}` did not parse as Python (line {exc.lineno}); not scanned.")
+        return []
+    except (ValueError, RecursionError):
+        notes.append(f"`{changed.path}` could not be parsed as Python; not scanned.")
+        return []
+    except MemoryError as exc:
+        if not parser_overflow(exc):
+            raise
+        notes.append(f"`{changed.path}` is nested too deeply to parse as Python; not scanned.")
         return []
     catches: list[_Catch] = []
     parents = parent_map(tree)
