@@ -75,9 +75,15 @@ _MODE_TEXT = {
     "on-failure": "The agent asks only after a sandboxed command fails.",
 }
 
+# The skip verbs, with their -s and -ing forms (`Skipping the tests is fine`). Past forms are
+# left out: `Skipped tests are listed in the report` describes, it does not instruct.
+_SKIP_WORD = (
+    r"(?:skip(?:s|ping)?|bypass(?:es|ing)?|ignor(?:e|es|ing)|disabl(?:e|es|ing)"
+    r"|avoid(?:s|ing)?|suppress(?:es|ing)?|silenc(?:e|es|ing))\b"
+)
 # Line-level and plural-aware, unlike the engine's whole-file APD006 pattern.
 _SKIP_CHECK_RE = re.compile(
-    r"(\b(skip|bypass|ignore|disable|avoid|suppress|silence)\b|\bdo(n'?t| not)\s+run\b|"
+    rf"(\b{_SKIP_WORD}|\bdo(n'?t| not)\s+run\b|"
     r"\bnever\s+run\b|\bno need to (run|wait for)\b|\bwithout (running|waiting for)\b)"
     r"(?:[^.!?;\n]|\.(?=\S)){0,60}?\b(tests?|reviews?|approvals?|secrets?|permissions?|polic(y|ies)|"
     r"guard(rail)?s?|hooks?|checks?|lint\w*|ci|type.?check\w*|verification|pre-commit)\b"
@@ -618,17 +624,16 @@ def _instruction_findings(
             )
 
 
-# A negator right before the skip verb, allowing only a couple of filler words
-# (`never ever skip`, `don't use --no-verify`), never a clause boundary.
-_NEGATOR_RE = re.compile(
-    r"\b(never|not|don'?t|doesn'?t|mustn'?t|shouldn'?t|cannot|can'?t|no)"
-    r"(\s+(ever|use|run|pass|add|call|try|to))?[\s`*_\"']*$",  # opening code/quote marks
-    re.IGNORECASE,
+# A negator right before the skip verb (`never ever skip`), never across a clause boundary.
+# Opening code or quote marks may sit between them. Verbs such as `use` or `pass` may follow
+# the negator only before a flag (`don't use --no-verify`): before a word they read as a
+# condition (`if lint does not pass, skip the review`).
+_NEGATORS = r"\b(never|not|don'?t|doesn'?t|mustn'?t|shouldn'?t|cannot|can'?t|no)"
+_NEGATOR_RE = re.compile(rf"{_NEGATORS}(\s+(ever|to))?[\s`*_\"']*$", re.IGNORECASE)
+_FLAG_NEGATOR_RE = re.compile(
+    rf"{_NEGATORS}(\s+(ever|use|run|pass|add|call|try|to))?[\s`*_\"']*$", re.IGNORECASE
 )
-_SKIP_VERBS = re.compile(
-    r"(skip|bypass|ignore|disable|avoid|suppress|silence)\b|--no-verify|--dangerously",
-    re.IGNORECASE,
-)
+_SKIP_VERBS = re.compile(rf"{_SKIP_WORD}|--no-verify|--dangerously", re.IGNORECASE)
 
 
 def _negated(text: str, match: re.Match[str]) -> bool:
@@ -640,7 +645,8 @@ def _negated(text: str, match: re.Match[str]) -> bool:
     if not _SKIP_VERBS.match(match.group(0)):
         return False
     before = text[_clause_start(text, match.start()) : match.start()]
-    return bool(_NEGATOR_RE.search(before))
+    negator = _FLAG_NEGATOR_RE if match.group(0).startswith("--") else _NEGATOR_RE
+    return bool(negator.search(before))
 
 
 def _clause_start(text: str, position: int) -> int:
@@ -648,12 +654,16 @@ def _clause_start(text: str, position: int) -> int:
     return max(text.rfind(mark, 0, position) for mark in ".!?;,:") + 1
 
 
-# A skip verb inside a flag (`skip` in `--dangerously-skip-permissions`) is part of that
-# flag, which is matched (and negated) as a whole.
-_INSIDE_FLAG_RE = re.compile(r"--[\w-]*$")
-# A negator covers a list of skip verbs: `Never skip, bypass, or disable hooks`.
-_VERB = r"(?:skip|bypass|ignore|disable|avoid|suppress|silence)\b"
-_VERB_LIST_RE = re.compile(rf"{_VERB}(?:\s*,?\s*(?:(?:or|and|nor)\s+)?{_VERB})*", re.IGNORECASE)
+# `skip` inside `--dangerously-skip-permissions` belongs to that flag, which has its own
+# branch and is matched (and negated) as a whole. Any other flag holding a skip verb
+# (`--skip-hooks`, `--bypass-checks`) is read as the instruction it is.
+_INSIDE_FLAG_RE = re.compile(r"--dangerously-$", re.IGNORECASE)
+# A negator covers a list of skip verbs that ends in a conjunction: `Never skip, bypass, or
+# disable hooks`. A comma alone does not make a list (`Never skip, disable the hooks`).
+_VERB_LIST_RE = re.compile(
+    rf"{_SKIP_WORD}(?:(?:\s*,\s*{_SKIP_WORD})*\s*,?\s*(?:or|and|nor)\s+{_SKIP_WORD})?",
+    re.IGNORECASE,
+)
 
 
 # `etc.` often ends a sentence, so it is read through only when a lowercase word follows.
@@ -710,7 +720,7 @@ def _added_passages(lines: list[str], added: set[int]) -> Iterable[tuple[int, st
         position, negated_until = 0, -1
         while match := _SKIP_CHECK_RE.search(searchable, position):
             position = match.start() + 1
-            if _INSIDE_FLAG_RE.search(searchable, max(0, match.start() - 80), match.start()):
+            if _INSIDE_FLAG_RE.search(searchable, max(0, match.start() - 20), match.start()):
                 continue
             if match.start() < negated_until:
                 continue  # a later verb in a negated list
