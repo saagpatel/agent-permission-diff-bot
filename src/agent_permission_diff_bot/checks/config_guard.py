@@ -78,7 +78,7 @@ _MODE_TEXT = {
 _SKIP_CHECK_RE = re.compile(
     r"(\b(skip|bypass|ignore|disable|avoid|suppress|silence)\b|\bdo(n'?t| not)\s+run\b|"
     r"\bnever\s+run\b|\bno need to (run|wait for)\b|\bwithout (running|waiting for)\b)"
-    r".{0,60}\b(tests?|reviews?|approvals?|secrets? scan\w*|permissions?|polic(y|ies)|"
+    r".{0,60}\b(tests?|reviews?|approvals?|secrets?|permissions?|polic(y|ies)|"
     r"guard(rail)?s?|hooks?|checks?|lint\w*|ci|type.?check\w*|verification|pre-commit)\b"
     r"|--no-verify\b|--dangerously-skip-permissions\b",
     re.IGNORECASE,
@@ -161,37 +161,46 @@ def run_config_guard(base: Mapping[str, str], head: Mapping[str, str]) -> CheckR
 
 
 def _fold_into_hooks(findings: list[CheckFinding], engine: list[Finding]) -> list[CheckFinding]:
-    """Report a hook once: its startup-payload findings become part of the hook entry."""
+    """Report a hook once: findings about the script it runs become part of the hook entry.
+
+    Only findings whose evidence names the hook's script path are folded, and every one of
+    them is listed on the hook entry, so nothing folded disappears from the report.
+    """
     hooks = [f for f in findings if f.rule_id == "CG004"]
     if not hooks:
         return findings
     folded: list[CheckFinding] = []
     absorbed: set[int] = set()
     for hook in hooks:
-        command = hook.allows[0]
+        paths = _script_paths(hook.allows[0])
         severity = hook.severity
-        extra: list[str] = []
+        also: list[str] = []
         for index, other in enumerate(findings):
-            if other.rule_id not in _ABSORBED_BY_HOOK or index in absorbed:
+            if not paths or other.rule_id not in _ABSORBED_BY_HOOK or index in absorbed:
                 continue
             source = next(
                 (e for e in engine if e.rule_id == other.rule_id and e.title == other.title), None
             )
             evidence = " ".join(source.evidence) if source else " ".join(other.allows)
-            if not any(word in evidence for word in _command_words(command)):
+            if not any(path in evidence for path in paths):
                 continue
             absorbed.add(index)
             severity = max(severity, other.severity)
-            extra.append(f"{other.title} ({other.rule_id}).")
-        folded.append(replace(hook, severity=severity, allows=(*hook.allows, *extra[:2])))
+            where = f" in {md_code(other.path)}" if other.path and other.path != hook.path else ""
+            also.append(f"{other.title} ({other.rule_id}){where}")
+        allows = hook.allows
+        if also:
+            allows = (hook.allows[0], "Also flagged: " + "; ".join(also) + ".", *hook.allows[1:])
+        folded.append(replace(hook, severity=severity, allows=allows))
     rest = [f for index, f in enumerate(findings) if f.rule_id != "CG004" and index not in absorbed]
     return folded + rest
 
 
-def _command_words(allows_line: str) -> list[str]:
-    match = re.search(r"`([^`]+)`", allows_line)
-    words = match.group(1).split() if match else []
-    return [w for w in words if "/" in w or "." in w] or words[:1]
+def _script_paths(allows_line: str) -> list[str]:
+    """Path-like words of the command in the hook's first line (inside its code span)."""
+    match = re.search(r"(`+) ?(.+?) ?\1", allows_line)
+    words = match.group(2).split() if match else []
+    return [word for word in words if "/" in word or "." in word]
 
 
 # --- allow rules, expanded with the Range ------------------------------------------------
@@ -251,6 +260,8 @@ def _unknown_reach(
     rule: Rule, expanded: list[range_engine.Finding]
 ) -> tuple[tuple[str, ...], str] | None:
     spec = rule.specifier or ""
+    if not expanded and rule.command is not None:
+        return _unknown_command(rule)
     for finding in expanded:
         if finding.mitigated_by:
             continue
@@ -287,6 +298,33 @@ def _unknown_reach(
     return None
 
 
+def _unknown_command(rule: Rule) -> tuple[tuple[str, ...], str] | None:
+    """An exact command the Range finds nothing in: narrow only if it knows the program."""
+    assert rule.command is not None
+    words = rule.command.exact or rule.command.fixed
+    if not words:
+        return None
+    program = range_engine.normalize_program(words[0])
+    if program in load_kb().programs():
+        return None  # a known program with no reach-extending subcommand or flag
+    if "/" in words[0]:
+        return (
+            (
+                f"Runs {md_code(' '.join(words))} without a prompt; whatever that script "
+                "contains, now or after a later edit, runs too.",
+            ),
+            "Keep scripts an agent can run out of paths it can edit, or keep the rule on prompt.",
+        )
+    return (
+        (
+            f"Runs {md_code(' '.join(words))} without a prompt, and the Range has no data on "
+            f"what {md_code(program)} can reach.",
+        ),
+        "Confirm what this command can change, and keep apply, deploy, delete and publish "
+        "commands on prompt.",
+    )
+
+
 def _sensitive_spec(spec: str) -> bool:
     return spec.startswith("**") or any(hint in spec for hint in range_engine._SECRET_HINTS)
 
@@ -316,7 +354,7 @@ def _still_denied(atom: PermissionAtom, changes: Iterable[PermissionChange]) -> 
             and other_atom.action == "permission_rule"
             and other_atom.resource == "deny"
             and other_atom.path == atom.path
-            and other_atom.value in {atom.value, atom.value.split("(", 1)[0], "*"}
+            and _covers_rule(other_atom.value, atom.value)
         ):
             return True
     return False
@@ -571,8 +609,11 @@ def _instruction_findings(
             )
 
 
+# A negator right before the skip verb, allowing only a couple of filler words
+# (`never ever skip`, `don't use --no-verify`), never a clause boundary.
 _NEGATOR_RE = re.compile(
-    r"\b(never|not|don'?t|doesn'?t|mustn'?t|shouldn'?t|cannot|can'?t|no)\b(\W+\w+){0,2}\W*$",
+    r"\b(never|not|don'?t|doesn'?t|mustn'?t|shouldn'?t|cannot|can'?t|no)"
+    r"(\s+(ever|use|run|pass|add|call|try|to))?\s*$",
     re.IGNORECASE,
 )
 _SKIP_VERBS = re.compile(
@@ -589,7 +630,7 @@ def _negated(text: str, match: re.Match[str]) -> bool:
     """
     if not _SKIP_VERBS.match(match.group(0)):
         return False
-    sentence_start = max(text.rfind(mark, 0, match.start()) for mark in ".!?;")
+    sentence_start = max(text.rfind(mark, 0, match.start()) for mark in ".!?;,:")
     before = text[sentence_start + 1 : match.start()]
     return bool(_NEGATOR_RE.search(before))
 
@@ -712,7 +753,8 @@ _FRONTMATTER_RE = re.compile(
 MAX_FRONTMATTER_CHARS = 64 * 1024
 MAX_TOOL_ENTRIES = 500
 MAX_TOOL_CHARS = 2000
-_TOOLS_LINE_RE = re.compile(r"^(allowed-tools|tools):\s*(?P<value>.+)$", re.MULTILINE)
+_TOOLS_LINE_RE = re.compile(r"^(allowed-tools|tools):[ \t]*(?P<value>[^\n]*)$", re.MULTILINE)
+_BLOCK_ITEM_RE = re.compile(r"^[ \t]*-[ \t]+(?P<item>[^\n]+?)[ \t]*$")
 
 
 def _frontmatter_rules(text: str, path: str) -> list[Rule] | None:
@@ -728,8 +770,7 @@ def _frontmatter_rules(text: str, path: str) -> list[Rule] | None:
         data = yaml.safe_load(parts[1])
     except yaml.YAMLError:
         # Claude Code reads `allowed-tools: Bash(git log: *)` even though it is not YAML.
-        match = _TOOLS_LINE_RE.search(parts[1])
-        return parse_allowed_tools(match.group("value"), source) if match else None
+        return _tools_from_invalid_yaml(parts[1], source)
     if not isinstance(data, Mapping):
         return None if data is not None else []
     value = data.get("allowed-tools", data.get("tools"))
@@ -746,6 +787,22 @@ def _frontmatter_rules(text: str, path: str) -> list[Rule] | None:
     ):
         return None
     return parse_allowed_tools(value, source)
+
+
+def _tools_from_invalid_yaml(body: str, source: Source) -> list[Rule] | None:
+    """`allowed-tools` from frontmatter YAML rejects: an inline value or a block list."""
+    match = _TOOLS_LINE_RE.search(body)
+    if match is None:
+        return None
+    if match.group("value").strip():
+        return parse_allowed_tools(match.group("value"), source)
+    items: list[str] = []
+    for line in body[match.end() :].splitlines()[1:]:
+        item = _BLOCK_ITEM_RE.match(line)
+        if item is None:
+            break
+        items.append(item.group("item").strip("'\""))
+    return parse_allowed_tools(items, source) if items else None
 
 
 def _codex_rules(text: str, path: str) -> list[Rule]:

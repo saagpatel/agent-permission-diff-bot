@@ -6,8 +6,8 @@ import pytest
 
 from agent_permission_diff_bot.checks.swallowed import (
     ChangedFile,
-    added_lines_between,
-    added_lines_from_patch,
+    changed_lines_between,
+    changed_lines_from_patch,
     scan_swallowed,
 )
 from agent_permission_diff_bot.model import Severity
@@ -15,7 +15,7 @@ from agent_permission_diff_bot.model import Severity
 
 def new_file(path: str, source: str) -> ChangedFile:
     text = textwrap.dedent(source).lstrip("\n")
-    return ChangedFile(path=path, text=text, added=added_lines_between("", text))
+    return ChangedFile(path=path, text=text, changed=changed_lines_between("", text))
 
 
 def scan(path: str, source: str) -> list[tuple[str, int | None, Severity]]:
@@ -128,14 +128,14 @@ def test_noqa_suppression_counts_as_deliberate_without_a_reason() -> None:
 def test_only_handlers_the_diff_touches_are_reported() -> None:
     base = "try:\n    a()\nexcept Exception:\n    pass\n"
     head = base + "\ntry:\n    b.save()\nexcept Exception:\n    pass\n"
-    changed = ChangedFile("x.py", head, added_lines_between(base, head))
+    changed = ChangedFile("x.py", head, changed_lines_between(base, head))
     assert [f.line for f in scan_swallowed([changed]).findings] == [8]
 
 
 def test_raise_turned_into_pass_is_reported() -> None:
     base = "try:\n    db.commit()\nexcept Exception:\n    raise\n"
     head = "try:\n    db.commit()\nexcept Exception:\n    pass\n"
-    changed = ChangedFile("x.py", head, added_lines_between(base, head))
+    changed = ChangedFile("x.py", head, changed_lines_between(base, head))
     assert [f.rule_id for f in scan_swallowed([changed]).findings] == ["SW-data-loss"]
 
 
@@ -207,15 +207,16 @@ def test_other_languages_are_ignored() -> None:
 
 def test_added_lines_from_github_patch() -> None:
     patch = "@@ -1,3 +1,4 @@\n a\n-b\n+B\n+C\n d\n@@ -10,2 +11,3 @@\n x\n+y\n z"
-    assert added_lines_from_patch(patch) == {2, 3, 12}
+    # Lines 2-3 are added; line 1 sits before the deleted `b`, so it is touched too.
+    assert changed_lines_from_patch(patch) == {1, 2, 3, 12}
 
 
 def test_added_lines_for_new_file_patch() -> None:
-    assert added_lines_from_patch("@@ -0,0 +1,2 @@\n+one\n+two") == {1, 2}
+    assert changed_lines_from_patch("@@ -0,0 +1,2 @@\n+one\n+two") == {1, 2}
 
 
 def test_removed_line_that_looks_like_a_header_does_not_shift_lines() -> None:
-    assert added_lines_from_patch("@@ -1,3 +1,3 @@\n a\n----------\n+b\n c\n+x") == {2, 4}
+    assert changed_lines_from_patch("@@ -1,3 +1,3 @@\n a\n----------\n+b\n c\n+x") == {1, 2, 4}
 
 
 @pytest.mark.parametrize(
@@ -242,3 +243,39 @@ def test_python_negative_constant_return_swallows() -> None:
         "def f():\n    try:\n        verify_token(t)\n    except Exception:\n        return -1\n"
     )
     assert [r[0] for r in scan("x.py", source)] == ["SW-auth"]
+
+
+def test_a_handler_silenced_only_by_deleting_a_line_is_reported() -> None:
+    base = "try:\n    db.commit()\nexcept Exception:\n    logger.exception('failed')\n    pass\n"
+    head = "try:\n    db.commit()\nexcept Exception:\n    pass\n"
+    changed = ChangedFile("x.py", head, changed_lines_between(base, head))
+    assert [f.rule_id for f in scan_swallowed([changed]).findings] == ["SW-data-loss"]
+
+
+def test_deletion_in_a_github_patch_touches_the_handler() -> None:
+    head = "try:\n    db.commit()\nexcept Exception:\n    pass\n"
+    patch = "@@ -3,3 +3,2 @@\n except Exception:\n-    logger.exception('failed')\n     pass"
+    changed = ChangedFile("x.py", head, changed_lines_from_patch(patch))
+    assert [f.rule_id for f in scan_swallowed([changed]).findings] == ["SW-data-loss"]
+
+
+def test_a_marker_inside_a_string_is_not_a_deliberate_mark() -> None:
+    source = (
+        "try:\n    verify_token(t)\nexcept Exception:\n    result = 'swallowed: ok just data'\n"
+    )
+    result = scan_swallowed([new_file("x.py", source)])
+    assert result.deliberate == []
+    assert [f.rule_id for f in result.findings] == ["SW-auth"]
+
+
+def test_a_typescript_marker_inside_a_string_is_not_a_deliberate_mark() -> None:
+    source = "try { verifyToken(t) } catch { const note = 'swallowed: ok data'; }\n"
+    result = scan_swallowed([new_file("web/x.ts", source)])
+    assert result.deliberate == []
+
+
+def test_trailing_comment_on_a_promise_catch_still_marks_it() -> None:
+    source = "fetch(url).catch(() => {}); // swallowed: ok prefetch is optional\n"
+    result = scan_swallowed([new_file("web/x.ts", source)])
+    assert result.findings == []
+    assert result.deliberate[0].reason == "prefetch is optional"
