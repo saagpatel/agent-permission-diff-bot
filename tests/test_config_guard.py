@@ -458,6 +458,41 @@ def test_a_subagent_tools_restriction_is_not_an_allow_rule() -> None:
 
 
 @pytest.mark.parametrize("value", ["acceptEdits", "default"])
-def test_removing_a_mode_that_asks_as_often_or_less_is_quiet(value: str) -> None:
+def test_removing_an_explicit_mode_says_another_layer_now_decides(value: str) -> None:
     base = {SETTINGS: settings(permissions={"defaultMode": value})}
+    [finding] = run_config_guard(base, {SETTINGS: settings(permissions={})}).findings
+    assert finding.rule_id == "CG003" and "another settings layer" in finding.allows[0]
+
+
+def test_removing_the_most_permissive_mode_is_quiet() -> None:
+    base = {SETTINGS: settings(permissions={"defaultMode": "bypassPermissions"})}
     assert run_config_guard(base, {SETTINGS: settings(permissions={})}).findings == []
+
+
+def test_neighbouring_bullets_do_not_merge_into_one_instruction() -> None:
+    base = {"AGENTS.md": "# Rules\n- Never skip lint\n"}
+    head = {"AGENTS.md": "# Rules\n- Never skip lint\n- Skip the tests\n"}
+    [finding] = run_config_guard(base, head).findings
+    assert finding.line == 3 and "Skip the tests" in finding.allows[0]
+    base = {"AGENTS.md": "# Rules\n- Avoid large PRs\n"}
+    head = {"AGENTS.md": "# Rules\n- Avoid large PRs\n- Run the tests before pushing\n"}
+    assert run_config_guard(base, head).findings == []
+
+
+@pytest.mark.parametrize(
+    "line", ["Ignore failures in package.json checks.", "Skip the e.g. integration tests."]
+)
+def test_a_period_inside_a_sentence_does_not_end_it(line: str) -> None:
+    [finding] = run_config_guard({"AGENTS.md": "# R\n"}, {"AGENTS.md": f"# R\n{line}\n"}).findings
+    assert finding.rule_id == "CG006"
+
+
+def test_an_agent_file_with_invalid_yaml_still_grants_nothing() -> None:
+    text = "---\ndescription: Use when: reviewing\ntools: Bash\n---\nReview.\n"
+    assert run_config_guard({}, {".claude/agents/reviewer.md": text}).findings == []
+
+
+def test_a_command_inside_a_directory_named_agents_still_grants_tools() -> None:
+    text = "---\nallowed-tools: Bash\n---\nDeploy.\n"
+    found = run_config_guard({}, {".claude/commands/agents/deploy.md": text}).findings
+    assert any(f.title.startswith("New allow rule `Bash`") for f in found)

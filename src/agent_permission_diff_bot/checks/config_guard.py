@@ -79,12 +79,13 @@ _MODE_TEXT = {
 _SKIP_CHECK_RE = re.compile(
     r"(\b(skip|bypass|ignore|disable|avoid|suppress|silence)\b|\bdo(n'?t| not)\s+run\b|"
     r"\bnever\s+run\b|\bno need to (run|wait for)\b|\bwithout (running|waiting for)\b)"
-    r"[^.!?;\n]{0,60}\b(tests?|reviews?|approvals?|secrets?|permissions?|polic(y|ies)|"
+    r"(?:[^.!?;\n]|\.(?=\S)){0,60}\b(tests?|reviews?|approvals?|secrets?|permissions?|polic(y|ies)|"
     r"guard(rail)?s?|hooks?|checks?|lint\w*|ci|type.?check\w*|verification|pre-commit)\b"
     r"|--no-verify\b|--dangerously-skip-permissions\b",
     re.IGNORECASE,
 )
 _ABSORBED_BY_HOOK = {"APD011", "APD012", "APD015", "APD105"}
+_AGENT_RE = re.compile(r"(^|/)\.claude/agents/[^/]+\.md$", re.IGNORECASE)
 _SKILL_RE = re.compile(r"(^|/)\.claude/(commands|skills|agents)/.+\.md$", re.IGNORECASE)
 _CODEX_RULES_RE = re.compile(r"(^|/)\.codex/rules/[^/]+\.rules$", re.IGNORECASE)
 _MATCHER_RE = re.compile(r'"matcher":\s*"([^"]*)"')
@@ -426,9 +427,6 @@ def _mode_finding(
     )
 
 
-_DEFAULT_MODE_RANK = 1
-
-
 def _mode_removed(atom: PermissionAtom, changes: Iterable[PermissionChange]) -> CheckFinding | None:
     """A restrictive mode deleted outright: the agent falls back to its default."""
     replaced = any(
@@ -439,9 +437,10 @@ def _mode_removed(atom: PermissionAtom, changes: Iterable[PermissionChange]) -> 
         for other in changes
     )
     ranks = MODE_RANKS.get(atom.resource, {})
-    # Every mode key falls back to a rank-1 default (`default`, `workspace-write`,
-    # `on-request`); removing a value at or above that rank asks as often or more.
-    if replaced or not ranks or ranks.get(atom.value, _DEFAULT_MODE_RANK) >= _DEFAULT_MODE_RANK:
+    # Without the explicit value the mode comes from another settings layer (user or local)
+    # or the built-in default, and either may ask less often; only removing the most
+    # permissive value is certainly not a widening.
+    if replaced or not ranks or ranks.get(atom.value, 0) >= max(ranks.values()):
         return None
     return CheckFinding(
         check="config-guard",
@@ -449,7 +448,12 @@ def _mode_removed(atom: PermissionAtom, changes: Iterable[PermissionChange]) -> 
         severity=Severity.MEDIUM,
         title=f"{md_code(atom.resource)} {md_code(atom.value)} removed",
         path=atom.path,
-        allows=("The agent falls back to its default mode, which may ask less often.",),
+        allows=(
+            (
+                "Without this explicit value the mode comes from another settings layer (user or "
+                "local) or the built-in default, which may ask less often."
+            ),
+        ),
         fix=f"Keep {md_code(atom.resource + ' = ' + atom.value)} unless the default is intended.",
     )
 
@@ -640,19 +644,27 @@ def _negated(text: str, match: re.Match[str]) -> bool:
     return bool(_NEGATOR_RE.search(before))
 
 
+_ABBREVIATIONS = re.compile(r"\b(e\.g\.|i\.e\.|etc\.|vs\.)", re.IGNORECASE)
+_BLOCK_START_RE = re.compile(r"^\s*([-*+]\s|\d+[.)]\s|#{1,6}\s|>|\|)")
+
+
 def _added_passages(lines: list[str], added: set[int]) -> Iterable[tuple[int, str]]:
     """Skip-check matches that touch an added line, read across its whole paragraph.
 
     Instructions are often hard-wrapped, so a sentence edited on one line (`Always run the`
     becoming `Always skip the`) only reads as a skip instruction with its unchanged
-    neighbours. Each paragraph holding an added line is matched as one text; a match is
-    reported when it covers an added line, so untouched instructions stay quiet.
+    continuation lines. Each unit (a bullet, heading or wrapped paragraph) holding an added
+    line is matched as one text; a match is reported when it covers an added line, so
+    untouched instructions stay quiet and neighbouring bullets never merge.
     """
     paragraphs: list[list[int]] = []
     for number, line in enumerate(lines, start=1):
         if not line.strip():
             continue
-        if paragraphs and paragraphs[-1][-1] == number - 1:
+        # A bullet, heading, quote or table row starts its own unit; only wrapped
+        # continuation lines join the unit above them.
+        continues = paragraphs and paragraphs[-1][-1] == number - 1
+        if continues and not _BLOCK_START_RE.match(line):
             paragraphs[-1].append(number)
         else:
             paragraphs.append([number])
@@ -665,8 +677,10 @@ def _added_passages(lines: list[str], added: set[int]) -> Iterable[tuple[int, st
             text += lines[number - 1].strip() + " "
             spans.append((start, len(text), number))
         reported: set[int] = set()
-        for match in _SKIP_CHECK_RE.finditer(text):
-            if _negated(text, match):
+        # "e.g." and "i.e." do not end a sentence; same-length stand-ins keep offsets exact.
+        searchable = _ABBREVIATIONS.sub(lambda m: m.group(0).replace(".", "_"), text)
+        for match in _SKIP_CHECK_RE.finditer(searchable):
+            if _negated(searchable, match):
                 continue
             covered = [n for s, e, n in spans if s < match.end() and e > match.start()]
             touched = [n for n in covered if n in added]
@@ -795,6 +809,10 @@ class _NoAliasLoader(yaml.SafeLoader):
 
 def _frontmatter_rules(text: str, path: str) -> list[Rule] | None:
     """Allow rules from skill frontmatter; None when the frontmatter cannot be read."""
+    # In a subagent (`.claude/agents/*.md`), `tools:` restricts which tools it may use; it
+    # pre-approves nothing, so a subagent file grants no allow rules at all.
+    if _AGENT_RE.search(path):
+        return []
     frontmatter = _FRONTMATTER_RE.match(text)
     if frontmatter is None:
         return []  # no closing `---` line: Claude Code reads no frontmatter either
@@ -811,10 +829,7 @@ def _frontmatter_rules(text: str, path: str) -> list[Rule] | None:
         return _tools_from_invalid_yaml(parts[1], source)
     if not isinstance(data, Mapping):
         return None if data is not None else []
-    # In a subagent (`.claude/agents/*.md`), `tools:` restricts which tools it may use; it
-    # pre-approves nothing. Only skills and commands grant tools, through `allowed-tools`.
-    is_agent = "/agents/" in f"/{path.lower()}"
-    value = data.get("allowed-tools") if is_agent else data.get("allowed-tools", data.get("tools"))
+    value = data.get("allowed-tools", data.get("tools"))
     if not value:
         return []
     # Only plain strings are read. YAML aliases can make a tiny file stand for a huge
