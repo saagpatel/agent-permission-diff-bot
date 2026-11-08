@@ -157,7 +157,9 @@ def _parse_project_config(path: str, text: str) -> ProjectConfig:
                 data = json.loads(text)
             except ValueError:
                 data = json.loads(_strip_jsonc(text))
-    except (ValueError, MemoryError, RecursionError):
+    except (ValueError, RecursionError):
+        # MemoryError is not caught: under the App's memory cap it must end the analysis
+        # (unfinished, so Config Guard fails) rather than read as an unparseable file.
         return ProjectConfig(error="unparseable startup config")
     if not isinstance(data, Mapping):
         return ProjectConfig(error="startup config must be an object")

@@ -19,6 +19,7 @@ from typing import Any
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
+from agent_permission_diff_bot.app.analysis import AnalysisLimits
 from agent_permission_diff_bot.app.fake_github import FakeGitHub, read_git_tree, read_tree_dir
 from agent_permission_diff_bot.app.server import create_app
 from agent_permission_diff_bot.app.settings import AppSettings
@@ -77,7 +78,14 @@ class ReplayResult:
 class Replayer:
     """One App instance and one in-memory GitHub, so pushes can be replayed in sequence."""
 
-    def __init__(self, recording: Recording, *, guard_fail_on: Severity | None = Severity.HIGH):
+    def __init__(
+        self,
+        recording: Recording,
+        *,
+        guard_fail_on: Severity | None = Severity.HIGH,
+        limits: AnalysisLimits | None = None,
+    ):
+        limits = limits or AnalysisLimits()
         key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         private_pem = key.private_bytes(
             serialization.Encoding.PEM,
@@ -110,6 +118,8 @@ class Replayer:
             webhook_secret=self.secret,
             api_url="https://api.github.test",
             guard_fail_on=guard_fail_on,
+            analysis_timeout_s=limits.timeout_s,
+            analysis_memory_mb=max(1, limits.memory_bytes // (1024 * 1024)),
             swallowed_fail_on=None,
         )
         self.client = TestClient(create_app(settings, transport=self.github.transport()))

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import time
+from dataclasses import asdict
 from pathlib import Path
 
 import httpx
@@ -14,6 +15,7 @@ from agent_permission_diff_bot.app.pipeline import target_from_event
 from agent_permission_diff_bot.app.replay import Recording, Replayer
 from agent_permission_diff_bot.app.settings import AppSettings, SettingsError
 from agent_permission_diff_bot.checks.render import COMMENT_MARKER
+from agent_permission_diff_bot.model import Severity
 
 FIXTURES = Path(__file__).parent / "fixtures" / "app"
 
@@ -250,16 +252,38 @@ def test_padding_a_pr_with_agent_files_cannot_hide_a_settings_change() -> None:
     assert "Bash(git *)" in body
 
 
-def test_a_crashed_check_never_reads_as_all_clear(monkeypatch: pytest.MonkeyPatch) -> None:
-    def boom(*args: object) -> object:
-        raise RuntimeError("synthetic crash")
+def test_an_analysis_that_exceeds_its_limits_never_reads_as_all_clear() -> None:
+    from agent_permission_diff_bot.app.analysis import AnalysisLimits
 
-    monkeypatch.setattr("agent_permission_diff_bot.app.pipeline.run_config_guard", boom)
-    replayer = run("clean")
+    replayer = Replayer(Recording.load(FIXTURES / "clean"), limits=AnalysisLimits(timeout_s=0.001))
+    assert replayer.send() == 202
     assert conclusions(replayer)["Agent Config Guard"] == "failure"
     [body] = bot_comments(replayer)
     assert "did not finish" in body
     assert "No new agent permission widening" not in body
+    runs = {run_["name"]: run_ for run_ in replayer.github.check_runs.values()}
+    assert "timed out" in runs["Agent Config Guard"]["output"]["summary"], "the deadline fired"
+
+
+def test_analysis_results_survive_the_round_trip_through_the_child() -> None:
+    from agent_permission_diff_bot.app.analysis import AnalysisLimits, run_analysis
+    from agent_permission_diff_bot.app.snapshot import PullInputs
+    from agent_permission_diff_bot.checks.config_guard import run_config_guard
+    from agent_permission_diff_bot.checks.swallowed import ChangedFile, scan_swallowed
+
+    base = {".claude/settings.json": json.dumps({"permissions": {"allow": []}})}
+    head = {".claude/settings.json": json.dumps({"permissions": {"allow": ["Bash(git *)"]}})}
+    source = (
+        "try:\n    db.commit()\nexcept Exception:  # swallowed: ok, retried by the job\n"
+        "    pass\ntry:\n    db.commit()\nexcept Exception:\n    pass\n"
+    )
+    changed = [ChangedFile("x.py", source, frozenset(range(1, 9)))]
+    inputs = PullInputs(base_files=base, head_files=head, swallowed_files=changed)
+    [guard, swallowed] = run_analysis(inputs, AnalysisLimits())
+    direct_swallowed = scan_swallowed(changed)
+    assert direct_swallowed.deliberate and direct_swallowed.findings, "the input covers both"
+    assert asdict(guard) == asdict(run_config_guard(base, head))
+    assert asdict(swallowed) == asdict(direct_swallowed)
 
 
 def test_an_older_push_finishing_late_does_not_overwrite_the_comment() -> None:
@@ -764,3 +788,210 @@ def test_a_malformed_payload_answer_does_not_echo_details() -> None:
     )
     assert response.status_code == 400
     assert response.json() == {"error": "payload is missing required fields"}
+
+
+def test_one_check_crashing_in_the_child_still_reports_the_other() -> None:
+    from agent_permission_diff_bot.app.analysis import AnalysisLimits, run_analysis
+    from agent_permission_diff_bot.app.snapshot import PullInputs
+    from agent_permission_diff_bot.checks.swallowed import ChangedFile
+
+    source = "try:\n    db.commit()\nexcept Exception:\n    pass\n"
+    inputs = PullInputs(
+        base_files={},
+        head_files={".claude/settings.json": 42},  # type: ignore[dict-item]
+        swallowed_files=[ChangedFile("x.py", source, frozenset({1, 2, 3, 4}))],
+    )
+    guard, swallowed = run_analysis(inputs, AnalysisLimits())
+    assert guard.crashed and "did not finish" in guard.notes[0]
+    assert not swallowed.crashed and [f.rule_id for f in swallowed.findings] == ["SW-data-loss"]
+
+
+@pytest.mark.parametrize(
+    "data",
+    [
+        {"check": "config-guard"},
+        {"check": "config-guard", "findings": {}, "deliberate": [], "notes": [], "crashed": False},
+        {"check": "config-guard", "findings": [], "deliberate": [], "notes": [], "crashed": []},
+        {
+            "check": "config-guard",
+            "findings": [
+                {
+                    "check": "swallowed",
+                    "rule_id": "CG001",
+                    "severity": 3,
+                    "title": "t",
+                    "path": "p",
+                    "allows": [],
+                    "fix": "f",
+                }
+            ],
+            "deliberate": [],
+            "notes": [],
+            "crashed": False,
+        },
+    ],
+)
+def test_malformed_results_are_refused(data: dict[str, object]) -> None:
+    from agent_permission_diff_bot.checks.model import result_from_dict
+
+    with pytest.raises(ValueError):
+        result_from_dict(data)
+
+
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("APDB_ANALYSIS_TIMEOUT_S", "nan"),
+        ("APDB_ANALYSIS_TIMEOUT_S", "inf"),
+        ("APDB_ANALYSIS_TIMEOUT_S", "0"),
+        ("APDB_ANALYSIS_MEMORY_MB", "inf"),
+        ("APDB_ANALYSIS_MEMORY_MB", "0.5"),
+        ("APDB_ANALYSIS_MEMORY_MB", "32"),
+        ("APDB_ANALYSIS_MEMORY_MB", "128"),
+        ("APDB_ANALYSIS_MEMORY_MB", "2000000"),
+        ("APDB_ANALYSIS_TIMEOUT_S", "1e10"),
+    ],
+)
+def test_analysis_limits_must_be_sane(tmp_path: Path, name: str, value: str) -> None:
+    key = tmp_path / "app.pem"
+    key.write_text("-----BEGIN PRIVATE KEY-----\nsynthetic\n-----END PRIVATE KEY-----\n")
+    env = {
+        "APDB_APP_ID": "12345",
+        "APDB_PRIVATE_KEY_PATH": str(key),
+        "APDB_WEBHOOK_SECRET": "synthetic-webhook-secret",
+        name: value,
+    }
+    with pytest.raises(SettingsError, match=name):
+        AppSettings.from_env(env)
+
+
+def test_hook_references_that_exceed_the_limits_fail_closed() -> None:
+    from agent_permission_diff_bot.app.analysis import AnalysisLimits
+    from agent_permission_diff_bot.app.snapshot import collect_inputs
+    from agent_permission_diff_bot.checks.config_guard import run_config_guard
+
+    settings = json.dumps(
+        {"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "bash a.sh"}]}]}}
+    )
+
+    class Repo:
+        def tree(self, sha: str) -> tuple[dict[str, dict[str, object]], bool]:
+            return {".claude/settings.json": {"sha": "c", "mode": "100644", "size": 10}}, False
+
+        def blob_text(self, sha: str, max_bytes: int) -> str:
+            return settings
+
+    changed = [
+        {
+            "filename": ".claude/settings.json",
+            "status": "modified",
+            "sha": "c",
+            "patch": "@@ -1 +1 @@\n+x",
+        }
+    ]
+    inputs = collect_inputs(
+        Repo(), "b" * 40, "h" * 40, changed, limits=AnalysisLimits(timeout_s=0.001)
+    )
+    found = run_config_guard(inputs.base_files, inputs.head_files).findings
+    assert any(f.rule_id == "APD013" for f in found)
+
+
+@pytest.mark.parametrize("fail_on", [Severity.CRITICAL, None])
+def test_unresolved_hook_references_fail_config_guard_whatever_the_threshold(
+    fail_on: Severity | None,
+) -> None:
+    from agent_permission_diff_bot.app.analysis import AnalysisLimits, run_analysis
+    from agent_permission_diff_bot.app.snapshot import PullInputs
+    from agent_permission_diff_bot.checks.render import conclusion
+
+    inputs = PullInputs(
+        base_files={},
+        head_files={},
+        swallowed_files=[],
+        guard_unfinished=["Scripts the startup configs refer to were not resolved: timed out."],
+    )
+    guard, swallowed = run_analysis(inputs, AnalysisLimits())
+    assert guard.crashed and "not resolved" in guard.notes[0]
+    assert conclusion(guard, fail_on) == "failure"
+    assert not swallowed.crashed
+
+
+def test_a_timed_out_hook_reference_step_marks_config_guard_unfinished() -> None:
+    from agent_permission_diff_bot.app.analysis import AnalysisLimits
+    from agent_permission_diff_bot.app.snapshot import collect_inputs
+
+    settings = json.dumps(
+        {"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "bash a.sh"}]}]}}
+    )
+
+    class Repo:
+        def tree(self, sha: str) -> tuple[dict[str, dict[str, object]], bool]:
+            return {".claude/settings.json": {"sha": "c", "mode": "100644", "size": 10}}, False
+
+        def blob_text(self, sha: str, max_bytes: int) -> str:
+            return settings
+
+    changed = [{"filename": ".claude/settings.json", "status": "modified", "sha": "c"}]
+    inputs = collect_inputs(
+        Repo(), "b" * 40, "h" * 40, changed, limits=AnalysisLimits(timeout_s=0.001)
+    )
+    assert inputs.guard_unfinished and "timed out" in inputs.guard_unfinished[0]
+
+
+def test_running_out_of_memory_in_one_check_is_not_a_single_check_crash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_permission_diff_bot.app import analysis
+
+    def exhausted(files: object) -> object:
+        raise MemoryError
+
+    monkeypatch.setattr(analysis, "scan_swallowed", exhausted)
+    with pytest.raises(MemoryError):
+        analysis.analyze({}, {}, [])
+
+
+@pytest.mark.parametrize("target", ["startup-config", "rules"])
+def test_running_out_of_memory_inside_a_parser_ends_the_analysis(
+    monkeypatch: pytest.MonkeyPatch, target: str
+) -> None:
+    import ast
+
+    from agent_permission_diff_bot import persistence
+    from agent_permission_diff_bot.app import analysis
+
+    def exhausted(*args: object, **kwargs: object) -> object:
+        raise MemoryError
+
+    if target == "startup-config":
+        monkeypatch.setattr(persistence.json, "loads", exhausted)
+        head = {".claude/settings.json": "{}"}
+    else:
+        monkeypatch.setattr(ast, "parse", exhausted)
+        head = {".codex/rules/default.rules": "prefix_rule(pattern=['git'])\n"}
+    with pytest.raises(MemoryError):
+        analysis.analyze({}, head, [])
+
+
+@pytest.mark.parametrize("returned", ["start-error", "empty", "swapped"])
+def test_a_child_that_fails_or_answers_out_of_shape_leaves_both_checks_unfinished(
+    monkeypatch: pytest.MonkeyPatch, returned: str
+) -> None:
+    from agent_permission_diff_bot.app import analysis
+    from agent_permission_diff_bot.app.snapshot import PullInputs
+    from agent_permission_diff_bot.checks.render import conclusion
+    from agent_permission_diff_bot.limited import ChildStartError
+
+    def fake(*args: object, **kwargs: object) -> object:
+        if returned == "start-error":
+            raise ChildStartError("could not start the analysis process: EAGAIN")
+        if returned == "empty":
+            return []
+        guard, swallowed = analysis.analyze({}, {}, [])
+        return [asdict(swallowed), asdict(guard)]
+
+    monkeypatch.setattr(analysis, "run_limited", fake)
+    inputs = PullInputs(base_files={}, head_files={}, swallowed_files=[])
+    guard, swallowed = analysis.run_analysis(inputs, analysis.AnalysisLimits())
+    assert guard.crashed and swallowed.crashed
+    assert conclusion(guard, None) == "failure"

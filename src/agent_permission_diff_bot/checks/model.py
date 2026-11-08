@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, cast
 
 from agent_permission_diff_bot.model import Severity
 from agent_permission_diff_bot.redaction import redact_text
@@ -78,3 +78,50 @@ def md_code(value: str) -> str:
     fence = "`" * (longest + 1)
     pad = " " if value.startswith("`") or value.endswith("`") else ""
     return f"{fence}{pad}{value}{pad}{fence}"
+
+
+def _same_check(value: object, check: str) -> CheckName:
+    if value != check:
+        raise ValueError(f"finding belongs to {value!r}, not {check!r}")
+    return cast(CheckName, check)
+
+
+def result_from_dict(data: object) -> CheckResult:
+    """Rebuild a ``CheckResult`` from its JSON form (as ``run_limited`` returns it).
+
+    Raises ``ValueError`` for anything not shaped like one, so a caller can treat a
+    malformed result as an unfinished check rather than trust it.
+    """
+    if not isinstance(data, dict) or data.get("check") not in ("config-guard", "swallowed"):
+        raise ValueError("not a check result")
+    for key, kind in (("findings", list), ("deliberate", list), ("notes", list), ("crashed", bool)):
+        if not isinstance(data.get(key), kind):
+            raise ValueError(f"check result field {key!r} is missing or not a {kind.__name__}")
+    try:
+        findings = [
+            CheckFinding(
+                check=_same_check(item["check"], data["check"]),
+                rule_id=str(item["rule_id"]),
+                severity=Severity(int(item["severity"])),
+                title=str(item["title"]),
+                path=str(item["path"]),
+                allows=tuple(str(line) for line in item["allows"]),
+                fix=str(item["fix"]),
+                line=None if item.get("line") is None else int(item["line"]),
+                category=str(item.get("category", "")),
+            )
+            for item in data.get("findings", [])
+        ]
+        deliberate = [
+            DeliberateCatch(path=str(d["path"]), line=int(d["line"]), reason=str(d["reason"]))
+            for d in data.get("deliberate", [])
+        ]
+        return CheckResult(
+            check=data["check"],
+            findings=findings,
+            deliberate=deliberate,
+            notes=[str(note) for note in data.get("notes", [])],
+            crashed=bool(data.get("crashed", False)),
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise ValueError(f"malformed check result: {exc}") from exc
