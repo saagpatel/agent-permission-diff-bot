@@ -31,6 +31,7 @@ from agent_permission_diff_bot.checks.model import (
     DeliberateCatch,
     rank,
 )
+from agent_permission_diff_bot.checks.probe import probe_handler
 from agent_permission_diff_bot.model import Severity
 
 MAX_FILE_BYTES = 1024 * 1024
@@ -206,6 +207,7 @@ class _Catch:
     broad: bool
     narrow: bool
     language: str
+    probe: str = ""  # the probe's sentence, worked out from the already parsed tree
 
 
 def scan_swallowed(files: Iterable[ChangedFile]) -> CheckResult:
@@ -323,6 +325,8 @@ def _classify(
                 f"Probably deliberate: only `{catch.caught}` is dropped, and the protected code "
                 "does not write, authenticate or call the network."
             ]
+        if catch.probe:
+            allows.insert(1, catch.probe)
         findings.append(
             CheckFinding(
                 check="swallowed",
@@ -408,6 +412,7 @@ def _python_catches(changed: ChangedFile, notes: list[str]) -> list[_Catch]:
                         broad=caught in _BROAD_PY or caught == "bare except",
                         narrow=_all_narrow(handler.type),
                         language="python",
+                        probe=probe_handler(node, handler).sentence(),
                     )
                 )
         elif isinstance(node, (ast.With, ast.AsyncWith)):

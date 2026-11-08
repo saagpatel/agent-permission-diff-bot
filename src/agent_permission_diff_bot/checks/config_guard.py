@@ -16,6 +16,7 @@ import re
 from collections.abc import Iterable, Mapping
 from dataclasses import replace
 from pathlib import PurePosixPath
+from typing import Any
 
 import yaml
 
@@ -677,6 +678,10 @@ def _rule_file_findings(
             try:
                 before = _codex_rules(base.get(path, ""), path)
             except RulesParseError:
+                if base.get(path) != head.get(path):
+                    # The old rules cannot be read, so whatever this change removes from them
+                    # (a forbidden or prompt rule) cannot be seen: fail closed.
+                    yield ("unreadable-base", path), _unreadable_rules(path, previous=True)
                 before = []
             try:
                 after = _codex_rules(text, path)
@@ -731,7 +736,20 @@ def _removed_codex_gates(
         )
 
 
-def _unreadable_rules(path: str) -> CheckFinding:
+def _unreadable_rules(path: str, *, previous: bool = False) -> CheckFinding:
+    if previous:
+        return CheckFinding(
+            check="config-guard",
+            rule_id="CG007",
+            severity=Severity.HIGH,
+            title=f"The previous {md_code(path)} could not be parsed",
+            path=path,
+            allows=(
+                "Config Guard could not read the rules this change edits or deletes, so a "
+                "removed forbidden or prompt rule would go unseen.",
+            ),
+            fix="Review the rules removed from this file by hand, or simplify the old file first.",
+        )
     return CheckFinding(
         check="config-guard",
         rule_id="CG007",
@@ -757,6 +775,24 @@ _TOOLS_LINE_RE = re.compile(r"^(allowed-tools|tools):[ \t]*(?P<value>[^\n]*)$", 
 _BLOCK_ITEM_RE = re.compile(r"^[ \t]*-[ \t]+(?P<item>[^\n]+?)[ \t]*$")
 
 
+class _AliasRefusedError(yaml.YAMLError):
+    """Frontmatter used a YAML alias (`*name`, including merge keys `<<: *name`)."""
+
+
+class _NoAliasLoader(yaml.SafeLoader):
+    """``SafeLoader`` that refuses aliases before resolving them.
+
+    PyYAML resolves ``<<: *anchor`` merges and ``*anchor`` references while loading, so a
+    few hundred bytes can stand for millions of entries before any size check runs. Skill
+    frontmatter never needs aliases, so the first one makes the file unreadable (CG007).
+    """
+
+    def compose_node(self, parent: Any, index: Any) -> Any:
+        if self.check_event(yaml.events.AliasEvent):
+            raise _AliasRefusedError("YAML aliases are not read in skill frontmatter")
+        return super().compose_node(parent, index)
+
+
 def _frontmatter_rules(text: str, path: str) -> list[Rule] | None:
     """Allow rules from skill frontmatter; None when the frontmatter cannot be read."""
     frontmatter = _FRONTMATTER_RE.match(text)
@@ -767,7 +803,9 @@ def _frontmatter_rules(text: str, path: str) -> list[Rule] | None:
         return None
     source = Source("claude", "skill allowed-tools", path, path)
     try:
-        data = yaml.safe_load(parts[1])
+        data = yaml.load(parts[1], Loader=_NoAliasLoader)
+    except _AliasRefusedError:
+        return None  # aliases can expand exponentially; never read past one
     except yaml.YAMLError:
         # Claude Code reads `allowed-tools: Bash(git log: *)` even though it is not YAML.
         return _tools_from_invalid_yaml(parts[1], source)

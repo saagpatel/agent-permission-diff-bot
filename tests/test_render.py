@@ -165,3 +165,10 @@ def test_redaction_runs_before_escaping_so_spans_stay_closed() -> None:
     html = _html(body)
     assert "synthetic-value" not in body
     assert "<details" not in html and "<summary" not in html
+
+
+def test_quoted_mentions_do_not_ping_anyone() -> None:
+    hostile = finding(allows=("Agents are told: “ask @security-team or @octocat to approve”",))
+    body = render_comment([CheckResult("config-guard", [hostile])], REPO)
+    assert "@security-team" not in body and "@octocat" not in body
+    assert "@⁠security-team" in body
