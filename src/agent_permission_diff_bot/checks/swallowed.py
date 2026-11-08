@@ -240,7 +240,13 @@ def scan_swallowed(files: Iterable[ChangedFile]) -> CheckResult:
             )
         else:
             for changed in ts_files:
-                catches, comments = _ts_catches(changed, parser)
+                try:
+                    catches, comments = _ts_catches(changed, parser)
+                except RecursionError:
+                    # A pathologically nested file is refused on its own, like one that
+                    # does not parse, so the other files' findings still stand.
+                    result.notes.append(f"`{changed.path}` is nested too deeply; not scanned.")
+                    continue
                 _classify(changed, catches, comments, findings, result.deliberate)
     result.findings = rank(findings)
     return result
@@ -601,7 +607,8 @@ def _ts_catch(changed: ChangedFile, node: Any, protected: Any, caught: str) -> _
 
 def _ts_block_swallows(block: Any, clause: Any) -> bool:
     param = clause.child_by_field_name("parameter")
-    param_name = _text(param) if param is not None and param.type == "identifier" else ""
+    # Every name the parameter binds, so `catch ({ message }) { last = message; }` keeps it.
+    names = sorted(_ts_bound_names(param)) if param is not None else []
     for statement in block.named_children:
         if statement.type in {"comment", "empty_statement"}:
             continue
@@ -609,9 +616,9 @@ def _ts_block_swallows(block: Any, clause: Any) -> bool:
             continue
         if statement.type == "return_statement":
             values = [c for c in statement.named_children if c.type != "comment"]
-            if not values or _ts_plain(values[0], param_name):
+            if not values or _ts_plain(values[0], *names):
                 continue
-        if statement.type == "expression_statement" and _ts_plain_assignment(statement, param_name):
+        if statement.type == "expression_statement" and _ts_plain_assignment(statement, *names):
             continue
         return False
     return True
@@ -620,16 +627,26 @@ def _ts_block_swallows(block: Any, clause: Any) -> bool:
 def _ts_plain_assignment(statement: Any, *forbidden: str) -> bool:
     """`ok = false;` or `this.failed = true;`: a flag set, the error itself dropped."""
     expressions = [c for c in statement.named_children if c.type != "comment"]
-    if len(expressions) != 1 or expressions[0].type != "assignment_expression":
-        return False
-    left = expressions[0].child_by_field_name("left")
-    right = expressions[0].child_by_field_name("right")
-    return (
-        left is not None
-        and _ts_plain_target(left, *forbidden)
-        and right is not None
-        and _ts_plain(right, *forbidden)
-    )
+    return len(expressions) == 1 and _ts_flag_set(expressions[0], *forbidden)
+
+
+def _ts_flag_set(node: Any, *forbidden: str) -> bool:
+    """`ok = false`, `failed ||= true`, `errors += 1` or `errors++` on a plain target."""
+    while node.type == "parenthesized_expression" and node.named_children:
+        node = node.named_children[0]
+    if node.type in {"assignment_expression", "augmented_assignment_expression"}:
+        left = node.child_by_field_name("left")
+        right = node.child_by_field_name("right")
+        return (
+            left is not None
+            and _ts_plain_target(left, *forbidden)
+            and right is not None
+            and _ts_plain(right, *forbidden)
+        )
+    if node.type == "update_expression":
+        argument = node.child_by_field_name("argument")
+        return argument is not None and _ts_plain_target(argument, *forbidden)
+    return False
 
 
 _TS_WRAPPERS = frozenset(
@@ -676,7 +693,7 @@ def _ts_handler_swallows(handler: Any) -> bool:
         params = handler.child_by_field_name("parameters") or handler.child_by_field_name(
             "parameter"
         )
-        names = _ts_identifiers(params) if params is not None else set()
+        names = _ts_bound_names(params) if params is not None else set()
         if body.type == "statement_block":
             for statement in body.named_children:
                 if statement.type in {"comment", "empty_statement"}:
@@ -691,7 +708,8 @@ def _ts_handler_swallows(handler: Any) -> bool:
                     continue
                 return False
             return True
-        return _ts_plain(body, *names)
+        # `() => null` or a flag set as the whole body: `() => (failed = true)`
+        return _ts_plain(body, *names) or _ts_flag_set(body, *names)
     return handler.type == "identifier" and _text(handler) in {"noop", "_noop", "ignore"}
 
 
@@ -710,14 +728,43 @@ def _ts_plain(node: Any, *forbidden: str) -> bool:
     return False
 
 
-def _ts_identifiers(node: Any) -> set[str]:
+# In a destructuring pattern these fields hold expressions (a default value, a computed
+# key) or a type, not names the pattern binds.
+_TS_NOT_BOUND_FIELDS = frozenset({"right", "value", "key", "type"})
+
+
+def _ts_bound_names(node: Any) -> set[str]:
+    """Names a parameter (or parameter list) binds, the caught error and its parts.
+
+    `{ message }` binds `message`; `{ message = fallback }` binds `message` but not
+    `fallback`; `{ [key]: text }` binds `text` but not `key`. Iterative, so a deeply nested
+    pattern in a pull request cannot exhaust the interpreter stack.
+    """
     found: set[str] = set()
     stack = [node]
     while stack:
         current = stack.pop()
-        if current.type == "identifier":
+        if current.type in {"identifier", "shorthand_property_identifier_pattern"}:
             found.add(_text(current))
-        stack.extend(current.children)
+            continue
+        only = {
+            "pair_pattern": "value",
+            "object_assignment_pattern": "left",
+            "assignment_pattern": "left",
+            "required_parameter": "pattern",
+            "optional_parameter": "pattern",
+        }.get(current.type)
+        if only is not None:
+            child = current.child_by_field_name(only)
+            if child is not None:
+                stack.append(child)
+            continue
+        for index, child in enumerate(current.children):
+            if not child.is_named or child.type == "type_annotation":
+                continue
+            if current.field_name_for_child(index) in _TS_NOT_BOUND_FIELDS:
+                continue
+            stack.append(child)
     return found
 
 
