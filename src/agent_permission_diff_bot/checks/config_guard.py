@@ -647,7 +647,7 @@ def _negated(text: str, match: re.Match[str]) -> bool:
     start = _token_start(text, match)
     # A flag whose name holds the verb (`--skip-hooks`) is negated like `--no-verify`:
     # `Never use --skip-hooks`. `Speed matters--skip the tests` has no negator either way.
-    flag = text.startswith("--", start) and (start == 0 or not text[start - 1].isalnum())
+    flag = text.startswith("--", start)
     before = text[_clause_start(text, start) : start]
     return bool((_FLAG_NEGATOR_RE if flag else _NEGATOR_RE).search(before))
 
@@ -655,17 +655,20 @@ def _negated(text: str, match: re.Match[str]) -> bool:
 def _token_start(text: str, match: re.Match[str]) -> int:
     """Where the matched instruction starts: at the `--` of a flag such as `--skip-hooks`.
 
-    Only a `--` that starts a token is a flag; `pass--skip` is a dash between two words.
+    A `--` is a flag only when it starts a token and the verb after it either continues the
+    flag's name (`--skip-hooks`) or ends the token (`never pass --skip.`). `pass--skip` and
+    `pass --skip the review` use `--` as a dash between words.
     """
     start = match.start()
     dashes = start - 2
-    if (
-        dashes >= 0
-        and text[dashes:start] == "--"
-        and (dashes == 0 or not text[dashes - 1].isalnum())
-    ):
-        return dashes
-    return start
+    if dashes < 0 or text[dashes:start] != "--":
+        return start
+    if dashes > 0 and text[dashes - 1].isalnum():
+        return start
+    verb = _SKIP_WORD_RE.match(text, start)
+    if verb is None or not _FLAG_TAIL_RE.match(text, verb.end()):
+        return start
+    return dashes
 
 
 def _clause_start(text: str, position: int) -> int:
@@ -674,12 +677,15 @@ def _clause_start(text: str, position: int) -> int:
 
 
 # A verb inside `--dangerously-skip-permissions` or `--dangerously-bypass-approvals-and-sandbox`
-# belongs to that flag, which has its own branch and is matched (and negated) as a whole. Any
-# other flag holding a skip verb (`--skip-hooks`, `--bypass-checks`) is read as the
-# instruction it is.
+# belongs to that flag, which has its own branch and is matched (and negated) as a whole. A
+# verb right after `--no-` is negated by the flag itself (`--no-skip-hooks`). Any other flag
+# holding a skip verb (`--skip-hooks`, `--bypass-checks`, `--ignore-scripts`, which skips
+# npm's `pre`/`post` and `prepare` scripts) is read as the instruction it is.
 _INSIDE_FLAG_RE = re.compile(r"--(?:dangerously|no)-$", re.IGNORECASE)
-# Flags whose name holds a skip verb but that skip nothing a reviewer relies on.
-_HARMLESS_FLAG_RE = re.compile(r"--ignore-scripts\b", re.IGNORECASE)
+_SKIP_WORD_RE = re.compile(_SKIP_WORD, re.IGNORECASE)
+# After the verb, a flag's name goes on with `-`, or the token ends (punctuation, a closing
+# code or quote mark, another flag, or the end of the text).
+_FLAG_TAIL_RE = re.compile(r"-|[`'\")\].,;:!?]|\s*(?:$|--)")
 # A negator covers a list of skip verbs joined by at least one conjunction: `Never skip,
 # bypass, or disable hooks`, `never skip or bypass or disable hooks`. A comma alone does not
 # make a list (`Never skip, disable the hooks`).
@@ -746,8 +752,6 @@ def _added_passages(lines: list[str], added: set[int]) -> Iterable[tuple[int, st
         while match := _SKIP_CHECK_RE.search(searchable, position):
             position = match.start() + 1
             if _INSIDE_FLAG_RE.search(searchable, max(0, match.start() - 20), match.start()):
-                continue
-            if _HARMLESS_FLAG_RE.match(searchable, _token_start(searchable, match)):
                 continue
             if match.start() < negated_until:
                 continue  # a later verb in a negated list
