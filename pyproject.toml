@@ -20,8 +20,20 @@ dependencies = [
 [project.scripts]
 agent-permission-diff = "agent_permission_diff_bot.cli:main"
 
+[project.optional-dependencies]
+app = [
+    "fastapi>=0.162.2",
+    "httpx>=0.28.1",
+    "pyjwt[crypto]>=2.15.1",
+    "tree-sitter>=0.26.0",
+    "tree-sitter-typescript>=0.23.2",
+    "uvicorn>=0.54.0",
+]
+
 [dependency-groups]
 dev = [
+    "agent-permission-diff-bot[app]",
+    "markdown-it-py==4.2.0",
     "mypy==1.20.0",
     "pytest==9.1.1",
     "ruff==0.15.18",
@@ -35,12 +47,22 @@ build-backend = "uv_build"
 [tool.uv]
 required-version = "==0.13.0"
 
+[tool.uv.sources]
+agent-permission-diff-bot = { workspace = true }
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+# Vendored upstream code stays a plain copy (see its VENDORED.md); app fixtures are deliberately bad code.
+extend-exclude = ["src/agent_permission_diff_bot/_vendor", "tests/fixtures/app"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[[tool.mypy.overrides]]
+# Upstream is checked with pyright, which narrows this Literal; mypy does not.
+module = "agent_permission_diff_bot._vendor.therange.claude_rules"
+disable_error_code = ["arg-type"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

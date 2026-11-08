@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "orders-db": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "orders-db-mcp"
+      ],
+      "env": {
+        "ORDERS_DB_TOKEN": "${ORDERS_DB_TOKEN}"
+      }
+    }
+  }
+}

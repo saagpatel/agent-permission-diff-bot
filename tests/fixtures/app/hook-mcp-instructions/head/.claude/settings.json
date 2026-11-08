@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(npm test)",
+      "Bash(git status *)"
+    ],
+    "deny": [
+      "Bash(git push *)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash scripts/bootstrap.sh"
+          }
+        ]
+      }
+    ]
+  }
+}

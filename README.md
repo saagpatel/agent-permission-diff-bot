@@ -292,6 +292,104 @@ Acknowledged findings stay visible in JSON, Markdown, SARIF, and PR comments, bu
 excluded from gate decisions. Each acknowledgement must match the finding rule and all
 finding paths; expired acknowledgements are ignored.
 
+## Allow-rule reach explanations (experimental)
+
+Config Guard explains what a new allow rule really reaches (for example, that `Bash(git *)`
+also allows `git -c alias.x='!cmd' x`) with a vendored copy of the Range allow-rule engine and
+its cited knowledge base (`src/agent_permission_diff_bot/_vendor/therange/`). That engine was
+written for a user's own, trusted config; here it reads files from pull requests, so its output
+is **experimental**. Treat "what this now allows" as a lower bound. Known limits, tracked in
+[#56](https://github.com/saagpatel/agent-permission-diff-bot/issues/56):
+
+- An option between subcommand words, such as `Bash(gh release -R owner/repo *)` or
+  `Bash(git submodule --quiet *)`, can hide reach the engine would otherwise report. An
+  option right after the program (`Bash(git -C . *)`) is handled: it is rated as the bare
+  program.
+- Codex `.rules` files are read for plain `prefix_rule(...)` calls only. Aliased calls,
+  `**` keyword unpacking, tuple patterns and unknown decisions are skipped, not refused.
+- A few unusual literals (a very long hex integer) can fail as an error rather than an
+  unreadable-file finding, and an empty union element drops its rule.
+
+What does fail closed: a program the knowledge base does not know is reported as high
+("unknown reach"), never as safe; a rules file whose patterns expand past 256 commands or
+2,000 rules, or that cannot be parsed, is reported as unreadable; and aliased or oversized
+skill frontmatter is reported as unreadable.
+
+## Agent Config Guard and Swallowed checks (experimental)
+
+The pull request checks in `agent_permission_diff_bot.checks` (part of the unreleased GitHub
+App) are **experimental**. Known gaps, tracked in
+[#77](https://github.com/saagpatel/agent-permission-diff-bot/issues/77) and
+[#78](https://github.com/saagpatel/agent-permission-diff-bot/issues/78):
+
+- Skip-check instructions are matched with a pattern per paragraph, bullet or heading, not
+  parsed, so unusual phrasings can be missed or misread. A match counts as new when any line
+  of its clause was edited.
+- The Swallowed probe (`probe-swallowed`, and the probe line in a finding) reads the flagged
+  Python handler rather than running anything. It skips a `try` with `finally` or `else`, a
+  handler after another `except` clause, one inside an enclosing `finally` or `with` block,
+  and one that assigns anything but plain names or reads a name that may be unbound
+  (shadowed, deleted, or bound only on some paths). It never runs the protected code, and
+  TypeScript handlers are not probed.
+
+## Analysis containment (experimental)
+
+`agent_permission_diff_bot.limited.run_limited` runs a function in a freshly spawned child
+process under one deadline, a memory cap (`RLIMIT_AS`, enforced on Linux only) and a
+bounded JSON result (8 MiB, 200 levels deep by default), so hostile pull request input can
+exhaust only the child. The GitHub App runs both checks, and the hook-reference step, inside
+it: a child that is stopped comes back unfinished, and Config Guard then fails whatever its
+threshold. It is **experimental**. Known limits, tracked in
+[#70](https://github.com/saagpatel/agent-permission-diff-bot/issues/70):
+
+- The deadline is only as strong as Python threads allow: argument encoding and the
+  child's start-up run in a helper thread, and work that cannot be interrupted there can
+  keep the caller waiting until the shutdown grace period ends.
+- On macOS and Windows there is no enforced memory cap; only the deadline bounds the child.
+- Results come back as plain JSON data; callers convert them to their own types.
+- A `MemoryError` is read as the memory cap, except CPython's parser overflow ("too complex
+  to parse"), which refuses that one file. Python 3.11 gives the overflow no message, so
+  there an over-nested file makes the analysis unfinished instead.
+
+## GitHub App (unreleased, experimental)
+
+`agent-permission-diff app serve` runs a GitHub App with two check runs and one pull request
+comment, updated in place on every push:
+
+- **Agent Config Guard** explains what a PR now lets an agent do: new allow rules expanded
+  into what they really reach (using the vendored Range knowledge base), removed deny rules,
+  wider permission modes, new hooks and MCP servers, skill `allowed-tools`, Codex `.rules`, and
+  new instruction lines telling agents to skip a check. Each finding has a suggested fix.
+- **Swallowed errors** finds new places where the diff catches an error and drops it, in
+  Python and TypeScript/JavaScript, ranked by what they could hide: auth, data loss, network.
+
+The App reads files through the API and never runs pull request code. It needs the `app`
+extra (`pip install "agent-permission-diff-bot[app]"`). Settings, and a local replay that
+proves the whole flow without network access, are in [docs/github-app.md](docs/github-app.md).
+
+**Owner steps** (they touch your GitHub account and create a private key, so they are yours;
+the full walk-through is in [docs/github-app.md](docs/github-app.md#register-and-install-the-app-repository-owner)):
+
+1. Make a webhook secret in `~/.config/agent-config-guard/` and get a webhook URL (a
+   smee.io channel for a local run).
+2. Create a private GitHub App: Checks read and write, Contents read, Pull requests read and
+   write, Metadata read; events Pull request, Check run and Check suite.
+3. Generate its private key into `~/.config/agent-config-guard/app.pem` (mode 600) and
+   install the App on the repositories to check (for the demo, `agent-config-guard-demo`).
+4. Run `agent-permission-diff app serve` with `APDB_APP_ID`, `APDB_PRIVATE_KEY_PATH` and
+   `APDB_WEBHOOK_SECRET`, plus a smee forwarder to `http://127.0.0.1:8787/webhook`.
+5. Close and reopen a pull request (or push) to see the two check runs and the comment.
+
+An App that is already registered and installed needs only steps 4 and 5. No new
+permissions or events are needed for the current checks. The demo repository's seven pull
+requests cover every check; the table in the docs says which shows what.
+
+The App is **experimental**. Known limits, tracked in
+[#70](https://github.com/saagpatel/agent-permission-diff-bot/issues/70): pull requests with
+more than 300 changed files always fail Config Guard; queued events live in the server
+process, so a restart drops them (re-run the check); and the memory cap is enforced only on
+Linux.
+
 ## GitHub Action
 
 The composite action expects the repository to be checked out with enough history to
