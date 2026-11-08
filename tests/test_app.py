@@ -1023,5 +1023,5 @@ def test_quiet_failures_carries_the_probe_and_the_promise_flag() -> None:
         "Swallowed errors": "neutral",
     }
     [body] = bot_comments(replayer)
-    assert "Probe: injecting `OSError` into the `try` leaves no trace" in body
-    assert "web/api.ts" in body
+    assert "somewhere else. Probe: injecting `OSError` into the `try` leaves no trace" in body
+    assert "`.catch()` dropped around a network call" in body
