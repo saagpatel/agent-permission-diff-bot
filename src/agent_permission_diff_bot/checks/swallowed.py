@@ -1,0 +1,633 @@
+"""Swallowed: new places in a diff where an error is caught and dropped.
+
+A handler counts as swallowing when it neither re-raises, nor calls anything
+(such as a logger), nor uses the caught error: its body is only ``pass``,
+``continue``, ``break``, a constant return or a constant assignment. Only
+handlers whose lines the pull request adds or changes are reported.
+
+Findings are ranked by what the protected code does, read from the names it
+calls: authentication first (a dropped failure can let a request through), then
+data loss (writes, deletes, commits), then network calls, then anything else.
+
+Python is parsed with :mod:`ast`; TypeScript and JavaScript with tree-sitter
+(part of the ``app`` extra). Nothing is executed. A handler marked
+``swallowed: ok <reason>`` in a comment is listed as deliberate, not ranked.
+"""
+
+from __future__ import annotations
+
+import ast
+import re
+from collections.abc import Iterable, Mapping
+from dataclasses import dataclass
+from pathlib import PurePosixPath
+from typing import Any
+
+from agent_permission_diff_bot.checks.model import (
+    CheckFinding,
+    CheckResult,
+    DeliberateCatch,
+    rank,
+)
+from agent_permission_diff_bot.model import Severity
+
+MAX_FILE_BYTES = 1024 * 1024
+PYTHON_SUFFIXES = (".py", ".pyi")
+TS_SUFFIXES = (".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs")
+
+_MARKER_RE = re.compile(r"swallowed:\s*ok\b[\s:,-]*(?P<reason>[^\n]*)", re.IGNORECASE)
+_NOQA_RE = re.compile(r"noqa:[^\n]*\b(S110|S112|BLE001|SIM105)\b", re.IGNORECASE)
+
+# Name fragments, matched against the words of called names (split on . and _ and case).
+_CATEGORY_WORDS: tuple[tuple[str, frozenset[str]], ...] = (
+    (
+        "auth",
+        frozenset(
+            {
+                "auth",
+                "authenticate",
+                "authorize",
+                "authorized",
+                "token",
+                "jwt",
+                "verify",
+                "login",
+                "password",
+                "permission",
+                "permissions",
+                "credential",
+                "credentials",
+                "signature",
+                "oauth",
+                "acl",
+                "role",
+                "roles",
+                "csrf",
+                "otp",
+                "mfa",
+            }
+        ),
+    ),
+    (
+        "data-loss",
+        frozenset(
+            {
+                "write",
+                "writefile",
+                "save",
+                "commit",
+                "delete",
+                "remove",
+                "unlink",
+                "rmtree",
+                "rm",
+                "rmdir",
+                "rename",
+                "dump",
+                "flush",
+                "insert",
+                "update",
+                "upsert",
+                "execute",
+                "executemany",
+                "truncate",
+                "migrate",
+                "persist",
+                "destroy",
+                "transaction",
+                "setitem",
+                "move",
+                "copyfile",
+                "bulk",
+                "drop",
+            }
+        ),
+    ),
+    (
+        "network",
+        frozenset(
+            {
+                "requests",
+                "httpx",
+                "aiohttp",
+                "urllib",
+                "urlopen",
+                "http",
+                "https",
+                "fetch",
+                "axios",
+                "socket",
+                "connect",
+                "send",
+                "sendall",
+                "recv",
+                "request",
+                "post",
+                "smtp",
+                "smtplib",
+                "boto3",
+                "grpc",
+                "websocket",
+                "publish",
+                "subscribe",
+                "webhook",
+                "download",
+                "upload",
+                "got",
+                "ky",
+            }
+        ),
+    ),
+)
+
+_SEVERITY = {
+    "auth": Severity.HIGH,
+    "data-loss": Severity.HIGH,
+    "network": Severity.MEDIUM,
+    "other": Severity.LOW,
+}
+_HIDES = {
+    "auth": "an authentication or permission failure, so the code carries on as if it passed",
+    "data-loss": "a failed write or delete, so data is lost with no error anywhere",
+    "network": "a failed network call, so the caller sees missing data instead of an error",
+    "other": "an unexpected error, so the next failure shows up somewhere else",
+}
+_FIX = {
+    "auth": "Let it raise, or deny explicitly in the handler; never continue after a failed check.",
+    "data-loss": (
+        "Re-raise, or log the error and return a failure the caller must handle "
+        "before anything is reported as saved."
+    ),
+    "network": (
+        "Catch the specific error (such as a timeout), log it with the request, "
+        "and retry or surface it."
+    ),
+    "other": "Narrow the exception type and log it, or mark it `swallowed: ok <reason>`.",
+}
+_BROAD_PY = {"Exception", "BaseException"}
+_NARROW_PY = {
+    "FileNotFoundError",
+    "KeyError",
+    "IndexError",
+    "StopIteration",
+    "StopAsyncIteration",
+    "ImportError",
+    "ModuleNotFoundError",
+    "AttributeError",
+    "NotImplementedError",
+    "ProcessLookupError",
+    "FileExistsError",
+    "IsADirectoryError",
+}
+
+
+@dataclass(frozen=True)
+class ChangedFile:
+    """A file in the pull request: its head text and the 1-based lines the PR adds."""
+
+    path: str
+    text: str
+    added: frozenset[int]
+
+
+@dataclass(frozen=True)
+class _Catch:
+    path: str
+    line: int
+    lines: range
+    protected_names: tuple[str, ...]
+    caught: str
+    broad: bool
+    narrow: bool
+    language: str
+
+
+def scan_swallowed(files: Iterable[ChangedFile]) -> CheckResult:
+    result = CheckResult(check="swallowed")
+    ts_files: list[ChangedFile] = []
+    findings: list[CheckFinding] = []
+    for changed in files:
+        if not changed.added:
+            continue
+        if len(changed.text.encode("utf-8", errors="surrogateescape")) > MAX_FILE_BYTES:
+            result.notes.append(f"`{changed.path}` is over 1 MiB and was not scanned.")
+            continue
+        suffix = PurePosixPath(changed.path).suffix.lower()
+        if suffix in PYTHON_SUFFIXES:
+            catches = _python_catches(changed, result.notes)
+        elif suffix in TS_SUFFIXES:
+            ts_files.append(changed)
+            continue
+        else:
+            continue
+        _classify(changed, catches, findings, result.deliberate)
+    if ts_files:
+        parser = _ts_parsers()
+        if parser is None:
+            result.notes.append(
+                f"{len(ts_files)} TypeScript/JavaScript file(s) were not scanned: "
+                "install the `app` extra for tree-sitter."
+            )
+        else:
+            for changed in ts_files:
+                catches = _ts_catches(changed, parser)
+                _classify(changed, catches, findings, result.deliberate)
+    result.findings = rank(findings)
+    return result
+
+
+def added_lines_from_patch(patch: str) -> frozenset[int]:
+    """1-based head line numbers that a unified diff hunk adds."""
+    added: set[int] = set()
+    line = 0
+    for raw in patch.splitlines():
+        if raw.startswith("@@"):
+            match = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", raw)
+            line = int(match.group(1)) if match else 0
+            continue
+        if not line:
+            continue
+        if raw.startswith("+") and not raw.startswith("+++"):
+            added.add(line)
+            line += 1
+        elif (raw.startswith("-") and not raw.startswith("---")) or raw.startswith("\\"):
+            continue
+        else:
+            line += 1
+    return frozenset(added)
+
+
+def added_lines_between(base: str, head: str) -> frozenset[int]:
+    """Lines of ``head`` that are new compared with ``base`` (for local scans)."""
+    import difflib
+
+    matcher = difflib.SequenceMatcher(a=base.splitlines(), b=head.splitlines(), autojunk=False)
+    added: set[int] = set()
+    for tag, _i1, _i2, j1, j2 in matcher.get_opcodes():
+        if tag in {"insert", "replace"}:
+            added.update(range(j1 + 1, j2 + 1))
+    return frozenset(added)
+
+
+# --- classification ------------------------------------------------------------------------
+
+
+def _classify(
+    changed: ChangedFile,
+    catches: Iterable[_Catch],
+    findings: list[CheckFinding],
+    deliberate: list[DeliberateCatch],
+) -> None:
+    source_lines = changed.text.splitlines()
+    for catch in catches:
+        if not any(line in changed.added for line in catch.lines):
+            continue
+        comment_text = "\n".join(
+            source_lines[n - 1] for n in catch.lines if 0 < n <= len(source_lines)
+        )
+        marker = _MARKER_RE.search(comment_text)
+        noqa = _NOQA_RE.search(comment_text)
+        if marker or noqa:
+            if marker:
+                reason = marker.group("reason").strip() or "no reason given"
+            else:
+                code = noqa.group(1) if noqa else ""
+                reason = f"lint suppression `noqa: {code}`, no reason given"
+            deliberate.append(DeliberateCatch(path=catch.path, line=catch.line, reason=reason))
+            continue
+        category = _category(catch.protected_names)
+        severity = _SEVERITY[category]
+        notes: list[str] = []
+        if catch.broad and category == "other":
+            severity = Severity.MEDIUM
+        if catch.caught in {"bare except", "BaseException"}:
+            notes.append("It also swallows Ctrl-C and `sys.exit()`.")
+        called = _called_summary(catch.protected_names, category)
+        allows = [f"Can hide {_HIDES[category]}{called}.", *notes]
+        if catch.narrow and category == "other":
+            allows = [
+                f"Probably deliberate: only `{catch.caught}` is dropped, and the protected code "
+                "does not write, authenticate or call the network."
+            ]
+        findings.append(
+            CheckFinding(
+                check="swallowed",
+                rule_id=f"SW-{category}",
+                severity=severity,
+                title=f"`{catch.caught}` dropped" + _title_suffix(category),
+                path=catch.path,
+                line=catch.line,
+                allows=tuple(allows),
+                fix=_FIX[category],
+                category=category,
+            )
+        )
+
+
+def _title_suffix(category: str) -> str:
+    return {
+        "auth": " around an auth check",
+        "data-loss": " around a write",
+        "network": " around a network call",
+    }.get(category, "")
+
+
+def _category(names: Iterable[str]) -> str:
+    words = {word for name in names for word in _words(name)}
+    for category, vocabulary in _CATEGORY_WORDS:
+        if words & vocabulary:
+            return category
+    return "other"
+
+
+def _called_summary(names: Iterable[str], category: str) -> str:
+    if category == "other":
+        return ""
+    vocabulary = dict(_CATEGORY_WORDS)[category]
+    hits = [name for name in names if set(_words(name)) & vocabulary]
+    unique = list(dict.fromkeys(hits))[:2]
+    return " (calls " + ", ".join(f"`{name}`" for name in unique) + ")" if unique else ""
+
+
+def _words(name: str) -> list[str]:
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", name)
+    return [w.lower() for w in re.split(r"[^A-Za-z0-9]+", spaced) if w]
+
+
+# --- Python ----------------------------------------------------------------------------------
+
+
+def _python_catches(changed: ChangedFile, notes: list[str]) -> list[_Catch]:
+    try:
+        tree = ast.parse(changed.text, filename=changed.path)
+    except SyntaxError as exc:
+        notes.append(f"`{changed.path}` did not parse as Python (line {exc.lineno}); not scanned.")
+        return []
+    catches: list[_Catch] = []
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Try, ast.TryStar)):
+            names = tuple(_called_names(node.body))
+            for handler in node.handlers:
+                if not _python_swallows(handler):
+                    continue
+                caught = _caught_name(handler.type)
+                end = handler.end_lineno or handler.lineno
+                catches.append(
+                    _Catch(
+                        path=changed.path,
+                        line=handler.lineno,
+                        lines=range(handler.lineno, end + 1),
+                        protected_names=names,
+                        caught=caught,
+                        broad=caught in _BROAD_PY or caught == "bare except",
+                        narrow=_all_narrow(handler.type),
+                        language="python",
+                    )
+                )
+        elif isinstance(node, (ast.With, ast.AsyncWith)):
+            for item in node.items:
+                call = item.context_expr
+                if (
+                    isinstance(call, ast.Call)
+                    and _dotted(call.func).split(".")[-1] == "suppress"
+                    and call.args
+                ):
+                    types = [_dotted(arg) for arg in call.args]
+                    caught = ", ".join(types)
+                    end = node.end_lineno or node.lineno
+                    catches.append(
+                        _Catch(
+                            path=changed.path,
+                            line=node.lineno,
+                            lines=range(node.lineno, end + 1),
+                            protected_names=tuple(_called_names(node.body)),
+                            caught=f"suppress({caught})",
+                            broad=any(t.split(".")[-1] in _BROAD_PY for t in types),
+                            narrow=all(t.split(".")[-1] in _NARROW_PY for t in types),
+                            language="python",
+                        )
+                    )
+    return catches
+
+
+def _python_swallows(handler: ast.ExceptHandler) -> bool:
+    for statement in handler.body:
+        for node in ast.walk(statement):
+            if isinstance(node, (ast.Raise, ast.Call, ast.Await, ast.Yield, ast.YieldFrom)):
+                return False
+            if (
+                handler.name
+                and isinstance(node, ast.Name)
+                and node.id == handler.name
+                and isinstance(node.ctx, ast.Load)
+            ):
+                return False
+        if isinstance(statement, (ast.Pass, ast.Continue, ast.Break)):
+            continue
+        if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Constant):
+            continue
+        if isinstance(statement, ast.Return) and _is_plain_value(statement.value):
+            continue
+        if isinstance(statement, (ast.Assign, ast.AnnAssign)) and _is_plain_value(statement.value):
+            continue
+        return False
+    return True
+
+
+def _is_plain_value(node: ast.expr | None) -> bool:
+    if node is None or isinstance(node, (ast.Constant, ast.Name)):
+        return True
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        return not node.elts
+    if isinstance(node, ast.Dict):
+        return not node.keys
+    return False
+
+
+def _caught_name(node: ast.expr | None) -> str:
+    if node is None:
+        return "bare except"
+    if isinstance(node, ast.Tuple):
+        return ", ".join(_dotted(elt) for elt in node.elts)
+    return _dotted(node)
+
+
+def _all_narrow(node: ast.expr | None) -> bool:
+    if node is None:
+        return False
+    elements = node.elts if isinstance(node, ast.Tuple) else [node]
+    return all(_dotted(elt).split(".")[-1] in _NARROW_PY for elt in elements)
+
+
+def _called_names(body: list[ast.stmt]) -> Iterable[str]:
+    for statement in body:
+        for node in ast.walk(statement):
+            if isinstance(node, ast.Call):
+                name = _dotted(node.func)
+                if name:
+                    yield name
+
+
+def _dotted(node: ast.expr) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        inner = _dotted(node.value)
+        return f"{inner}.{node.attr}" if inner else node.attr
+    if isinstance(node, ast.Call):
+        return _dotted(node.func)
+    if isinstance(node, ast.Subscript):
+        return _dotted(node.value)
+    return ""
+
+
+# --- TypeScript / JavaScript -----------------------------------------------------------------
+
+
+def _ts_parsers() -> Mapping[str, Any] | None:
+    try:
+        import tree_sitter_typescript
+        from tree_sitter import Language, Parser
+    except ImportError:
+        return None
+    return {
+        "ts": Parser(Language(tree_sitter_typescript.language_typescript())),
+        "tsx": Parser(Language(tree_sitter_typescript.language_tsx())),
+    }
+
+
+def _ts_catches(changed: ChangedFile, parsers: Mapping[str, Any]) -> list[_Catch]:
+    suffix = PurePosixPath(changed.path).suffix.lower()
+    parser = parsers["tsx" if suffix in {".tsx", ".jsx"} else "ts"]
+    source = changed.text.encode("utf-8", errors="surrogateescape")
+    tree = parser.parse(source)
+    catches: list[_Catch] = []
+    stack = [tree.root_node]
+    while stack:
+        node = stack.pop()
+        stack.extend(node.children)
+        if node.type == "catch_clause":
+            body = node.child_by_field_name("body")
+            if body is None or not _ts_block_swallows(body, node):
+                continue
+            protected = node.parent.child_by_field_name("body") if node.parent else None
+            catches.append(_ts_catch(changed, node, protected, "catch"))
+        elif node.type == "call_expression":
+            function = node.child_by_field_name("function")
+            arguments = node.child_by_field_name("arguments")
+            if (
+                function is None
+                or arguments is None
+                or function.type != "member_expression"
+                or _text(function.child_by_field_name("property")) != "catch"
+            ):
+                continue
+            handlers = [child for child in arguments.named_children if child.type != "comment"]
+            if len(handlers) != 1 or not _ts_handler_swallows(handlers[0]):
+                continue
+            catches.append(
+                _ts_catch(changed, node, function.child_by_field_name("object"), ".catch()")
+            )
+    return catches
+
+
+def _ts_catch(changed: ChangedFile, node: Any, protected: Any, caught: str) -> _Catch:
+    start = node.start_point[0] + 1
+    end = node.end_point[0] + 1
+    if caught == ".catch()":
+        # A promise chain can be long; the handler's own lines are what the PR adds.
+        start = node.child_by_field_name("arguments").start_point[0] + 1
+    return _Catch(
+        path=changed.path,
+        line=start,
+        lines=range(start, end + 1),
+        protected_names=tuple(_ts_called_names(protected)),
+        caught=caught,
+        broad=True,
+        narrow=False,
+        language="typescript",
+    )
+
+
+def _ts_block_swallows(block: Any, clause: Any) -> bool:
+    param = clause.child_by_field_name("parameter")
+    param_name = _text(param) if param is not None and param.type == "identifier" else ""
+    for statement in block.named_children:
+        if statement.type in {"comment", "empty_statement"}:
+            continue
+        if statement.type in {"continue_statement", "break_statement"}:
+            continue
+        if statement.type == "return_statement":
+            values = [c for c in statement.named_children if c.type != "comment"]
+            if not values or _ts_plain(values[0], param_name):
+                continue
+        return False
+    return True
+
+
+def _ts_handler_swallows(handler: Any) -> bool:
+    if handler.type in {"arrow_function", "function_expression", "function"}:
+        body = handler.child_by_field_name("body")
+        if body is None:
+            return False
+        params = handler.child_by_field_name("parameters") or handler.child_by_field_name(
+            "parameter"
+        )
+        names = _ts_identifiers(params) if params is not None else set()
+        if body.type == "statement_block":
+            for statement in body.named_children:
+                if statement.type in {"comment", "empty_statement"}:
+                    continue
+                if statement.type == "return_statement":
+                    values = [c for c in statement.named_children if c.type != "comment"]
+                    if not values or _ts_plain(values[0], *names):
+                        continue
+                return False
+            return True
+        return _ts_plain(body, *names)
+    return handler.type == "identifier" and _text(handler) in {"noop", "_noop", "ignore"}
+
+
+def _ts_plain(node: Any, *forbidden: str) -> bool:
+    if node.type in {"null", "undefined", "true", "false", "number", "string"}:
+        return True
+    if node.type == "identifier":
+        return _text(node) not in forbidden
+    if node.type in {"array", "object"}:
+        return not node.named_children
+    if node.type == "parenthesized_expression" and node.named_children:
+        return _ts_plain(node.named_children[0], *forbidden)
+    return False
+
+
+def _ts_identifiers(node: Any) -> set[str]:
+    found: set[str] = set()
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if current.type == "identifier":
+            found.add(_text(current))
+        stack.extend(current.children)
+    return found
+
+
+def _ts_called_names(node: Any) -> Iterable[str]:
+    if node is None:
+        return
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if current.type in {"call_expression", "new_expression"}:
+            callee = current.child_by_field_name("function") or current.child_by_field_name(
+                "constructor"
+            )
+            if callee is not None and callee.type in {"identifier", "member_expression"}:
+                yield _text(callee).replace("?.", ".")
+        stack.extend(current.children)
+
+
+def _text(node: Any) -> str:
+    if node is None:
+        return ""
+    raw = node.text
+    return raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else ""

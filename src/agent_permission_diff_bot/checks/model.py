@@ -1,0 +1,62 @@
+"""Findings shared by the pull request checks (Config Guard and Swallowed)."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import Literal
+
+from agent_permission_diff_bot.model import Severity
+
+CheckName = Literal["config-guard", "swallowed"]
+
+
+@dataclass(frozen=True)
+class CheckFinding:
+    """One ranked finding, written for the person reviewing the pull request.
+
+    ``title`` names the change, ``allows`` says what it now lets happen (most
+    important first), and ``fix`` is one suggested change. ``line`` is a 1-based
+    line in the head version of ``path`` when it is known.
+    """
+
+    check: CheckName
+    rule_id: str
+    severity: Severity
+    title: str
+    path: str
+    allows: tuple[str, ...]
+    fix: str
+    line: int | None = None
+    category: str = ""
+
+
+@dataclass(frozen=True)
+class DeliberateCatch:
+    """A swallowed error the author marked as deliberate, with their reason."""
+
+    path: str
+    line: int
+    reason: str
+
+
+@dataclass
+class CheckResult:
+    check: CheckName
+    findings: list[CheckFinding] = field(default_factory=list)
+    deliberate: list[DeliberateCatch] = field(default_factory=list)
+    notes: list[str] = field(default_factory=list)
+
+    @property
+    def max_severity(self) -> Severity | None:
+        return max((f.severity for f in self.findings), default=None)
+
+
+def rank(findings: list[CheckFinding]) -> list[CheckFinding]:
+    """Most severe first; ties keep category order, then path and line."""
+    return sorted(
+        findings,
+        key=lambda f: (-int(f.severity), _CATEGORY_ORDER.get(f.category, 9), f.path, f.line or 0),
+    )
+
+
+_CATEGORY_ORDER = {"auth": 0, "data-loss": 1, "network": 2, "other": 3}
