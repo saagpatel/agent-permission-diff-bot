@@ -7,9 +7,9 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
+from agent_permission_diff_bot.app.analysis import AnalysisLimits, run_analysis
 from agent_permission_diff_bot.app.github import RepoClient
 from agent_permission_diff_bot.app.snapshot import collect_inputs
-from agent_permission_diff_bot.checks.config_guard import run_config_guard
 from agent_permission_diff_bot.checks.model import CheckName, CheckResult
 from agent_permission_diff_bot.checks.render import (
     CHECK_NAMES,
@@ -19,13 +19,14 @@ from agent_permission_diff_bot.checks.render import (
     render_check_output,
     render_comment,
 )
-from agent_permission_diff_bot.checks.swallowed import scan_swallowed
 from agent_permission_diff_bot.model import Severity
 
 log = logging.getLogger(__name__)
 
 # "new-head": the PR points at another commit; "new-base": it targets another branch.
 Freshness = Literal["current", "new-head", "new-base", "unknown"]
+
+DEFAULT_LIMITS = AnalysisLimits()
 
 PULL_REQUEST_ACTIONS = {"opened", "synchronize", "reopened", "ready_for_review"}
 
@@ -166,6 +167,7 @@ def run_checks(
     guard_fail_on: Severity | None,
     swallowed_fail_on: Severity | None,
     freshness: Callable[[], Freshness] | None = None,
+    limits: AnalysisLimits = DEFAULT_LIMITS,
 ) -> RunOutcome:
     """Run both checks for ``target`` and publish them, unless a newer run owns the PR.
 
@@ -196,15 +198,12 @@ def run_checks(
         # The comparison is fixed to these commits, unlike the PR's live file list, so a late
         # webhook for an older push checks exactly that push.
         merge_base, files, truncated = repo.compare(target.base_sha, target.head_sha)
-        inputs = collect_inputs(repo, merge_base, target.head_sha, files, files_truncated=truncated)
-        results = [
-            _guarded(
-                "config-guard", lambda: run_config_guard(inputs.base_files, inputs.head_files)
-            ),
-            _guarded("swallowed", lambda: scan_swallowed(inputs.swallowed_files)),
-        ]
-        results[0].notes[:0] = inputs.guard_notes
-        results[1].notes[:0] = inputs.swallowed_notes
+        inputs = collect_inputs(
+            repo, merge_base, target.head_sha, files, files_truncated=truncated, limits=limits
+        )
+        # Both checks run in a time- and memory-limited child; a pathological PR can only
+        # exhaust that child, and then both checks report that they did not finish.
+        results = run_analysis(inputs, limits)
     except Exception as exc:
         log.exception("Reading pull request %s#%s failed", repo.full_name, target.number)
         _fail_runs(repo, run_ids, exc)
@@ -285,19 +284,6 @@ def _cancel_runs(repo: RepoClient, run_ids: Mapping[CheckName, int]) -> None:
             repo.complete_check_run(run_id, "cancelled", output)
         except Exception:
             log.exception("Could not mark check run %s as superseded", run_id)
-
-
-def _guarded(name: CheckName, run: Callable[[], CheckResult]) -> CheckResult:
-    """Run one check; a crash becomes a visible result instead of silently passing."""
-    try:
-        return run()
-    except Exception as exc:
-        log.exception("The %s check crashed", name)
-        result = CheckResult(check=name, crashed=True)
-        result.notes.append(
-            f"The check did not finish: {type(exc).__name__}. Re-run the check to retry."
-        )
-        return result
 
 
 def _report_unfinished(
