@@ -496,3 +496,15 @@ def test_a_command_inside_a_directory_named_agents_still_grants_tools() -> None:
     text = "---\nallowed-tools: Bash\n---\nDeploy.\n"
     found = run_config_guard({}, {".claude/commands/agents/deploy.md": text}).findings
     assert any(f.title.startswith("New allow rule `Bash`") for f in found)
+
+
+def test_a_wrapped_blockquote_weakening_is_found() -> None:
+    head = {"AGENTS.md": "# Rules\n> Skip the\n> unit tests before pushing.\n"}
+    [finding] = run_config_guard({"AGENTS.md": "# Rules\n"}, head).findings
+    assert finding.rule_id == "CG006" and "Skip the unit tests" in finding.allows[0]
+
+
+def test_quoted_bullets_stay_apart() -> None:
+    base = {"AGENTS.md": "# Rules\n> - Never skip lint\n"}
+    head = {"AGENTS.md": "# Rules\n> - Never skip lint\n> - Run the tests first\n"}
+    assert run_config_guard(base, head).findings == []

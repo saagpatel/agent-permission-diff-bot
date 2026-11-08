@@ -645,6 +645,7 @@ def _negated(text: str, match: re.Match[str]) -> bool:
 
 
 _ABBREVIATIONS = re.compile(r"\b(e\.g\.|i\.e\.|etc\.|vs\.)", re.IGNORECASE)
+_QUOTE_RE = re.compile(r"^\s*(>\s?)+")
 _BLOCK_START_RE = re.compile(r"^\s*([-*+]\s|\d+[.)]\s|#{1,6}\s|>|\|)")
 
 
@@ -662,9 +663,15 @@ def _added_passages(lines: list[str], added: set[int]) -> Iterable[tuple[int, st
         if not line.strip():
             continue
         # A bullet, heading, quote or table row starts its own unit; only wrapped
-        # continuation lines join the unit above them.
+        # continuation lines join the unit above them. Inside a blockquote the `>` marker
+        # is read past, so a wrapped quoted sentence is one unit too.
         continues = paragraphs and paragraphs[-1][-1] == number - 1
-        if continues and not _BLOCK_START_RE.match(line):
+        quoted = continues and _QUOTE_RE.match(line) and _QUOTE_RE.match(lines[number - 2])
+        if quoted:
+            continues = not _BLOCK_START_RE.match(_QUOTE_RE.sub("", line, count=1))
+        elif continues:
+            continues = not _BLOCK_START_RE.match(line)
+        if continues:
             paragraphs[-1].append(number)
         else:
             paragraphs.append([number])
@@ -674,7 +681,7 @@ def _added_passages(lines: list[str], added: set[int]) -> Iterable[tuple[int, st
         text, spans = "", []
         for number in paragraph:
             start = len(text)
-            text += lines[number - 1].strip() + " "
+            text += _QUOTE_RE.sub("", lines[number - 1], count=1).strip() + " "
             spans.append((start, len(text), number))
         reported: set[int] = set()
         # "e.g." and "i.e." do not end a sentence; same-length stand-ins keep offsets exact.
