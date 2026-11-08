@@ -323,3 +323,13 @@ def test_a_subscript_flag_assignment_swallows_in_both_catch_forms(source: str) -
 )
 def test_a_subscript_keyed_by_the_error_keeps_it(source: str) -> None:
     assert scan("web/x.ts", source) == []
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["this.#failed", "state!.failed", "(this as any).failed", "(state satisfies S).failed"],
+)
+def test_wrapped_and_private_flag_targets_still_swallow(target: str) -> None:
+    handler = f"try {{ f(); }} catch (e) {{ {target} = true; }}"
+    source = f"class A {{ #failed = false; m() {{ {handler} }} }}\n"
+    assert len(scan("web/x.ts", source)) == 1

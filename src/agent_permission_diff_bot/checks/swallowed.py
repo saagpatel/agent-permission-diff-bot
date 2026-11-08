@@ -623,6 +623,11 @@ def _ts_plain_assignment(statement: Any, *forbidden: str) -> bool:
     )
 
 
+_TS_WRAPPERS = frozenset(
+    {"non_null_expression", "parenthesized_expression", "as_expression", "satisfies_expression"}
+)
+
+
 def _ts_plain_target(node: Any, *forbidden: str) -> bool:
     """`ok`, `this.failed`, `state.last.ok` or `failed[key]`: no call, and the caught error
     is not used."""
@@ -630,13 +635,16 @@ def _ts_plain_target(node: Any, *forbidden: str) -> bool:
         return _text(node) not in forbidden
     if node.type == "this":
         return True
+    if node.type in _TS_WRAPPERS and node.named_children:
+        # `state!.failed`, `(this as any).failed`, `(x satisfies T).ok`, `(ok)`
+        return _ts_plain_target(node.named_children[0], *forbidden)
     if node.type == "member_expression":
         target = node.child_by_field_name("object")
         prop = node.child_by_field_name("property")
         return (
             target is not None
             and prop is not None
-            and prop.type == "property_identifier"
+            and prop.type in {"property_identifier", "private_property_identifier"}
             and _ts_plain_target(target, *forbidden)
         )
     if node.type == "subscript_expression":

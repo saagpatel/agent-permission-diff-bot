@@ -651,6 +651,9 @@ def _clause_start(text: str, position: int) -> int:
 # A skip verb inside a flag (`skip` in `--dangerously-skip-permissions`) is part of that
 # flag, which is matched (and negated) as a whole.
 _INSIDE_FLAG_RE = re.compile(r"--[\w-]*$")
+# A negator covers a list of skip verbs: `Never skip, bypass, or disable hooks`.
+_VERB = r"(?:skip|bypass|ignore|disable|avoid|suppress|silence)\b"
+_VERB_LIST_RE = re.compile(rf"{_VERB}(?:\s*,?\s*(?:(?:or|and|nor)\s+)?{_VERB})*", re.IGNORECASE)
 
 
 # `etc.` often ends a sentence, so it is read through only when a lowercase word follows.
@@ -704,12 +707,16 @@ def _added_passages(lines: list[str], added: set[int]) -> Iterable[tuple[int, st
         searchable = _ABBREVIATIONS.sub(lambda m: m.group(0).replace(".", "_"), text)
         # The gap to the target word is lazy, and the next search starts one character in,
         # so a negated or unchanged match never hides a skip clause that follows it.
-        position = 0
+        position, negated_until = 0, -1
         while match := _SKIP_CHECK_RE.search(searchable, position):
             position = match.start() + 1
             if _INSIDE_FLAG_RE.search(searchable, max(0, match.start() - 80), match.start()):
                 continue
+            if match.start() < negated_until:
+                continue  # a later verb in a negated list
             if _negated(searchable, match):
+                verbs = _VERB_LIST_RE.match(searchable, match.start())
+                negated_until = verbs.end() if verbs else match.start()
                 continue
             # A match touches an edit when its clause does, so removing a negator on the line
             # above (`must never` becoming `may`) is found as well.
