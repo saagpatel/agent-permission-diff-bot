@@ -391,7 +391,12 @@ def test_a_runtime_error_after_launch_is_not_a_refusal(monkeypatch: pytest.Monke
 def test_a_parser_overflow_is_not_reported_as_the_memory_cap() -> None:
     # CPython raises MemoryError for source nested too deeply to parse; that is a property
     # of the input, so the reason must say so rather than blame the memory cap.
+    # Python 3.11 raises the overflow with no message, so there it stays indistinguishable
+    # from exhaustion and is reported as the cap (still fail closed).
     with pytest.raises(LimitExceededError) as caught:
         run_limited(_parser_overflow, timeout_s=30)
-    assert "nested too deeply to parse" in str(caught.value)
-    assert "memory limit" not in str(caught.value)
+    if sys.version_info >= (3, 12):
+        assert "nested too deeply to parse" in str(caught.value)
+        assert "memory limit" not in str(caught.value)
+    else:
+        assert "memory limit exceeded" in str(caught.value)
