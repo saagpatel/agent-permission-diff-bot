@@ -18,6 +18,7 @@ from agent_permission_diff_bot.checks.config_guard import run_config_guard
 from agent_permission_diff_bot.checks.model import CheckName, CheckResult, result_from_dict
 from agent_permission_diff_bot.checks.swallowed import ChangedFile, scan_swallowed
 from agent_permission_diff_bot.limited import ChildStartError, LimitExceededError, run_limited
+from agent_permission_diff_bot.parsing import parser_overflow
 
 log = logging.getLogger(__name__)
 
@@ -76,10 +77,19 @@ def _guarded(name: CheckName, run: Callable[[], CheckResult]) -> CheckResult:
     """Run one check; a crash becomes a visible result instead of silently passing."""
     try:
         return run()
-    except MemoryError:
-        # The child's memory cap, not a crash in one check: run_limited reports it, and
-        # both checks come back unfinished.
-        raise
+    except MemoryError as exc:
+        if not parser_overflow(exc):
+            # The child's memory cap, not a crash in one check: run_limited reports it,
+            # and both checks come back unfinished.
+            raise
+        # The parser refusing over-nested source: a property of the input, so only this
+        # check is unfinished and re-running will not help.
+        log.warning("The %s check refused source nested too deeply to parse", name)
+        result = CheckResult(check=name, crashed=True)
+        result.notes.append(
+            "The check did not finish: a changed file is nested too deeply to parse."
+        )
+        return result
     except Exception as exc:
         log.exception("The %s check crashed", name)
         result = CheckResult(check=name, crashed=True)

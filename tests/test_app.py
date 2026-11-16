@@ -951,6 +951,23 @@ def test_running_out_of_memory_in_one_check_is_not_a_single_check_crash(
         analysis.analyze({}, {}, [])
 
 
+def test_a_parser_overflow_in_one_check_is_that_check_refusing_its_input(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from agent_permission_diff_bot.app import analysis
+
+    def overflowed(files: object) -> object:
+        raise MemoryError("Parser stack overflowed - Python source too complex to parse")
+
+    monkeypatch.setattr(analysis, "scan_swallowed", overflowed)
+    guard, swallowed = analysis.analyze({}, {}, [])
+    assert not guard.crashed
+    assert swallowed.crashed
+    note = " ".join(swallowed.notes)
+    assert "nested too deeply to parse" in note
+    assert "Re-run" not in note
+
+
 @pytest.mark.parametrize("target", ["startup-config", "rules"])
 def test_running_out_of_memory_inside_a_parser_ends_the_analysis(
     monkeypatch: pytest.MonkeyPatch, target: str

@@ -77,6 +77,12 @@ def _deep() -> Any:
     return value
 
 
+def _parser_overflow() -> None:
+    import ast
+
+    ast.parse("-" * 200_000 + "1")
+
+
 def _colliding_keys() -> dict[int, int]:
     modulus = sys.hash_info.modulus
     return {modulus * n: n for n in range(2_000)}
@@ -380,3 +386,12 @@ def test_a_runtime_error_after_launch_is_not_a_refusal(monkeypatch: pytest.Monke
     assert stopped == [True], "a launched thread is stopped"
     assert io_state["running"] is False
     reader.close()
+
+
+def test_a_parser_overflow_is_not_reported_as_the_memory_cap() -> None:
+    # CPython raises MemoryError for source nested too deeply to parse; that is a property
+    # of the input, so the reason must say so rather than blame the memory cap.
+    with pytest.raises(LimitExceededError) as caught:
+        run_limited(_parser_overflow, timeout_s=30)
+    assert "nested too deeply to parse" in str(caught.value)
+    assert "memory limit" not in str(caught.value)

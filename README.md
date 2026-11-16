@@ -348,8 +348,11 @@ threshold. It is **experimental**. Known limits, tracked in
 - On macOS and Windows there is no enforced memory cap; only the deadline bounds the child.
 - Results come back as plain JSON data; callers convert them to their own types.
 - A `MemoryError` is read as the memory cap, except CPython's parser overflow ("too complex
-  to parse"), which refuses that one file. Python 3.11 gives the overflow no message, so
-  there an over-nested file makes the analysis unfinished instead.
+  to parse"), which refuses that one file. An overflow that reaches a check's guard leaves
+  only that check unfinished, and one that reaches `run_limited` is reported as "input is
+  nested too deeply to parse" rather than as the memory cap; both still fail closed.
+  Python 3.11 gives the overflow no message, so there an over-nested file makes the
+  analysis unfinished instead.
 
 ## GitHub App (unreleased, experimental)
 

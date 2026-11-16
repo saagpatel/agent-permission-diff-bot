@@ -32,6 +32,8 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+from agent_permission_diff_bot.parsing import parser_overflow
+
 try:
     import resource
 except ImportError:  # pragma: no cover - not POSIX
@@ -114,8 +116,15 @@ def _child(
         args_conn.close()
         try:
             data = _encode("ok", fn(*args))
-        except MemoryError:
-            data = _encode("limit", "memory limit exceeded")
+        except MemoryError as exc:
+            # CPython also raises MemoryError for source too deeply nested to parse; that
+            # is the input, not the cap, and re-running will not help.
+            reason = (
+                "input is nested too deeply to parse"
+                if parser_overflow(exc)
+                else "memory limit exceeded"
+            )
+            data = _encode("limit", reason)
         except RecursionError:
             data = _encode("limit", "result is nested too deeply")
         except Exception as exc:
