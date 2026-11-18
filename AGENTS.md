@@ -13,7 +13,7 @@ GitHub Actions probe is read-only and must be explicitly requested.
 
 # Setup
 
-Use Python 3.14.8 and uv 0.13.0. Run `make setup` to install the locked development environment.
+Use Python 3.14.8 and uv 0.13.9 or any later 0.13.x. Run `make setup` to install the locked development environment.
 
 # Checks
 

@@ -85,17 +85,10 @@ pip install "git+https://github.com/saagpatel/agent-permission-diff-bot.git@d778
 
 ## Development setup
 
-Building and testing from a clone needs [uv](https://docs.astral.sh/uv/) at exactly version
-0.13.0. The repo pins it with `required-version = "==0.13.0"` in `pyproject.toml`, so any other
-uv version (newer or older) makes `make setup` fail with "Required uv version `==0.13.0` does not
-match the running version". If `uv --version` prints something else, install the pinned one with
-either of these:
-
-```bash
-pip install "uv==0.13.0"
-# or
-curl -LsSf https://astral.sh/uv/0.13.0/install.sh | sh
-```
+Building and testing from a clone needs [uv](https://docs.astral.sh/uv/) 0.13.9 or any later
+0.13.x (for example the current Homebrew uv). The repo pins it with
+`required-version = ">=0.13.9,<0.14"` in `pyproject.toml`, so a 0.14 release is rejected until the
+pin is raised. CI runs exactly 0.13.9.
 
 uv picks a supported Python (3.11 through 3.14) on its own and downloads one if needed, so you do
 not need to match the interpreter on your PATH. Then, from the repository root:
@@ -496,7 +489,7 @@ warning instead of masking the permission-diff result.
 ### Stack
 
 - Python 3.11 and newer; Python 3.14.8 is the pinned local development interpreter.
-- uv 0.13.0, Ruff, mypy, and pytest are pinned through `pyproject.toml` and `uv.lock`.
+- uv 0.13.9 (or a later 0.13.x), Ruff, mypy, and pytest are pinned through `pyproject.toml` and `uv.lock`.
 
 ### Known risks
 

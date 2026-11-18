@@ -1,5 +1,5 @@
 {
   "name": "agent-permission-diff-bot",
   "disableAllMcpServers": true,
-  "install": "set -eu; python3 -m pip install --disable-pip-version-check --user --break-system-packages 'uv==0.13.0'; export PATH=\"$(python3 -m site --user-base)/bin:$PATH\"; make setup"
+  "install": "set -eu; python3 -m pip install --disable-pip-version-check --user --break-system-packages 'uv==0.13.9'; export PATH=\"$(python3 -m site --user-base)/bin:$PATH\"; make setup"
 }
