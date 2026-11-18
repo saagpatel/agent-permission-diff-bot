@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.1
+
+- Pinned the composite action's nested `actions/setup-python` (v6.3.0) and
+  `github/codeql-action/upload-sarif` (v4.39.3) to full commit SHAs, so the action runs in
+  repositories that require SHA-pinned actions. No behavior change.
+
 ## 0.5.0
 
 - Added `agent-permission-diff simulate` for static/no-credential/no-network permission
