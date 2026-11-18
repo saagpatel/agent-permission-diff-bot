@@ -83,6 +83,29 @@ revision includes them:
 pip install "git+https://github.com/saagpatel/agent-permission-diff-bot.git@d778c6f711d6b77399ef29430a0e06b067c0c7f5"
 ```
 
+## Development setup
+
+Building and testing from a clone needs [uv](https://docs.astral.sh/uv/) at exactly version
+0.13.0. The repo pins it with `required-version = "==0.13.0"` in `pyproject.toml`, so any other
+uv version (newer or older) makes `make setup` fail with "Required uv version `==0.13.0` does not
+match the running version". If `uv --version` prints something else, install the pinned one with
+either of these:
+
+```bash
+pip install "uv==0.13.0"
+# or
+curl -LsSf https://astral.sh/uv/0.13.0/install.sh | sh
+```
+
+uv picks a supported Python (3.11 through 3.14) on its own and downloads one if needed, so you do
+not need to match the interpreter on your PATH. Then, from the repository root:
+
+```bash
+make setup   # uv sync --locked: create the environment from uv.lock
+make check   # lock check, ruff format and lint, mypy, and the pytest suite
+make build   # build the wheel and smoke-test the agent-permission-diff CLI
+```
+
 ## Usage
 
 Compare two Git refs:
