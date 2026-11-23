@@ -12,14 +12,13 @@ with a composite GitHub Action for pull request scanning.
 
 ## Current Surfaces
 
-- MCP and Copilot MCP config: `mcpServers`, `tools`, `env`, `headers`, `url`, `command`,
-  and launch args.
+- MCP and Copilot MCP config: `mcpServers` or `servers`, `tools`, `env`, `headers`, `url`,
+  `command`, and `args`.
 - MCP Registry metadata and server cards: identity, versions, packages, remotes,
   transports, authentication declarations, capabilities, compatibility, and endpoints.
 - GitHub Actions: token permissions, OIDC, runner labels, trigger context, environments,
   secrets/env references, and deploy/publish actions.
-- Egress policy: `allow_hosts`, `allow_connectors`, `network_name_globs`, and related
-  policy keys.
+- Egress policy: `allow_hosts`, `multi_tenant_hosts`, `allow_connectors`, and `network_name_globs`.
 - Agent instructions: `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, Copilot instructions, Cursor rules, and
   Windsurf rules.
 - Claude settings: lifecycle hooks, permission rules/modes, project MCP opt-ins, env keys,
@@ -38,7 +37,7 @@ with a composite GitHub Action for pull request scanning.
 `APD105` (unreleased) reports critical worm-shaped persistence when an auto-start trigger (`SessionStart`,
 VS Code `folderOpen`, Claude `statusLine`, or a Claude credential helper) newly references an
 existing executable, its referenced executable is newly added, or an existing referenced
-executable is modified and the new content carries a payload smell. Git-ref scans read startup
+executable is modified and the edit introduces or changes a detected payload smell. Git-ref scans read startup
 configs at both refs even when the configs are unchanged, so a payload introduced or swapped in a
 later PR is still correlated. A smell-free edit to an existing auto-start script under an
 unchanged trigger is reported as HIGH `APD012`, so routine setup-script maintenance does not fail
@@ -62,10 +61,10 @@ coverage incomplete; unresolved startup commands may therefore retain `APD015` e
 visible file snapshots are identical. This is a conservative coverage warning, not evidence that
 an excluded file was read or that an opaque command executed.
 Explicit targets can be read from vendor directories, but `.git`, credential paths, external
-paths and symlinks are excluded. Startup configs accept a leading BOM and JSONC comments and
-trailing commas. Unparseable configs produce HIGH findings; a raw `folderOpen` marker in an
-unparseable task config also preserves the automatic-task finding. Parsing is cached per
-snapshot; startup configs are limited to 32 MiB, and larger ones produce CRITICAL
+paths and symlinks are excluded. Startup configs accept a leading BOM. JSON startup configs
+also accept comments and trailing commas. A newly unparseable config produces a HIGH finding.
+A raw `folderOpen` marker in an unparseable task config preserves the automatic-task finding.
+Parsing is cached per snapshot; startup configs are limited to 32 MiB, and larger ones produce CRITICAL
 `APD013` findings. A raw `folderOpen` marker is searched across the full accepted config. Other
 inputs remain limited to 2 MiB, and inline executable-load analysis is capped at 64 KiB. Hidden
 Unicode is checked across all supported instruction files. Payload smells
@@ -73,25 +72,23 @@ in config files are checked on command strings rather than unrelated settings ke
 
 ## Installation
 
-**Python >= 3.11 required.**
+**Python >= 3.11 and Git required.** Run pip in an activated virtual environment.
 
-Pin a source install to an immutable commit. The SHA below is the task's base revision; replace it
-with the full SHA for the revision you reviewed. Unreleased features are available only after that
-revision includes them:
+Pin a source install to an immutable commit. This revision includes the CLI and GitHub App
+described below:
 
 ```bash
-pip install "git+https://github.com/saagpatel/agent-permission-diff-bot.git@d778c6f711d6b77399ef29430a0e06b067c0c7f5"
+pip install "git+https://github.com/saagpatel/agent-permission-diff-bot.git@e24165bcfd8bb5c49342c69ce573e0d698bd4a76"
 ```
 
 ## Development setup
 
-Building and testing from a clone needs [uv](https://docs.astral.sh/uv/) 0.13.9 or any later
-0.13.x (for example the current Homebrew uv). The repo pins it with
+Building and testing from a clone needs Make, `python3`, and [uv](https://docs.astral.sh/uv/)
+0.13.9 or any later 0.13.x. The repo pins uv with
 `required-version = ">=0.13.9,<0.14"` in `pyproject.toml`, so a 0.14 release is rejected until the
 pin is raised. CI runs exactly 0.13.9.
 
-uv picks a supported Python (3.11 through 3.14) on its own and downloads one if needed, so you do
-not need to match the interpreter on your PATH. Then, from the repository root:
+uv uses Python 3.14.8 from `.python-version` and downloads it if needed. From the repository root:
 
 ```bash
 make setup   # uv sync --locked: create the environment from uv.lock
@@ -100,6 +97,9 @@ make build   # build the wheel and smoke-test the agent-permission-diff CLI
 ```
 
 ## Usage
+
+From a development checkout, prefix the CLI commands with `uv run` to use the environment
+created by `make setup`.
 
 Compare two Git refs:
 
@@ -110,7 +110,10 @@ agent-permission-diff diff --repo . --base-ref origin/main --head-ref HEAD
 Compare two relative directories:
 
 ```bash
-agent-permission-diff diff --base-dir base --head-dir head --markdown report.md
+agent-permission-diff diff \
+  --base-dir tests/fixtures/app/hook-mcp-instructions/base \
+  --head-dir tests/fixtures/app/hook-mcp-instructions/head \
+  --markdown report.md
 ```
 
 Emit machine-readable output:
@@ -128,8 +131,8 @@ Compare two declared MCP server metadata snapshots without network or credential
 
 ```bash
 agent-permission-diff server-card-diff \
-  --base-file snapshots/v1/server.json \
-  --head-file snapshots/v2/server.json \
+  --base-file tests/fixtures/server_card/current-base.server.json \
+  --head-file tests/fixtures/server_card/current-head.server.json \
   --json server-card-drift.json \
   --markdown server-card-drift.md \
   --sarif server-card-drift.sarif
@@ -148,8 +151,8 @@ workflow:
 ```bash
 agent-permission-diff simulate \
   --command 'gh pr create --repo saagpatel/example' \
-  --workflow .github/workflows/deploy.yml \
-  --mcp-config .mcp.json \
+  --workflow .github/workflows/ci.yml \
+  --mcp-config tests/fixtures/app/hook-mcp-instructions/head/.mcp.json \
   --scenario github-actions-oidc-deploy \
   --json simulation.json \
   --json-summary simulation-summary.json \
@@ -186,8 +189,9 @@ Use `simulate --json-schema summary`, `simulate --json-schema full`, or
 simulator artifacts. Schema export is also static and exits before reading input files or
 running probes.
 
-Use `simulate --validate-json PATH --schema summary|full|contract` to validate an existing
-simulation artifact offline against the exported schemas. The command prints JSON with
+Use `simulate --validate-json simulation-summary.json --schema summary` to validate the
+summary offline. Use `--schema full` or `--schema contract` for those artifacts.
+The command prints JSON with
 `valid` and `errors`, exits `0` for valid artifacts, and exits `2` for validation failures.
 See [Simulation CI Recipe](docs/simulation-ci-recipe.md) for a static GitHub Actions
 pattern that generates, validates, and routes a simulation summary.
@@ -198,9 +202,9 @@ that can collapse fork isolation into privileged token or secret exposure. Obvio
 non-fork guards such as `github.event.pull_request.head.repo.fork == false` are recorded
 as mitigating evidence while still requiring guard review.
 
-The simulator records explicit and inherited `GITHUB_TOKEN` permission posture. Workflows
-or jobs that omit `permissions` are reported as inherited live defaults, with follow-up
-gaps for repository or organization default token settings. Broad `permissions: write-all`
+The simulator records explicit and inherited `GITHUB_TOKEN` permissions. Jobs that omit
+`permissions` inherit the workflow setting. If the workflow also omits it, the report
+calls for checking repository or organization defaults. Broad `permissions: write-all`
 and jobs that inherit write-capable workflow permissions are called out separately.
 
 Reusable workflow and action trust boundaries are also classified. Static reports call out
@@ -246,15 +250,15 @@ and separates the result into `live_probe_evidence`. It does not call GitHub, re
 credentials, dispatch workflows, mutate checks, or deploy:
 
 ```bash
+printf '%s\n' '{"check_runs":[{"name":"CI","status":"completed","conclusion":"success"}]}' | \
 agent-permission-diff simulate \
   --probe github-actions-readonly \
-  --github-actions-probe-json checks.json \
+  --github-actions-probe-json - \
   --json simulation.json
 ```
 
-If `--probe github-actions-readonly` is supplied without
-`--github-actions-probe-json`, the simulator records a live-probe-needed gap instead of
-performing a lookup.
+With `--probe github-actions-readonly` alone, the simulator records the missing snapshot
+as a live-probe-needed gap.
 
 An explicit credential-aware read-only mode can fetch GitHub Actions metadata from
 `api.github.com` when all live context is supplied:
@@ -264,15 +268,16 @@ agent-permission-diff simulate \
   --probe github-actions-readonly \
   --github-actions-live \
   --github-repository saagpatel/agent-permission-diff-bot \
-  --github-ref HEAD_SHA_OR_BRANCH \
+  --github-ref main \
   --github-token-env GITHUB_TOKEN \
   --json simulation.json
 ```
 
 Live GitHub probing is off unless `--github-actions-live` is present. The live adapter
-only sends GET requests to `api.github.com`, requires `--github-repository` and
-`--github-ref`, caps request timeouts at 30 seconds, and reports the token source as an
-environment variable name such as `env:GITHUB_TOKEN` without including the token value.
+only sends GET requests to `api.github.com`, requires `--github-repository` and either
+`--github-ref` or `--github-pull-number`, and caps request timeouts at 30 seconds.
+It reports the token source as an environment variable name such as `env:GITHUB_TOKEN`
+without including the token value.
 It does not dispatch workflows, read repository secrets, mutate checks, create comments,
 deploy, or contact arbitrary hosts. If `--github-pull-number` is supplied without
 `--github-ref`, the simulator first performs one additional GET request to resolve the PR
@@ -280,7 +285,7 @@ head SHA and records that resolution as live probe evidence. When GitHub returns
 base repository metadata, the simulator also records whether the PR is cross-repository
 and flags fork/base trust review as a live-probe-needed gap.
 
-Gate modes:
+Gate modes for completed `diff` and `server-card-diff` scans:
 
 - `observe`: records whether the threshold was met but always exits 0.
 - `warn`: exits 2 when findings meet `--fail-on`; intended for soft rollout checks.
@@ -314,21 +319,18 @@ Config Guard explains what a new allow rule really reaches (for example, that `B
 also allows `git -c alias.x='!cmd' x`) with a vendored copy of the Range allow-rule engine and
 its cited knowledge base (`src/agent_permission_diff_bot/_vendor/therange/`). That engine was
 written for a user's own, trusted config; here it reads files from pull requests, so its output
-is **experimental**. Treat "what this now allows" as a lower bound. Known limits, tracked in
+is **experimental**. Treat "what this now allows" as a lower bound. For the cases covered by
 [#56](https://github.com/saagpatel/agent-permission-diff-bot/issues/56):
 
-- An option between subcommand words, such as `Bash(gh release -R owner/repo *)` or
-  `Bash(git submodule --quiet *)`, can hide reach the engine would otherwise report. An
-  option right after the program (`Bash(git -C . *)`) is handled: it is rated as the bare
-  program.
-- Codex `.rules` files are read for plain `prefix_rule(...)` calls only. Aliased calls,
-  `**` keyword unpacking, tuple patterns and unknown decisions are skipped, not refused.
-- A few unusual literals (a very long hex integer) can fail as an error rather than an
-  unreadable-file finding, and an empty union element drops its rule.
+- The engine rates the fixed words before the first option. For example,
+  `Bash(gh release -R owner/repo *)` is rated as `gh release`, and `Bash(git -C . *)` as `git`.
+- Codex `.rules` files support plain `prefix_rule(...)` calls with literal arguments.
+  Aliased calls, argument unpacking, tuple patterns, unknown decisions, numeric pattern
+  elements and empty unions make a changed file unreadable.
 
 What does fail closed: a program the knowledge base does not know is reported as high
-("unknown reach"), never as safe; a rules file whose patterns expand past 256 commands or
-2,000 rules, or that cannot be parsed, is reported as unreadable; and aliased or oversized
+("unknown reach"), never as safe; a changed rules file with more than 256 expansions per pattern,
+more than 2,000 rules in total, or a parse error is reported as unreadable; and aliased or oversized
 skill frontmatter is reported as unreadable.
 
 ## Agent Config Guard and Swallowed checks (experimental)
@@ -352,10 +354,9 @@ App) are **experimental**. Known gaps, tracked in
 
 `agent_permission_diff_bot.limited.run_limited` runs a function in a freshly spawned child
 process under one deadline, a memory cap (`RLIMIT_AS`, enforced on Linux only) and a
-bounded JSON result (8 MiB, 200 levels deep by default), so hostile pull request input can
-exhaust only the child. The GitHub App runs both checks, and the hook-reference step, inside
-it: a child that is stopped comes back unfinished, and Config Guard then fails whatever its
-threshold. It is **experimental**. Known limits, tracked in
+bounded JSON result (8 MiB, 200 levels deep by default). The GitHub App runs both checks
+and the hook-reference step inside it. A stopped child leaves analysis unfinished,
+and Config Guard fails regardless of its threshold. It is **experimental**. Known limits, tracked in
 [#70](https://github.com/saagpatel/agent-permission-diff-bot/issues/70):
 
 - The deadline is only as strong as Python threads allow: argument encoding and the
@@ -373,17 +374,17 @@ threshold. It is **experimental**. Known limits, tracked in
 ## GitHub App (unreleased, experimental)
 
 `agent-permission-diff app serve` runs a GitHub App with two check runs and one pull request
-comment, updated in place on every push:
+comment, updated in place for the current pull request head:
 
 - **Agent Config Guard** explains what a PR now lets an agent do: new allow rules expanded
   into what they really reach (using the vendored Range knowledge base), removed deny rules,
   wider permission modes, new hooks and MCP servers, skill `allowed-tools`, Codex `.rules`, and
   new instruction lines telling agents to skip a check. Each finding has a suggested fix.
 - **Swallowed errors** finds new places where the diff catches an error and drops it, in
-  Python and TypeScript/JavaScript, ranked by what they could hide: auth, data loss, network.
+  Python and TypeScript/JavaScript, ranked by what they could hide: auth, data loss, network, or other errors.
 
 The App reads files through the API and never runs pull request code. It needs the `app`
-extra (`pip install "agent-permission-diff-bot[app]"`). Settings, and a local replay that
+extra (`pip install ".[app]"` from the repository root). Settings, and a local replay that
 proves the whole flow without network access, are in [docs/github-app.md](docs/github-app.md).
 
 **Owner steps** (they touch your GitHub account and create a private key, so they are yours;
@@ -400,14 +401,14 @@ the full walk-through is in [docs/github-app.md](docs/github-app.md#register-and
 5. Close and reopen a pull request (or push) to see the two check runs and the comment.
 
 An App that is already registered and installed needs only steps 4 and 5. No new
-permissions or events are needed for the current checks. The demo repository's seven pull
-requests cover every check; the table in the docs says which shows what.
+permissions or events are needed for the current checks. The docs map seven recorded demo
+pull requests to the checks you can replay locally.
 
 The App is **experimental**. Known limits, tracked in
 [#70](https://github.com/saagpatel/agent-permission-diff-bot/issues/70): pull requests with
-more than 300 changed files always fail Config Guard; queued events live in the server
-process, so a restart drops them (re-run the check); and the memory cap is enforced only on
-Linux.
+300 or more changed files produce an incomplete-input finding that fails Config Guard at
+its default threshold. A server restart drops queued events (re-run the check).
+Only Linux enforces the memory cap.
 
 ## GitHub Action
 
@@ -424,7 +425,7 @@ steps:
     with:
       fetch-depth: 0
 
-  - uses: saagpatel/agent-permission-diff-bot@d778c6f711d6b77399ef29430a0e06b067c0c7f5
+  - uses: saagpatel/agent-permission-diff-bot@e24165bcfd8bb5c49342c69ce573e0d698bd4a76
     with:
       mode: observe
       upload-sarif: "false"
@@ -444,7 +445,7 @@ steps:
     with:
       fetch-depth: 0
 
-  - uses: saagpatel/agent-permission-diff-bot@d778c6f711d6b77399ef29430a0e06b067c0c7f5
+  - uses: saagpatel/agent-permission-diff-bot@e24165bcfd8bb5c49342c69ce573e0d698bd4a76
     with:
       mode: observe
       comment: "true"
@@ -482,14 +483,18 @@ warning instead of masking the permission-diff result.
 | `max-severity` | Maximum finding severity from the JSON report. |
 | `findings-count` | Number of findings from the JSON report. |
 | `gate-status` | Gate decision status: `observe`, `pass`, `warn`, or `fail`. |
-| `gate-threshold-met` | Whether the maximum finding severity met the `fail-on` threshold. |
+| `gate-threshold-met` | Whether the maximum unacknowledged finding severity met the `fail-on` threshold. |
+
+`max-severity`, `findings-count`, `gate-status`, and `gate-threshold-met` are empty when
+JSON output is disabled.
 
 ## Status
 
 ### Stack
 
 - Python 3.11 and newer; Python 3.14.8 is the pinned local development interpreter.
-- uv 0.13.9 (or a later 0.13.x), Ruff, mypy, and pytest are pinned through `pyproject.toml` and `uv.lock`.
+- `pyproject.toml` constrains uv to 0.13.9 or a later 0.13.x and pins Ruff, mypy, and pytest
+  in the development dependency group recorded in `uv.lock`.
 
 ### Known risks
 
@@ -497,7 +502,7 @@ warning instead of masking the permission-diff result.
   requested. A live probe reads GitHub metadata and cannot prove repository policy, required
   reviewers, secret availability, or deployment behavior.
 - Server-card reports compare declared metadata and do not establish runtime behavior.
-- CI covers Python 3.11 through 3.14; setup-python does not yet provide Python 3.15.
+- The CI matrix covers Python 3.11 through 3.14.
 - Features listed under `Unreleased` in [CHANGELOG.md](CHANGELOG.md) are not part of a
   published release.
 

@@ -18,9 +18,9 @@ each push. Findings are ranked, and each one comes with a suggested fix.
   escaped so it cannot hide or restyle the comment.
 - It edits only a comment that carries its marker **and** was created by this App, so a
   copied marker in someone else's comment is left alone.
-- Both checks run in a separate, time- and memory-limited process (`run_limited`). A pull
-  request that makes the analysis run too long or use too much memory exhausts only that
-  process, and both checks report "did not finish" (Config Guard as `failure`).
+- Both checks run in a child process with a deadline (`run_limited`). Linux also enforces
+  a memory cap. If the child exceeds a limit, both checks report "did not finish"
+  (Config Guard as `failure`).
 - If reading the pull request fails, Config Guard reports `failure` ("did not finish")
   rather than passing; Swallowed reports `neutral`. The comment says so too, and never shows
   the all-clear line when a check crashed or read the pull request only partly.
@@ -173,7 +173,8 @@ them into the demo repository.
 ## Limits of this slice
 
 - Swallowed is static. A handler that only logs at debug level, or swallows through a
-  helper function, is not reported; a probe run that proves a finding comes next.
+  helper function, is not reported. For supported Python handlers the probe describes
+  what the caller gets by reading the handler.
 - Category ranking reads called names (`verify_token`, `db.commit`, `fetch`), so a
   wrapper with a neutral name ranks as "other".
 - Config Guard reads startup configs first, then changed agent-facing files, up to 300 per
@@ -183,8 +184,8 @@ them into the demo repository.
   than the read cap (downloads stop at the cap) is marked unread, which Config Guard
   reports as a finding rather than passing. Comparing from the merge base also means
   changes that landed on the base branch later are not blamed on the pull request.
-- A pull request with more than 300 changed files therefore always fails Config Guard
-  with an "input could not be analyzed" finding; split it, or review it by hand.
+- At 300 changed files the comparison may already be truncated. Config Guard reports
+  a high-severity incomplete-input finding, which fails the default threshold.
 - An allow rule the Range has no data on (an unknown program, an unrecognised tool) is
   reported as high: unknown reach is not treated as safe.
 - Webhook deliveries are processed in the server process; a restart drops in-flight work
