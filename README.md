@@ -268,7 +268,7 @@ agent-permission-diff simulate \
   --probe github-actions-readonly \
   --github-actions-live \
   --github-repository saagpatel/agent-permission-diff-bot \
-  --github-ref main \
+  --github-ref e24165bcfd8bb5c49342c69ce573e0d698bd4a76 \
   --github-token-env GITHUB_TOKEN \
   --json simulation.json
 ```
